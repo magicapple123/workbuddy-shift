@@ -276,8 +276,10 @@ jobs:
             cp "$SETUP_MATCHES.sig" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe.sig"
           fi
           # updater 用的签名副本由下一步按 UPDATE_ARCHIVE_NAME 生成；这里只放用户直接下载的安装包。
+          # Linux 的 deb/AppImage 由下方 updater 步骤按统一资产名复制，
+          # 这里只收 macOS/Windows 的用户下载包，避免 Release 出现两份同名产物。
           find "$BUNDLE_ROOT" -type f \
-            \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' \) \
+            \( -name '*.dmg' -o -name '*.msi' \) \
             -exec cp {} dist-bin/ \;
           # mac：纯命令行打 dmg（CI 无 Finder，Tauri 自带的 bundle_dmg.sh 会失败）
           if [ "${{ matrix.bundles }}" = "app" ]; then
