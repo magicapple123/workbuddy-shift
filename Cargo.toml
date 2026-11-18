@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "crates/wb-shift-core",
+    "crates/wb-shift-server",
+    "crates/companion-core",
+    "crates/companion-runtime",
+    "crates/companion-desktop",
+    "src-tauri",
+]
+resolver = "2"
+
+# 六个 crate 共享的包元数据。版本仍由各 crate 显式继承，发布时可整体升版。
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# 最低验证版本：依赖声明的最高 MSRV 是 1.89（notify-rust），本仓库代码用
+# `cargo +1.95 check --workspace --all-targets` 实测通过，据此取 1.95。
+# 升级依赖或使用新语法时先在本机旧工具链复验，再改这个值（CI 用 stable 构建）。
+rust-version = "1.95"
+license = "MIT"
+authors = ["WorkBuddy Shift contributors"]
+
+# 集中声明所有成员共享的 lint；各 crate 通过 `[lints] workspace = true` 继承。
+# 这里只放「六个 crate 都必须满足」的规则；错误处理约定另有两道门禁：
+#   - wb-shift-server 的 crate 级 `deny(clippy::unwrap_used, expect_used)`；
+#   - scripts/check-rust-locks.mjs 的锁中毒规则（覆盖全部生产代码）。
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+await_holding_lock = "deny"
+
+# 单一版本来源：同一依赖在多个 crate 中出现时只在这里声明一次，避免各 crate
+# 各自升级造成版本分叉。features 由各 crate 按需追加（Cargo 会取并集），
+# 因此这里只放跨 crate 必须一致的版本约束与默认 feature。
+[workspace.dependencies]
+serde = "1"
+serde_json = "1"
+tokio = "1"
+uuid = "1"
+chrono = "0.4"
+rusqlite = "0.32"
+base64 = "0.22"
+fs2 = "0.4"
+url = "2"
+ureq = { version = "2", default-features = false, features = ["json"] }

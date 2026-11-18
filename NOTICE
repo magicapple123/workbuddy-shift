@@ -1,0 +1,24 @@
+WorkBuddy Shift
+===============
+
+This product is a derivative work based on:
+
+  workbuddy-switch
+  https://github.com/changexbc/workbuddy-switch
+  Licensed under the MIT License
+  Copyright (c) 2026 wb-switch
+
+Modifications and new code:
+  Copyright (c) 2026 WorkBuddy Shift contributors
+
+Bundled third-party components retain their own licenses:
+
+  crates/companion-core, crates/companion-runtime, crates/companion-desktop
+  and companion-ui/           代码源自 agent-companion（MIT License，
+                              Copyright (c) 2026 agent-companion）。
+                              许可文本：crates/companion-core/LICENSE；
+                              companion-ui/LICENSE、crates/companion-runtime/LICENSE、
+                              crates/companion-desktop/LICENSE 为同一份副本。
+
+"WorkBuddy" and "CodeBuddy" are trademarks of Tencent. This project is not
+affiliated with, endorsed by, or sponsored by Tencent.

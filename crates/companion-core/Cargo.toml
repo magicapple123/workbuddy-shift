@@ -1,0 +1,20 @@
+[package]
+name = "companion-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "会话监控与状态归一化（WorkBuddy Shift 内置悬浮窗）"
+license.workspace = true
+
+# 共享 lint 见根 Cargo.toml 的 [workspace.lints]。
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
+chrono.workspace = true
+ureq.workspace = true
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+base64.workspace = true
+fs2.workspace = true

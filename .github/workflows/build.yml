@@ -1,0 +1,504 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Which platform to build. win-x64 produces a test installer without a GitHub Release."
+        type: choice
+        default: all
+        options:
+          - all
+          - win-x64
+          - mac-arm64
+          - mac-x64
+          - linux-x64
+          - linux-arm64
+
+permissions:
+  contents: write
+
+jobs:
+  select-matrix:
+    name: Select platforms
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # tag 发布前先核对版本：tag 去掉 v 后必须等于根 Cargo.toml 的 [workspace.package]
+      # version 与 tauri.conf.json 的 version。不一致就直接失败，避免发出版本号对不上的包。
+      - name: Validate tag version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(grep -A6 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' | tr -d '\r')
+          TAURI_VER=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | tr -d '\r')
+          echo "tag=$TAG_VER cargo=$CARGO_VER tauri=$TAURI_VER"
+          if [ -z "$CARGO_VER" ] || [ -z "$TAURI_VER" ]; then
+            echo "error: 无法读取 Cargo.toml / tauri.conf.json 的版本号" >&2
+            exit 1
+          fi
+          if [ "$TAG_VER" != "$CARGO_VER" ] || [ "$TAG_VER" != "$TAURI_VER" ]; then
+            echo "error: tag 版本必须等于 Cargo.toml [workspace.package] version 与 tauri.conf.json version" >&2
+            exit 1
+          fi
+
+      - id: set
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          all_platforms = [
+              {
+                  "name": "mac-arm64",
+                  "os": "macos-14",
+                  "target": "aarch64-apple-darwin",
+                  "cli_bin": "workbuddy-shift-darwin-arm64",
+                  "platform_tag": "darwin-arm64",
+                  "bundles": "app",
+                  "update_os": "macos",
+                  "update_arch": "aarch64",
+                  "update_bundle": "macos",
+                  "update_archive_name": "workbuddy-shift-macos-aarch64.app.tar.gz",
+              },
+              {
+                  "name": "mac-x64",
+                  "os": "macos-14",
+                  "target": "x86_64-apple-darwin",
+                  "cli_bin": "workbuddy-shift-darwin-x64",
+                  "platform_tag": "darwin-x64",
+                  "bundles": "app",
+                  "update_os": "macos",
+                  "update_arch": "x86_64",
+                  "update_bundle": "macos",
+                  "update_archive_name": "workbuddy-shift-macos-x86_64.app.tar.gz",
+              },
+              {
+                  "name": "win-x64",
+                  "os": "windows-latest",
+                  "target": "x86_64-pc-windows-msvc",
+                  "cli_bin": "workbuddy-shift-win32-x64.exe",
+                  "platform_tag": "win32-x64",
+                  "bundles": "nsis",
+                  "update_os": "windows",
+                  "update_arch": "x86_64",
+                  "update_bundle": "nsis",
+                  "update_archive_name": "workbuddy-shift-windows-x86_64-setup.exe",
+              },
+              {
+                  "name": "linux-x64",
+                  "os": "ubuntu-latest",
+                  "target": "x86_64-unknown-linux-gnu",
+                  "cli_bin": "workbuddy-shift-linux-x64",
+                  "platform_tag": "linux-x64",
+                  "bundles": "deb,appimage",
+                  "update_os": "linux",
+                  "update_arch": "x86_64",
+                  "update_bundle": "appimage",
+                  "update_archive_name": "workbuddy-shift-linux-x86_64.AppImage",
+              },
+          ]
+          event = os.environ.get("EVENT_NAME", "")
+          platform = (os.environ.get("PLATFORM") or "all").strip()
+          if event != "workflow_dispatch" or platform in ("", "all"):
+              selected = all_platforms
+          elif platform == "linux-arm64":
+              # 只跑 npm CLI 的 arm64 job（见 npm-linux-arm64）；build 矩阵由 job-level if 跳过。
+              # 这里仍返回完整矩阵，避免 fromJSON 得到空 include 导致工作流报错。
+              selected = all_platforms
+          else:
+              selected = [p for p in all_platforms if p["name"] == platform]
+              if not selected:
+                  raise SystemExit(f"unknown platform: {platform}")
+          matrix = json.dumps({"include": selected})
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write("matrix<<EOF\n")
+              f.write(matrix + "\n")
+              f.write("EOF\n")
+          PY
+
+  build:
+    name: ${{ matrix.name }}
+    needs: select-matrix
+    # 手动只验证 linux-arm64 CLI 时跳过桌面矩阵（select-matrix 仍返回完整矩阵，
+    # 避免空 include 让工作流报错）。
+    if: github.event_name != 'workflow_dispatch' || inputs.platform != 'linux-arm64'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          # 该 action 默认给 RUSTFLAGS 加 -D warnings，会把内置会话悬浮窗组件
+          # （crates/companion-*）在 linux cfg 下的 dead_code 告警升级成错误。发版构建
+          # 不需要这层门禁（自有代码的告警由 test.yml 的 lint job 把关）。
+          rustflags: ""
+
+      # cargo 缓存：依赖 + 编译产物，增量编译大幅提速（Cargo.lock 不变时命中）
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      # dmgbuild writes Finder metadata without opening Finder, so DMGs keep
+      # their large icons and drag arrow in headless macOS runners.
+      - name: Set up Python for dmgbuild
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dmgbuild (macOS only)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          DMGBUILD_VENV="$RUNNER_TEMP/dmgbuild-venv"
+          python3 -m venv "$DMGBUILD_VENV"
+          "$DMGBUILD_VENV/bin/python" -m pip install --disable-pip-version-check --no-input \
+            "dmgbuild==1.6.7"
+          echo "$DMGBUILD_VENV/bin" >> "$GITHUB_PATH"
+
+      # 前端构建产物（CLI 二进制 rust-embed 嵌入 + Tauri App 使用）
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      # CLI 二进制
+      - name: Build server binary
+        shell: bash
+        run: |
+          cargo build -p wb-shift-server --release --target ${{ matrix.target }}
+          mkdir -p dist-bin
+
+      # 打包本平台包并发布到 npm（CLI 二进制走 npm registry，Release 只留桌面 App）
+      # 仅 tag 发布；手动触发（例如只打 Windows 试装包）不得 npm publish。
+      # 仓库变量 PUBLISH_NPM=false 时整段跳过：registry 维护/故障期间仍可把桌面 App 发出去，
+      # 恢复后把变量改回 true 重跑本工作流即可补发 npm（脚本幂等，Release 资产会覆盖）。
+      - name: Publish platform package
+        if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM != 'false'
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_DIR="npm/platform/workbuddy-shift-${{ matrix.platform_tag }}"
+          # 用 tag 版本同步 platform 包版本（git 里的可能滞后）
+          VER="${GITHUB_REF_NAME#v}"
+          perl -pi -e "s/\"version\": \"[0-9.]+\"/\"version\": \"$VER\"/" "$PKG_DIR/package.json"
+          mkdir -p "$PKG_DIR/bin"
+          SRC="target/${{ matrix.target }}/release/workbuddy-shift"
+          [ -f "$SRC.exe" ] && SRC="$SRC.exe"
+          cp "$SRC" "$PKG_DIR/bin/${{ matrix.cli_bin }}"
+          cd "$PKG_DIR"
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
+          npm publish --access public --registry=https://registry.npmjs.org
+
+      # 桌面 App（mac app / nsis exe / deb + AppImage）
+      # 仓库变量 PUBLISH_APP=false 时整段跳过：纯 npm/CLI 改动可只发 npm 不发桌面 App；
+      # 恢复为 true 后重跑本工作流即可幂等补发（与 PUBLISH_NPM 对称）。
+      - name: Build desktop app
+        if: vars.PUBLISH_APP != 'false'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AGENT_COMPANION_TARGET: ${{ matrix.target }}
+        run: |
+          # 版本单一来源：根 Cargo.toml 的 [workspace.package] version
+          # （src-tauri/Cargo.toml 已改为 version.workspace = true，不再单独写版本）。
+          VER="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VER" =~ ^[0-9] ]]; then
+            VER=$(grep -A6 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' | tr -d '\r')
+          fi
+          if [ -z "$VER" ]; then
+            echo "error: 无法确定版本号（tag 与 Cargo.toml [workspace.package] version 均未取到）" >&2
+            exit 1
+          fi
+          echo "build version: $VER"
+          BUNDLE_ROOT="target/${{ matrix.target }}/release/bundle"
+          # cargo cache 会保留旧 NSIS/DMG/AppImage；不清理就会把 0.1.17 一类产物带进 Release。
+          rm -rf "$BUNDLE_ROOT"
+          pnpm run tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          echo "bundle after build:"
+          find "$BUNDLE_ROOT" -type f | sort || true
+          # Tauri 2 的产物名由 productName（"WorkBuddy Shift"，含空格）决定：
+          #   macOS → <productName>.app；Windows NSIS → <productName>_<version>_<arch>-setup.exe。
+          # 一律用 find 取真实路径，再按 Release/README 约定改成 workbuddy-shift_* 资产名。
+          if [ "${{ matrix.bundles }}" = "nsis" ]; then
+            SETUP_MATCHES=$(find "$BUNDLE_ROOT/nsis" -maxdepth 1 -type f -name '*-setup.exe')
+            SETUP_COUNT=$(printf '%s\n' "$SETUP_MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$SETUP_COUNT" != 1 ]; then
+              echo "error: expected exactly 1 NSIS installer, found $SETUP_COUNT" >&2
+              printf '%s\n' "$SETUP_MATCHES" >&2
+              find "$BUNDLE_ROOT" -type f | sort >&2 || true
+              exit 1
+            fi
+            # 数量对但版本可能被 cargo cache 带成旧的：文件名必须含 _<tag 版本>_。
+            case "$SETUP_MATCHES" in
+              *"_${VER}_"*-setup.exe) ;;
+              *)
+                echo "error: installer version mismatch, expected ${VER}: $SETUP_MATCHES" >&2
+                exit 1
+                ;;
+            esac
+            test -f "$SETUP_MATCHES.sig"
+            cp "$SETUP_MATCHES" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe"
+            cp "$SETUP_MATCHES.sig" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe.sig"
+          fi
+          # updater 用的签名副本由下一步按 UPDATE_ARCHIVE_NAME 生成；这里只放用户直接下载的安装包。
+          find "$BUNDLE_ROOT" -type f \
+            \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' \) \
+            -exec cp {} dist-bin/ \;
+          # mac：纯命令行打 dmg（CI 无 Finder，Tauri 自带的 bundle_dmg.sh 会失败）
+          if [ "${{ matrix.bundles }}" = "app" ]; then
+            APP_MATCHES=$(find "$BUNDLE_ROOT/macos" -maxdepth 1 -type d -name '*.app')
+            APP_COUNT=$(printf '%s\n' "$APP_MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$APP_COUNT" != 1 ]; then
+              echo "error: expected exactly 1 .app bundle, found $APP_COUNT" >&2
+              printf '%s\n' "$APP_MATCHES" >&2
+              exit 1
+            fi
+            sh scripts/make-dmg.sh "$VER" "${{ matrix.update_arch }}" "$APP_MATCHES"
+            cp "workbuddy-shift_${VER}_${{ matrix.update_arch }}.dmg" dist-bin/
+          fi
+
+      - name: Generate updater manifest
+        if: matrix.update_arch != '' && vars.PUBLISH_APP != 'false'
+        shell: bash
+        env:
+          UPDATE_OS: ${{ matrix.update_os }}
+          UPDATE_ARCH: ${{ matrix.update_arch }}
+          UPDATE_ARCHIVE_NAME: ${{ matrix.update_archive_name }}
+          BUNDLE_DIR: target/${{ matrix.target }}/release/bundle/${{ matrix.update_bundle }}
+        run: |
+          # 版本单一来源：根 Cargo.toml 的 [workspace.package] version
+          VER="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VER" =~ ^[0-9] ]]; then
+            VER=$(grep -A6 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' | tr -d '\r')
+          fi
+          if [ -z "$VER" ]; then
+            echo "error: 无法确定版本号（tag 与 Cargo.toml [workspace.package] version 均未取到）" >&2
+            exit 1
+          fi
+          echo "updater bundle dir: $BUNDLE_DIR (version $VER)"
+          ls -la "$BUNDLE_DIR" || true
+          if [ "$UPDATE_OS" = "linux" ]; then
+            # linux 有 deb / AppImage 两种安装形态：各自收集归档与签名，再生成两份 manifest。
+            # 本分支自行完成全部产物收集，不走下方 macOS/Windows 的公共尾部。
+            LINUX_ROOT="$(dirname "$BUNDLE_DIR")"
+            APPIMAGE="$(find "$LINUX_ROOT/appimage" -maxdepth 1 -type f -name '*.AppImage' | sort)"
+            DEB="$(find "$LINUX_ROOT/deb" -maxdepth 1 -type f -name '*.deb' | sort)"
+            APPIMAGE_COUNT=$(printf '%s\n' "$APPIMAGE" | sed '/^$/d' | wc -l | tr -d ' ')
+            DEB_COUNT=$(printf '%s\n' "$DEB" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$APPIMAGE_COUNT" != 1 ] || [ "$DEB_COUNT" != 1 ]; then
+              echo "error: expected exactly 1 .AppImage and 1 .deb, found $APPIMAGE_COUNT / $DEB_COUNT" >&2
+              printf 'appimage: %s\ndeb: %s\n' "$APPIMAGE" "$DEB" >&2
+              exit 1
+            fi
+            if [ ! -f "$APPIMAGE.sig" ] || [ ! -f "$DEB.sig" ]; then
+              echo "error: missing signature for $APPIMAGE or $DEB" >&2
+              exit 1
+            fi
+            cp "$APPIMAGE" "dist-bin/workbuddy-shift-linux-${UPDATE_ARCH}.AppImage"
+            cp "$APPIMAGE.sig" "dist-bin/workbuddy-shift-linux-${UPDATE_ARCH}.AppImage.sig"
+            cp "$DEB" "dist-bin/workbuddy-shift-linux-${UPDATE_ARCH}.deb"
+            cp "$DEB.sig" "dist-bin/workbuddy-shift-linux-${UPDATE_ARCH}.deb.sig"
+            UPDATE_VERSION="$VER" UPDATE_OS=linux UPDATE_ARCH="$UPDATE_ARCH" UPDATE_BUNDLE=appimage \
+              UPDATE_KEYS="linux-${UPDATE_ARCH}-appimage linux-${UPDATE_ARCH}" \
+              UPDATE_ARCHIVE_NAME="workbuddy-shift-linux-${UPDATE_ARCH}.AppImage" \
+              UPDATE_JSON_NAME="latest-linux-${UPDATE_ARCH}.json" \
+              BUNDLE_DIR="$LINUX_ROOT/appimage" sh scripts/gen-update-json.sh
+            UPDATE_VERSION="$VER" UPDATE_OS=linux UPDATE_ARCH="$UPDATE_ARCH" UPDATE_BUNDLE=deb \
+              UPDATE_KEYS="linux-${UPDATE_ARCH}-deb" \
+              UPDATE_ARCHIVE_NAME="workbuddy-shift-linux-${UPDATE_ARCH}.deb" \
+              UPDATE_JSON_NAME="latest-linux-deb-${UPDATE_ARCH}.json" \
+              BUNDLE_DIR="$LINUX_ROOT/deb" sh scripts/gen-update-json.sh
+            cp "$LINUX_ROOT/appimage/latest-linux-${UPDATE_ARCH}.json" dist-bin/
+            cp "$LINUX_ROOT/deb/latest-linux-deb-${UPDATE_ARCH}.json" dist-bin/
+            exit 0
+          fi
+          if [ "$UPDATE_OS" = "windows" ]; then
+            # NSIS 真实文件名是 <productName>_<version>_x64-setup.exe（productName 含空格），
+            # 用 glob 取真实文件并校验数量与版本，避免签名对到旧安装包。
+            ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*-setup.exe' | sort)"
+            COUNT=$(printf '%s\n' "$ARCHIVE" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$COUNT" != 1 ]; then
+              echo "error: expected exactly 1 *-setup.exe, found $COUNT" >&2
+              printf '%s\n' "$ARCHIVE" >&2
+              exit 1
+            fi
+            case "$ARCHIVE" in
+              *"_${VER}_"*-setup.exe) ;;
+              *)
+                echo "error: installer version mismatch, expected ${VER}: $ARCHIVE" >&2
+                exit 1
+                ;;
+            esac
+          else
+            ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)"
+            COUNT=$(printf '%s\n' "$ARCHIVE" | sed '/^$/d' | wc -l | tr -d ' ')
+            if [ "$COUNT" != 1 ]; then
+              echo "error: expected exactly 1 .app.tar.gz, found $COUNT" >&2
+              printf '%s\n' "$ARCHIVE" >&2
+              exit 1
+            fi
+          fi
+          if [ ! -f "$ARCHIVE" ] || [ ! -f "$ARCHIVE.sig" ]; then
+            echo "error: missing signed updater archive ($ARCHIVE)" >&2
+            exit 1
+          fi
+          cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
+          cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
+          if [ "$UPDATE_OS" = "windows" ]; then
+            cmp -s "dist-bin/$UPDATE_ARCHIVE_NAME" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe"
+          fi
+          UPDATE_VERSION="$VER" sh scripts/gen-update-json.sh
+          MANIFEST="$BUNDLE_DIR/latest-${UPDATE_OS}-${UPDATE_ARCH}.json"
+          test -f "$MANIFEST"
+          cp "$MANIFEST" dist-bin/
+
+      - uses: actions/upload-artifact@v4
+        if: vars.PUBLISH_APP != 'false'
+        with:
+          name: ${{ matrix.name }}
+          path: dist-bin/
+          if-no-files-found: error
+
+  # npm / webui 的 linux-arm64 CLI：只发布平台包，不产出桌面安装包。
+  #
+  # 为什么与 build 矩阵分开：新增的 ARM64 目标不应该把四平台桌面发布 / GitHub Release
+  # 一起拖垮；但 publish-main 仍依赖它，保证主包不会引用尚未发布的平台包。
+  # 用 GitHub 公共仓库的 arm64 runner 原生编译，避免交叉编译 rusqlite bundled / zbus。
+  npm-linux-arm64:
+    name: npm CLI (linux-arm64)
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux-arm64'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # 与 build 矩阵一致：发版构建不把上游组件的告警升级成错误。
+          rustflags: ""
+
+      # 缓存键带 arch：x64 / arm64 的 runner.os 都是 Linux，共用键会恢复错架构的 target。
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-cli-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-cli-
+
+      # server 二进制用 rust-embed 嵌入 dist/，先构建前端。
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build server binary
+        run: cargo build -p wb-shift-server --release --locked
+
+      # 防止 runner 标签变更时静默产出 x64 二进制、再用 linux-arm64 的名义发布。
+      - name: Verify binary architecture
+        run: |
+          test "$(uname -m)" = "aarch64"
+          file target/release/workbuddy-shift | grep -q "ARM aarch64"
+
+      # 与 build 矩阵的平台包发布同构：tag 版本同步、复制二进制、npm publish。
+      - name: Publish platform package
+        if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM != 'false'
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_DIR="npm/platform/workbuddy-shift-linux-arm64"
+          VER="${GITHUB_REF_NAME#v}"
+          perl -pi -e "s/\"version\": \"[0-9.]+\"/\"version\": \"$VER\"/" "$PKG_DIR/package.json"
+          mkdir -p "$PKG_DIR/bin"
+          cp "target/release/workbuddy-shift" "$PKG_DIR/bin/workbuddy-shift-linux-arm64"
+          cd "$PKG_DIR"
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
+          npm publish --access public --registry=https://registry.npmjs.org
+
+  # 所有平台包发布成功后，发布主包（optionalDependencies 引用平台包）
+  publish-main:
+    name: Publish npm main package
+    needs: [build, npm-linux-arm64]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Publish main package
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
+          npm publish --access public --registry=https://registry.npmjs.org
+
+  release:
+    name: Publish release assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_APP != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge updater manifests
+        env:
+          # 缺平台是静默故障（Linux 曾因此 18 个版本收不到更新），合并后强制校验键齐全
+          REQUIRED_PLATFORMS: darwin-aarch64,darwin-x86_64,windows-x86_64-nsis,windows-x86_64,linux-x86_64,linux-x86_64-deb,linux-x86_64-appimage
+        run: python3 scripts/merge-update-manifests.py artifacts
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

@@ -1,0 +1,215 @@
+name: test
+
+# 测试必须独立于发布流程：build.yml 仅由 tag push / workflow_dispatch 触发，
+# 测试若挂在它下面，就只在发版时执行——2026-09 的 Windows「os error 5」回归
+# 正是这样漏到 0.1.43 的。本 workflow 在 push 与 PR 上即触发。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-tests:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 三平台结果一次跑齐：任一平台失败不阻塞其余平台出结果。
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # 与 build.yml 分开的 key 前缀（那边是 release profile 产物），
+      # restore-keys 回落到它的缓存，以复用依赖编译产物。
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      # 只跑 core：零 tauri 依赖，不需要 webkit / npm / 前端 dist。
+      # 不传 --target，用 runner 原生 target——build.yml 的 mac-x64 是 arm runner 上
+      # 交叉编译 x86_64，跑测试需要 Rosetta，不适用于本 job。
+      - name: Run tests
+        run: cargo test -p wb-shift-core
+
+      # companion-core / companion-runtime 不依赖 tauri/webkit，三平台都能跑。
+      # 此前 CI 从未执行这 90+ 个测试；设置/适配器的回归只有这里能拦住。
+      - name: Companion tests
+        run: cargo test -p companion-core -p companion-runtime
+
+      # linux 专属 cfg 分支只在 ubuntu 上展开（macOS 侧由 lint job 覆盖）。
+      # rust-embed 要求 #[folder] 目录存在，先建 dist 占位（前端产物由 build.yml 产出）。
+      # companion-core / companion-runtime 不依赖 tauri/webkit，一并纳入 Linux cfg 的 clippy；
+      # companion-desktop 依赖 webkit，只在 macOS lint job 检查（避免 ubuntu 缺系统库）。
+      - name: Clippy (linux cfg)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cargo clippy -p wb-shift-core -p wb-shift-server -p companion-core -p companion-runtime --all-targets --no-deps -- -D warnings
+
+      # Windows cfg 分支此前没有门禁。rust-embed 需要 dist 目录存在，先建占位。
+      - name: Clippy (windows cfg)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          cargo clippy -p wb-shift-core -p wb-shift-server --all-targets --no-deps -- -D warnings
+
+  # 前端类型、格式与 lint 门禁。跑在 macOS 上：clippy 按宿主平台展开 cfg 分支，
+  # 与开发者本机一致，本地全绿即 CI 全绿。linux 专属分支由 rust-tests 的 ubuntu
+  # job 覆盖，windows cfg 由 rust-tests 的 windows job 覆盖。
+  # clippy 必须带 --no-deps：内置会话悬浮窗组件（crates/companion-*）从上游迁移而来，
+  # 其平台相关 dead_code 告警暂不纳入本仓库门禁（测试与 typecheck 已覆盖）。
+  lint:
+    name: lint (tsc + fmt + clippy + tests + companion-ui)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm 版本由根 package.json 的 packageManager 固定；要在 setup-node 之前装，
+      # 否则 setup-node 的 cache: pnpm 找不到 pnpm 的 store 路径。
+      # 必须 v6+：自 v6.1.0 起才支持 pnpm 12（v4 装不上）。
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # 与 rust-tests 相同的 key 前缀，直接复用依赖编译产物。
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tsc 顺带产出 dist：clippy 检查 src-tauri 时 tauri-build 要求 frontendDist 存在。
+      - name: Type-check and build frontend
+        run: pnpm run build
+
+      # companion-ui 是 workspace 成员（依赖已随上面的 pnpm install 装好），
+      # typecheck/build 此前只在发版时被动执行。
+      - name: Companion UI type-check and build
+        run: |
+          pnpm --filter workbuddy-shift-companion-ui run typecheck
+          pnpm --filter workbuddy-shift-companion-ui run build:embed
+
+      # 仓库级契约：版本单一来源、Tauri command ↔ HTTP 路由 ↔ 前端 ROUTES、请求体 DTO、
+      # 生产代码锁中毒规则、演示 postMessage channel。
+      - name: Repository contract checks
+        run: |
+          node scripts/check-versions.mjs
+          node scripts/check-command-routes.mjs
+          node scripts/check-api-contract.mjs
+          node scripts/check-rust-locks.mjs
+          node scripts/check-structure.mjs
+          node scripts/check-companion-contract.mjs
+
+      # tauri-build 还要求 externalBin 存在。这里只放占位文件让编译检查通过；
+      # 真实 runtime 由 build.yml（发版）与 scripts/build-companion.mjs 产出。
+      - name: Stub companion runtime binary
+        run: |
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/companion-runtime-$(rustc -vV | sed -n "s/^host: //p")"
+
+      # workspace 级检查：cargo fmt --all 与成员清单解耦，新增 crate 自动纳入。
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # companion-core / companion-runtime / companion-desktop 一并纳入：desktop 依赖
+      # macOS/ObjC 分支，只有本 job 能展开；--no-deps 避免上游迁移代码的告警进本仓库门禁。
+      - name: Clippy
+        run: cargo clippy -p wb-shift-core -p wb-shift-server -p workbuddy-shift-desktop -p companion-core -p companion-runtime -p companion-desktop --all-targets --no-deps -- -D warnings
+
+      # server 测试（此前 rust-tests 只跑 core；含 router 级安全/SPA 回归）。
+      # 不写死用例数：新增用例时注释容易过期，失败看 job 输出即可。
+      - name: Server tests
+        run: cargo test -p wb-shift-server
+
+      # src-tauri 的测试（rust-tests 只跑 core）。
+      # 前置 dist 与 stub companion binary 已由上方步骤就位。
+      - name: Desktop app tests
+        run: cargo test -p workbuddy-shift-desktop
+
+      # 内置悬浮窗插件的平台相关测试（macOS/ObjC 分支只有这里能跑）。
+      - name: Companion desktop plugin tests
+        run: cargo test -p companion-desktop
+
+  # 最低 Rust 版本（Cargo.toml 的 [workspace.package] rust-version）必须真的能编译。
+  # 只检查不依赖 Tauri/webkit 的四个 crate：ubuntu runner 没有 webkit2gtk 开发包，
+  # 且 tauri 构建还要求 frontendDist/externalBin 产物。
+  # setup-rust-toolchain 默认给 RUSTFLAGS 加 -D warnings，这里显式关闭：
+  # msrv job 只验证「旧编译器能编过」，历史告警不属于它的职责。
+  msrv:
+    name: msrv (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.95"
+          rustflags: ""
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-1.95-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-1.95-
+
+      # rust-embed 要求 #[folder = "../../dist/"] 存在；前端产物由 lint job 构建。
+      - name: Check minimum supported Rust version
+        run: |
+          mkdir -p dist
+          cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p companion-runtime --all-targets
+
+  # 前端行为测试：纯逻辑单测（node 环境），不依赖 Rust 工具链。
+  frontend-tests:
+    name: frontend-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm test

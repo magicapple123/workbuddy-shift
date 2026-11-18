@@ -1,0 +1,367 @@
+//! CodeBuddy IDE 数据源：会话索引扫描、请求去重与 IDE 聚合。
+
+use super::*;
+
+/// CodeBuddy IDE 的数据根（`<home>/…/CodeBuddyExtension/Data`）。
+///
+/// 与登录态同源（`variant::extension_data_dir_at`）：早期实现用 `dirs::data_local_dir()`
+/// 自己拼路径，不认 `WB_SHIFT_HOME`，于是沙箱里 IDE 一栏的用量读的是真实用户数据。
+pub(super) fn codebuddy_extension_data_dir_at(home: &Path) -> PathBuf {
+    crate::modules::variant::extension_data_dir_at(home, HostOs::current())
+}
+
+pub(super) fn is_ide_conversation_index(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("index.json")
+        && path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("history")
+}
+
+pub(super) fn ide_index_files(root: &Path, output: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // 同 `files()`：目录判定优先用目录项自带的类型，省掉一次 stat。
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let path = entry.path();
+        if is_dir || path.is_dir() {
+            let name = path.file_name().and_then(|name| name.to_str());
+            // Message bodies contain chat content and must not be scanned.
+            // Checkpoints and the shared Public bucket are unrelated to usage.
+            if !matches!(
+                name,
+                Some("messages" | "check-point" | "backups" | "Public")
+            ) {
+                ide_index_files(&path, output);
+            }
+        } else if is_ide_conversation_index(&path) {
+            output.push(path);
+        }
+    }
+}
+
+pub(super) fn decode_genie_workspace(name: &str) -> Option<String> {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let try_decode = |value: &str| -> Option<String> {
+        let padded = match value.len() % 4 {
+            0 => value.to_string(),
+            remainder => format!("{value}{}", "=".repeat(4 - remainder)),
+        };
+        let bytes = engine.decode(padded).ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.contains('\0') {
+            return None;
+        }
+        Some(trimmed.to_string())
+    };
+    try_decode(name)
+        .or_else(|| try_decode(&name.replace('_', "/")))
+        .or_else(|| try_decode(&name.replace('_', "+")))
+}
+
+pub(super) fn ide_project_by_session() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(root) = crate::modules::vscode_cn_inject::codebuddy_cn_data_dir().map(|dir| {
+        dir.join("User")
+            .join("globalStorage")
+            .join("tencent-cloud.coding-copilot")
+            .join("genie-history")
+    }) else {
+        return map;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let folder = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let project = decode_genie_workspace(folder)
+            .as_deref()
+            .map(Path::new)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && name.len() <= 120)
+            .unwrap_or("未知项目")
+            .to_string();
+        let Ok(conversations) = std::fs::read_dir(path.join("conversations")) else {
+            continue;
+        };
+        for conversation in conversations.flatten() {
+            if let Some(id) = conversation.file_name().to_str() {
+                if !id.is_empty() {
+                    map.insert(id.to_string(), project.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+pub(super) fn ide_workspace_meta(conv_index: &Path, conv_id: &str) -> (Option<String>, String) {
+    let Some(ws_index) = conv_index
+        .parent()
+        .and_then(|parent| parent.parent())
+        .map(|parent| parent.join("index.json"))
+    else {
+        return (None, "未知模型".to_string());
+    };
+    let Ok(text) = std::fs::read_to_string(ws_index) else {
+        return (None, "未知模型".to_string());
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return (None, "未知模型".to_string());
+    };
+    let Some(conversations) = value.get("conversations").and_then(Value::as_array) else {
+        return (None, "未知模型".to_string());
+    };
+    for conversation in conversations {
+        if conversation.get("id").and_then(Value::as_str) != Some(conv_id) {
+            continue;
+        }
+        let title = non_empty_text(conversation.get("name"))
+            .or_else(|| non_empty_text(conversation.get("title")));
+        let model = non_empty_text(conversation.get("selectedModelId"))
+            .or_else(|| non_empty_text(conversation.get("modelId")))
+            .or_else(|| non_empty_text(conversation.get("model")))
+            .unwrap_or_else(|| "未知模型".to_string());
+        return (title, model);
+    }
+    (None, "未知模型".to_string())
+}
+
+pub(super) fn ide_request_usage(request: &Value) -> Option<Usage> {
+    let object = request.get("usage")?.as_object()?;
+    field(object, &["inputTokens", "input_tokens", "prompt_tokens"])?;
+    Some(Usage {
+        input: field(object, &["inputTokens", "input_tokens", "prompt_tokens"]).unwrap_or(0),
+        output: field(
+            object,
+            &["outputTokens", "output_tokens", "completion_tokens"],
+        )
+        .unwrap_or(0),
+        read: field(
+            object,
+            &[
+                "cacheTokens",
+                "cacheReadInputTokens",
+                "cache_read_input_tokens",
+            ],
+        )
+        .unwrap_or(0),
+        write: positive_field(
+            object,
+            &[
+                "cachedWriteTokens",
+                "cacheWriteInputTokens",
+                "cache_write_input_tokens",
+                "cache_creation_input_tokens",
+            ],
+        )
+        .unwrap_or(0),
+    })
+}
+
+pub(super) fn ide_request_timestamp(request: &Value) -> Option<i64> {
+    timestamp(request).or_else(|| {
+        request.get("startedAt").and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|n| i64::try_from(n).ok()))
+                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+        })
+    })
+}
+
+/// 单条请求的指纹：优先「时间戳 + 用量」，缺时间戳时退回请求 id。
+///
+/// 副本之间是逐字重放——时间戳与用量都不变——所以这个指纹可以直接当并集去重的键；
+/// 两者都没有就返回 `None`（不进并集，按原样计数，实测不存在这种记录）。
+pub(super) fn ide_request_fingerprint(
+    request: &Value,
+    usage: &Usage,
+    timestamp: Option<i64>,
+) -> Option<String> {
+    Some(match timestamp {
+        Some(timestamp) => format!(
+            "{timestamp}:{}:{}:{}:{}",
+            usage.input, usage.output, usage.read, usage.write
+        ),
+        None => non_empty_text(request.get("id"))?.to_string(),
+    })
+}
+
+/// 会话 id：会话目录名。副本会被重随机 id，所以它**不是**会话身份（见 [`ide_file_weight`]）。
+pub(super) fn ide_session_id(path: &Path) -> String {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("未知会话")
+        .to_string()
+}
+
+/// 一份会话 index 的轻量指标：**会话指纹**（首个可计入请求的指纹，同一会话的所有副本
+/// 共享它）、可计入的请求条数、token 总量。
+///
+/// 切号复制会让同一会话在多个账号数据目录下各留一份：副本整份重放父历史，之后各自继续
+/// 追加——所以各份长短不一、内容并不完全相同，会话 id 也可能被重随机（插件侧
+/// `CopyIdPolicy::AlwaysNew`）。会话身份因此不能按目录名判，只能按「同一个起点请求」判。
+/// 指标里的条数/总量用于挑出最完整的那份，作为该会话的标题、模型与项目归属。
+pub(super) fn ide_file_weight(path: &Path) -> Option<(String, usize, u64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    let requests = value.get("requests")?.as_array()?;
+    let mut key: Option<String> = None;
+    let mut count = 0usize;
+    let mut total = 0u64;
+    for request in requests {
+        let Some(usage) = ide_request_usage(request) else {
+            continue;
+        };
+        if key.is_none() {
+            key = ide_request_fingerprint(request, &usage, ide_request_timestamp(request));
+        }
+        count += 1;
+        total = total.saturating_add(usage_total(usage));
+    }
+    Some((key?, count, total))
+}
+
+/// 把一个会话（`requests` 是它的某一份副本）里可计入的请求并入统计。
+///
+/// `seen` 按请求指纹去重、跨副本共享：副本重放父历史时带的是原始时间戳，所以并集
+/// 既不会把历史日期重复抬高，也不会丢掉各副本复制后各自追加的请求。指纹缺失的记录
+/// 一律计入。
+pub(super) fn collect_ide_requests(
+    collector: &mut SourceCollector,
+    requests: &[Value],
+    cutoff: Option<i64>,
+    model_name: &str,
+    project: &str,
+    seen: &mut HashSet<String>,
+    session_totals: &mut Totals,
+) {
+    for request in requests {
+        let ts = ide_request_timestamp(request);
+        if cutoff.is_some_and(|minimum| ts.is_none_or(|value| value < minimum)) {
+            continue;
+        }
+        let Some(usage) = ide_request_usage(request) else {
+            continue;
+        };
+        if let Some(fingerprint) = ide_request_fingerprint(request, &usage, ts) {
+            // 同一请求已在另一份副本里计过。
+            if !seen.insert(fingerprint) {
+                continue;
+            }
+        }
+        session_totals.add(usage);
+        collector.add(usage, model_name, project, ts);
+    }
+}
+
+pub(super) fn ide_source(
+    root: PathBuf,
+    name: &str,
+    cutoff: Option<i64>,
+    project_by_session: &HashMap<String, String>,
+) -> Value {
+    let mut paths = Vec::new();
+    ide_index_files(&root, &mut paths);
+    paths.sort();
+
+    // 同一会话（按起点请求判身份）因切号复制可能散落在多个账号数据目录里。各份之间按
+    // 请求指纹取**并集**：父历史只算一次（副本会把历史日期回溯性抬高），副本复制后各自
+    // 追加的请求也都保留（只取「最长一份」会漏掉别的副本独有的请求）。会话标题、模型与
+    // 项目归属取最完整的那份。
+    let weights: Vec<Option<(String, usize, u64)>> =
+        paths.iter().map(|path| ide_file_weight(path)).collect();
+    let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut lead: HashMap<&str, (usize, usize, u64)> = HashMap::new();
+    for (index, weight) in weights.iter().enumerate() {
+        let Some((fingerprint, count, total)) = weight else {
+            continue;
+        };
+        groups.entry(fingerprint.as_str()).or_default().push(index);
+        let replace = lead
+            .get(fingerprint.as_str())
+            .is_none_or(|current| (*count, *total) > (current.1, current.2));
+        if replace {
+            lead.insert(fingerprint.as_str(), (index, *count, *total));
+        }
+    }
+
+    let mut collector = SourceCollector::default();
+
+    for (index, _) in paths.iter().enumerate() {
+        let fingerprint = weights[index]
+            .as_ref()
+            .map(|(fingerprint, _, _)| fingerprint.as_str());
+        // 同一会话只在它的第一份副本处处理一次，并把其余副本一起并入。读不出会话指纹
+        // （读取/解析失败）的文件照旧单独走一遍，让解析错误被记一笔。
+        if let Some(fingerprint) = fingerprint {
+            if groups.get(fingerprint).and_then(|members| members.first()) != Some(&index) {
+                continue;
+            }
+        }
+        // 标题/模型/项目取最完整的那份：副本 id 被重随机过，元信息不一定都齐全。
+        let lead_index = fingerprint
+            .and_then(|fingerprint| lead.get(fingerprint).map(|current| current.0))
+            .unwrap_or(index);
+        let lead_session_id = ide_session_id(&paths[lead_index]);
+        let (title, model_name) = ide_workspace_meta(&paths[lead_index], &lead_session_id);
+        let project = project_by_session
+            .get(&lead_session_id)
+            .cloned()
+            .unwrap_or_else(|| "未知项目".to_string());
+        let members: &[usize] = match fingerprint {
+            Some(fingerprint) => groups
+                .get(fingerprint)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            None => std::slice::from_ref(&index),
+        };
+        let mut session_totals = Totals::default();
+        let mut seen: HashSet<String> = HashSet::new();
+        for member in members {
+            let Ok(text) = std::fs::read_to_string(&paths[*member]) else {
+                collector.note_parse_error();
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                collector.note_parse_error();
+                continue;
+            };
+            let Some(requests) = value.get("requests").and_then(Value::as_array) else {
+                continue;
+            };
+            collect_ide_requests(
+                &mut collector,
+                requests,
+                cutoff,
+                &model_name,
+                &project,
+                &mut seen,
+                &mut session_totals,
+            );
+        }
+
+        collector.push_session(lead_session_id, title, project, session_totals);
+    }
+
+    collector.into_value(name, paths.len())
+}

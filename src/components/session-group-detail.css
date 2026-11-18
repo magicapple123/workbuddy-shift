@@ -1,0 +1,67 @@
+.session-detail-modal[data-slot="dialog-content"] {
+  /* 内容保持自然高度，上限独立于动画外层，避免百分比高度形成反馈循环。 */
+  --session-detail-max-height: min(760px, calc(100dvh - 112px));
+  width: min(980px, calc(100vw - 96px));
+  max-width: none;
+  max-height: var(--session-detail-max-height);
+  display: flex;
+  border-radius: 12px;
+}
+.session-detail-modal .session-relationship { height: auto; max-height: calc(var(--session-detail-max-height) - 2px); }
+.session-detail-modal [data-detail-scroll] { scrollbar-gutter: stable; }
+.session-relationship {
+  container-type: inline-size;
+  /* 连线基线：#a9bfdd 是冷灰蓝（与主色淡底同色温），比主色 85% 更沉，不与分支线抢注意力。 */
+  --relationship-line: #a9bfdd;
+  /*
+   * 第 5 条分支线的色相：浅色取 --data-series-violet，与 common 线（--chart-4 #6f63c4）区分。
+   * 深色下 --chart-4 与 --data-series-violet 同为 #a99bf7（index.css 提亮后撞色），
+   * 所以深色改走 --data-series-slate，保证 common 线与 5 条分支互不同色。
+   * 这里只声明「用哪个 token」，颜色的唯一来源仍是 index.css。
+   */
+  --branch-4-tone: var(--data-series-violet);
+}
+.dark .session-relationship { --relationship-line: rgba(255, 255, 255, .22); --branch-4-tone: var(--data-series-slate); }
+.relationship-graph { position: relative; min-width: 0; }
+.relationship-connections { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.relationship-connections g { color: var(--relationship-line); }
+.relationship-connections path { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.relationship-connections circle { fill: currentColor; }
+.relationship-connections [data-line-tone="common"] { color: var(--chart-4); }
+.relationship-connections [data-line-tone="branch-0"] { color: var(--chart-3); }
+.relationship-connections [data-line-tone="branch-1"] { color: var(--chart-2); }
+.relationship-connections [data-line-tone="branch-2"] { color: var(--chart-1); }
+.relationship-connections [data-line-tone="branch-3"] { color: var(--chart-5); }
+.relationship-connections [data-line-tone="branch-4"] { color: var(--branch-4-tone); }
+.relationship-graph[data-lineage="true"] .relationship-connections path { stroke-width: 2; }
+.relationship-branch[data-branch-index="0"] { --branch-color: var(--chart-3); }
+.relationship-branch[data-branch-index="1"] { --branch-color: var(--chart-2); }
+.relationship-branch[data-branch-index="2"] { --branch-color: var(--chart-1); }
+.relationship-branch[data-branch-index="3"] { --branch-color: var(--chart-5); }
+.relationship-branch[data-branch-index="4"] { --branch-color: var(--branch-4-tone); }
+.relationship-branch [data-branch-badge] { border-color: color-mix(in srgb, var(--branch-color) 40%, transparent); background: color-mix(in srgb, var(--branch-color) 10%, transparent); color: var(--branch-color); }
+.relationship-members { position: relative; display: grid; grid-template-columns: minmax(0,1fr) 118px minmax(0,1fr); row-gap: 10px; padding: 0; margin: 0; list-style: none; }
+.relationship-root { position: absolute; z-index: 1; left: 50%; top: 50%; transform: translate(-50%,-50%); width: 96px; min-height: 112px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 7px; /* 描边与投影都由主色派生：比实色 var(--brand) 轻，浅色/深色都跟着 token 走。 */ border: 1px solid color-mix(in srgb, var(--primary) 70%, var(--border)); border-radius: 12px; background: var(--card); text-align: center; box-shadow: 0 6px 24px color-mix(in srgb, var(--primary) 8%, transparent); }
+.relationship-branch { min-width: 0; align-self: center; }
+.relationship-branch article { height: 100%; }
+@media (max-width: 760px), (max-height: 580px) {
+  .session-detail-modal[data-slot="dialog-content"] { --session-detail-max-height: calc(100dvh - 32px); width: calc(100vw - 32px); }
+}
+@container (max-width: 520px) {
+  [data-detail-scroll] { padding-left: 12px; padding-right: 12px; }
+  .relationship-canvas { overflow-x: auto; }
+  .relationship-graph { min-width: 560px; }
+}
+
+.relationship-graph { min-height: 128px; }
+.relationship-members { min-height: 128px; }
+/* 容器查询在首帧直接选定布局，不经 React 的窄版 → 宽版二次渲染。 */
+@container (min-width: 760px) {
+  .session-detail-title { font-size: 1.25rem; }
+  .relationship-members { grid-template-columns: minmax(0,1fr) 224px minmax(0,1fr); }
+  .relationship-graph[data-lineage="true"] .relationship-members { grid-template-columns: minmax(0,1fr) 260px minmax(0,1fr); }
+  .relationship-root { width: 138px; min-height: 128px; padding: 10px; }
+  .relationship-footer { display: flex; flex-direction: row-reverse; align-items: center; justify-content: space-between; gap: 12px; }
+  .relationship-footer > button,
+  .relationship-footer > [data-state] { width: auto; min-width: 172px; }
+}

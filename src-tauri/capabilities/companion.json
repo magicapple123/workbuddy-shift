@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "companion",
+  "description": "内置会话悬浮栏与设置窗口",
+  "windows": ["companion-rail", "companion-settings"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "companion:default"
+  ]
+}

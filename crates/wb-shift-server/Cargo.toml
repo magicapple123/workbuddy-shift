@@ -1,0 +1,30 @@
+[package]
+name = "wb-shift-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "workbuddy-shift HTTP server + CLI（npm 安装形态：workbuddy-shift 命令启动本地 webui）"
+
+# 共享 lint 见根 Cargo.toml；本 crate 另在 src/main.rs 用 crate 级
+# `deny(clippy::unwrap_used, expect_used)` 把宿主层的错误处理约定变成编译门禁。
+[lints]
+workspace = true
+
+[[bin]]
+name = "workbuddy-shift"
+path = "src/main.rs"
+
+[dependencies]
+wb-shift-core = { path = "../wb-shift-core" }
+axum = "0.7"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# 请求体 DTO：把 WebUI 的 JSON 形状变成明确类型（见 src/api/dto.rs）。
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+rust-embed = "8"
+
+[dev-dependencies]
+# router 级测试：用 tower::ServiceExt::oneshot 直接驱动 axum Router，不监听端口。
+# 版本取 Cargo.lock 中 axum 已传递依赖的 tower 0.5（不升级任何现有依赖）。
+tower = { version = "0.5", default-features = false, features = ["util"] }

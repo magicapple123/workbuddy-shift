@@ -1,0 +1,46 @@
+[package]
+name = "companion-desktop"
+# Tauri 通过 DEP_<links> 推导插件权限命名空间（这里即 companion）。
+# capability 里的 `companion:default` 与它一一对应；改名必须同时改 capability 与前端
+# `plugin:companion|` 命令前缀，否则权限解析或 invoke 会失败。
+# 详见 docs/companion.md。
+links = "tauri-plugin-companion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WorkBuddy Shift 内置悬浮窗的 Tauri 集成"
+
+# 共享 lint 见根 Cargo.toml 的 [workspace.lints]。
+[lints]
+workspace = true
+
+[lib]
+name = "companion_desktop"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+# 仅在 workspace 内使用、不发布到 crates.io：path 依赖不需要 version 钉（避免 bump 版本时漏改）。
+companion-runtime = { path = "../companion-runtime" }
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-notification = "2"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSPanel", "NSView", "NSEvent", "NSApplication", "NSCursor"] }
+objc2-foundation = "0.3"
+block2 = "0.6"
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",                 # POINT / ERROR_SUCCESS
+  "Win32_System_Registry",            # HKCU Run: RegSetKeyValueW / RegGetValueW / RegDeleteKeyValueW
+  "Win32_UI_WindowsAndMessaging",     # GetCursorPos
+  "Win32_UI_Input_KeyboardAndMouse",  # GetAsyncKeyState / VK_*
+] }

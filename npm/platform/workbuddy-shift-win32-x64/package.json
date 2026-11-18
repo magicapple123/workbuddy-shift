@@ -1,0 +1,15 @@
+{
+  "name": "workbuddy-shift-win32-x64",
+  "version": "0.1.0",
+  "description": "workbuddy-shift platform binary (win32-x64)",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "license": "MIT"
+}

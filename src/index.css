@@ -1,0 +1,340 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  color-scheme: light;
+  --background: #fafbfd;
+  --foreground: oklch(0.21 0.01 264);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.01 264);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.01 264);
+  /* 主色：只给主 CTA 与品牌标；浅底/描边用下面的 *-soft / *-border。 */
+  --primary: #1b5bd6;
+  --primary-foreground: #ffffff;
+  --primary-hover: #1549b4;
+  --primary-soft: #edf3fd;
+  --primary-border: #cbdbf7;
+  --primary-soft-foreground: #17479f;
+  /* CTA 渐变：仅 hero CTA 允许使用（同屏最多一个渐变）。 */
+  --primary-gradient-from: #2f6fe4;
+  --primary-gradient-to: #1a4fc6;
+  --secondary: oklch(0.96 0.004 264);
+  --secondary-foreground: oklch(0.32 0.01 264);
+  --muted: oklch(0.96 0.004 264);
+  --muted-foreground: oklch(0.52 0.012 264);
+  --accent: oklch(0.955 0.004 264);
+  --accent-foreground: oklch(0.24 0.01 264);
+  /* 实心底色（删除确认按钮等），必须配白字；文字/图标色用 --danger。 */
+  --destructive: #a83a31;
+  --destructive-foreground: #ffffff;
+  /* 语义色：冲突/错误。文字用 --danger-foreground，浅底用 --danger-soft。 */
+  --danger: #a83a31;
+  --danger-soft: #fcf0ee;
+  --danger-border: #efd3cf;
+  --danger-foreground: #8f2f27;
+  /* 语义色：警告/待办。 */
+  --warning: #8c6118;
+  --warning-soft: #faf3e6;
+  --warning-border: #eadcc0;
+  --warning-foreground: #7a5314;
+  /* 语义色：成功/完成。 */
+  --success: #1c6b52;
+  --success-soft: #edf7f2;
+  --success-border: #cfe8dd;
+  --success-foreground: #175844;
+  /* 层次：卡片内侧高光 + 低透明大模糊投影（不要发光）。 */
+  --card-highlight: rgba(255, 255, 255, 0.7);
+  --shadow-card: 0 1px 2px rgba(23, 27, 34, 0.04), 0 10px 28px -20px rgba(23, 27, 34, 0.2);
+  --shadow-brand: 0 1px 2px rgba(26, 79, 198, 0.2), 0 10px 22px -12px rgba(26, 79, 198, 0.38);
+  --border: #e4e8ef;
+  --input: oklch(0.91 0.006 264);
+  /* 细线（图表网格线等），比 --border 更淡，不要拿它当卡片描边。 */
+  --hairline: #f0f3f8;
+  --ring: #1b5bd6;
+  --brand: #1b5bd6;
+  --brand-foreground: #ffffff;
+  /* hero CTA 的内侧高光：`inset 0 1px 0 var(--brand-highlight)`。 */
+  --brand-highlight: rgba(255, 255, 255, 0.28);
+  /*
+   * 关联图分支色（`--chart-1..5` 只被 session-group-detail.css 的分支使用）。
+   *
+   * 取值按「分支徽标 10px 文字在 #F7F9FC 上 ≥4.5:1」挑过，**不要再调浅**；
+   * 5 条要能互相区分，且不与 `--data-series-*` 撞色。
+   */
+  --chart-1: #2f5fc0;
+  --chart-2: #2b7488;
+  --chart-3: #3f4dae;
+  --chart-4: #6f63c4;
+  --chart-5: #9c5a72;
+  --radius: 0.75rem;
+  --sidebar: oklch(0.973 0.003 264);
+  --sidebar-foreground: oklch(0.24 0.01 264);
+  --sidebar-primary: #1b5bd6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: oklch(0.93 0.004 264);
+  --sidebar-accent-foreground: oklch(0.21 0.01 264);
+  --sidebar-border: oklch(0.91 0.006 264);
+  --sidebar-ring: #1b5bd6;
+  /*
+   * 图表分类色板：**只收冷色**，与品牌蓝同一色温。
+   *
+   * 原来的琥珀/橙/黄绿/粉红在蓝色主题里显得跳，尤其堆叠柱里一小截橙色特别扎眼。
+   * 现在整套落在 190°–285° 色相区间（青 → 蓝 → 靛 → 紫），靠明度和冷暖区分系列，
+   * 只保留一个低饱和灰玫瑰（340°）当强调，避免整体糊成一片蓝。
+   * 命名仍然如实反映色相；**不要**再往里加暖色。
+   */
+  --data-series-blue: #3e6fd1;
+  --data-series-sky: #7fa6e6;
+  --data-series-cyan: #3e9dbd;
+  --data-series-teal: #4b7fa8;
+  --data-series-indigo: #4b5bc0;
+  --data-series-violet: #8c82dc;
+  --data-series-slate: #6b7a90;
+  --data-series-rose: #b06f86;
+  /*
+   * 头像身份色：低饱和底 + 深文字，只用于身份识别，不与主色抢注意力。
+   * `.avatar-tone-*` 工具类在文件底部读取这些变量，深色在 `.dark` 覆盖。
+   */
+  --avatar-0-bg: #eef1f6;
+  --avatar-0-fg: #44506a;
+  --avatar-1-bg: #e8effa;
+  --avatar-1-fg: #2f5599;
+  --avatar-2-bg: #e7f3f2;
+  --avatar-2-fg: #1f6b62;
+  --avatar-3-bg: #ecebf9;
+  --avatar-3-fg: #464092;
+  --avatar-4-bg: #f4ecf1;
+  --avatar-4-fg: #7a3e5c;
+  --avatar-5-bg: #f5f0e6;
+  --avatar-5-fg: #6e5a33;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.208 0.042 265.755);
+  --foreground: oklch(0.929 0.013 255.508);
+  --card: oklch(0.279 0.041 260.031);
+  --card-foreground: oklch(0.929 0.013 255.508);
+  --popover: oklch(0.279 0.041 260.031);
+  --popover-foreground: oklch(0.929 0.013 255.508);
+  --primary: #6fa6f2;
+  /* 深色主色是亮蓝，前景必须用深 navy 才有对比度（不要改成白色）。 */
+  --primary-foreground: oklch(0.208 0.042 265.755);
+  --primary-hover: #8cbbf7;
+  --primary-soft: rgba(111, 166, 242, 0.14);
+  --primary-border: rgba(111, 166, 242, 0.32);
+  --primary-soft-foreground: #dce9ff;
+  --primary-gradient-from: #5b94ec;
+  --primary-gradient-to: #3b6fd0;
+  --secondary: oklch(0.33 0.041 260.031);
+  --secondary-foreground: oklch(0.929 0.013 255.508);
+  --muted: oklch(0.33 0.041 260.031);
+  --muted-foreground: oklch(0.704 0.04 256.788);
+  --accent: oklch(0.33 0.041 260.031);
+  --accent-foreground: oklch(0.929 0.013 255.508);
+  /* 深色实心危险底压暗到 #b4483f 才能配白字；亮红只做文字/图标（--danger）。 */
+  --destructive: #b4483f;
+  --destructive-foreground: #ffffff;
+  --danger: #e8928a;
+  --danger-soft: rgba(232, 146, 138, 0.12);
+  --danger-border: rgba(232, 146, 138, 0.3);
+  --danger-foreground: #f3c7c2;
+  --warning: #d8ae6a;
+  --warning-soft: rgba(216, 174, 106, 0.12);
+  --warning-border: rgba(216, 174, 106, 0.3);
+  --warning-foreground: #ebd3a4;
+  --success: #6fc7a6;
+  --success-soft: rgba(111, 199, 166, 0.12);
+  --success-border: rgba(111, 199, 166, 0.3);
+  --success-foreground: #a9e0cb;
+  --card-highlight: rgba(255, 255, 255, 0.1);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -22px rgba(0, 0, 0, 0.6);
+  --shadow-brand: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 24px -14px rgba(111, 166, 242, 0.45);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  /* 细线（图表网格线等）：深色下比 --border 更淡，避免网格抢视线。 */
+  --hairline: rgba(255, 255, 255, 0.06);
+  --ring: #6fa6f2;
+  --brand: #6fa6f2;
+  --brand-foreground: oklch(0.208 0.042 265.755);
+  /* hero CTA 内侧高光（深色下压暗，避免发光）。 */
+  --brand-highlight: rgba(255, 255, 255, 0.18);
+  /* 关联图分支色（深色）：对应浅色 5 色整体提亮，与 --data-series-* 保持区分。 */
+  --chart-1: #6fa6f2;
+  --chart-2: #57c2de;
+  --chart-3: #7b8be8;
+  --chart-4: #a99bf7;
+  --chart-5: #d19ab0;
+  --sidebar: oklch(0.279 0.041 260.031);
+  --sidebar-foreground: oklch(0.929 0.013 255.508);
+  --sidebar-primary: #6fa6f2;
+  --sidebar-primary-foreground: oklch(0.208 0.042 265.755);
+  --sidebar-accent: oklch(0.279 0.041 260.031);
+  --sidebar-accent-foreground: oklch(0.929 0.013 255.508);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: #6fa6f2;
+  /* 冷色板（深色主题）：同一组色相整体提亮，保证深底上足够分离。 */
+  --data-series-blue: #6fa6f2;
+  --data-series-sky: #9cc9fb;
+  --data-series-cyan: #57c2de;
+  --data-series-teal: #4fa9b6;
+  --data-series-indigo: #7b8be8;
+  --data-series-violet: #a99bf7;
+  --data-series-slate: #94a3b8;
+  --data-series-rose: #d19ab0;
+  /* 头像身份色（深色）：同色相 18% 透明底 + 提亮文字。 */
+  --avatar-0-bg: rgba(148, 163, 184, 0.18);
+  --avatar-0-fg: #c9d3e4;
+  --avatar-1-bg: rgba(111, 166, 242, 0.18);
+  --avatar-1-fg: #bfd6fa;
+  --avatar-2-bg: rgba(111, 199, 190, 0.18);
+  --avatar-2-fg: #a9e0da;
+  --avatar-3-bg: rgba(150, 146, 235, 0.18);
+  --avatar-3-fg: #c9c4f5;
+  --avatar-4-bg: rgba(209, 154, 176, 0.18);
+  --avatar-4-fg: #edc9d9;
+  --avatar-5-bg: rgba(216, 180, 120, 0.18);
+  --avatar-5-fg: #e8d3ac;
+}
+
+/*
+ * 品牌色说明（改色时看这里，别直接改零散组件）
+ *
+ * 主色 **#1B5BD6**（深色 **#6FA6F2**）只给**主 CTA 与品牌标**；浅底/描边/文字分别用
+ * `--primary-soft` / `--primary-border` / `--primary-soft-foreground`，不要再写
+ * `bg-primary/15 text-primary` 这类「主色降透明当浅底」的写法。
+ * 渐变 **只给 hero CTA**（`--primary-gradient-from` → `--primary-gradient-to`），
+ * 同屏最多一个，卡片、标签、进度条一律用实色或浅底。
+ *
+ * 语义色走独立 token，不跟品牌色联动：
+ * - 成功/完成 `--success*`、警告/待办 `--warning*`、冲突/错误 `--danger*`；
+ * - **实心用 `--destructive`（配白字），文字/图标用 `--danger`**——深色下
+ *   `--danger` 是亮红，做实心底配白字对比度不够，所以两者分开；
+ * - 文字一律用对应 `*-foreground`，不要用 `text-*-foreground/90` 压暗凑色；
+ * - 组件层不写字面色值，统一用 `bg-success-soft text-success border-warning-border` 这类语义类。
+ *
+ * `--chart-1..5` 只被关联图分支使用（`session-group-detail.css`）；`--data-series-*`
+ * 是图表分类色板。两者都是按名字取色，改一处会让两个系列撞色，要改就整组一起改。
+ */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-border: var(--primary-border);
+  --color-primary-soft-foreground: var(--primary-soft-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-border: var(--danger-border);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-border: var(--success-border);
+  --color-success-foreground: var(--success-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/*
+ * 头像身份色工具类（`src/lib/avatar-tone.ts` 返回的类名）。
+ * 只由上面的 `--avatar-N-bg` / `--avatar-N-fg` 驱动，深色自动跟着 `.dark` 覆盖。
+ */
+@layer utilities {
+  .avatar-tone-0 {
+    background-color: var(--avatar-0-bg);
+    color: var(--avatar-0-fg);
+  }
+  .avatar-tone-1 {
+    background-color: var(--avatar-1-bg);
+    color: var(--avatar-1-fg);
+  }
+  .avatar-tone-2 {
+    background-color: var(--avatar-2-bg);
+    color: var(--avatar-2-fg);
+  }
+  .avatar-tone-3 {
+    background-color: var(--avatar-3-bg);
+    color: var(--avatar-3-fg);
+  }
+  .avatar-tone-4 {
+    background-color: var(--avatar-4-bg);
+    color: var(--avatar-4-fg);
+  }
+  .avatar-tone-5 {
+    background-color: var(--avatar-5-bg);
+    color: var(--avatar-5-fg);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    @apply bg-background text-foreground;
+    min-width: 320px;
+    height: 100%;
+    overflow: hidden;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+}
+
+@media (min-width: 900px) {
+  [aria-label="Token 总览"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

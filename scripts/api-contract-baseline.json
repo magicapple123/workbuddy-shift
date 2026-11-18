@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "仍是 Json<Value> 的 POST handler 登记表（见 scripts/check-api-contract.mjs）。",
+    "新增 POST handler 必须使用 dto.rs 里的明确类型；暂时无法迁移时在这里登记理由，",
+    "脚本会在 handler 已迁移/已删除时报告过期条目，避免『登记完就忘』。",
+    "迁移顺序建议：先做会写账号/会话的接口，再接只读查询。"
+  ],
+  "rawBodyHandlers": {
+    "api_codebuddy_cli_switch": "入参含 copySessions（core 的 vscode_session::CopyItem）与 syncSelections 嵌套结构；桌面端 command 是这套嵌套类型的权威定义，迁移时与 clients.rs 一起改，避免两套嵌套 DTO。",
+    "api_codebuddy_cn_ide_switch": "同上：客户端切号共用 copySessions / syncSelections 嵌套类型，等 clients.rs 统一后再迁移。",
+    "api_codebuddy_cn_ide_session_links_preview": "只读预览，入参仅 targetAccountId；与同域切号一起迁移可复用同一个账号定位 DTO。",
+    "api_jetbrains_switch": "入参含 configDirs 等客户端特有字段，桌面端签名更宽；迁移前先确认两端字段集合（见 clients.rs）。",
+    "api_vscode_ext_switch": "同上：copySessions / syncSelections 嵌套类型尚未在宿主层定义。",
+    "api_vscode_ext_session_links_preview": "只读预览，入参仅 targetAccountId；与 VS Code 切号一起迁移。",
+    "api_codebuddy_ide_switch": "同上：copySessions / syncSelections 嵌套类型尚未在宿主层定义。",
+    "api_codebuddy_intl_ide_session_links_preview": "只读预览，入参仅 targetAccountId；与 CodeBuddy IDE 切号一起迁移。",
+    "api_credits": "只读统计端点，body 仅 accountId；与 stats.rs 的其它查询（token-stats / credit-stats）一起迁移。",
+    "api_checkin": "与自动签到共用 variant / respectWindow 语义；迁移时连同 checkin 域（含配置保存）一次做完，避免半套 DTO。",
+    "api_checkin_all": "同上：批量签到与单账号签到必须共用同一份请求类型。",
+    "api_record_notification": "通知入参（level / title / description）由前端 toast 层生成，形状稳定且不触发写账号数据；优先级低于切号/会话写入。",
+    "api_refresh_token": "单 accountId 参数，与客户端切号共用账号定位逻辑；随切号域迁移一起处理。",
+    "api_save_rate_limit_config": "配置对象由 core 的 save_* 解析（含旧字段兼容与未知字段保留），宿主层不复制 schema；这里只能是『JSON 对象』，{config} 信封由 submitted_config 统一拆。",
+    "api_save_checkin_config": "同上：签到配置的形状与默认值属于 core（含时间段/自动签到开关），桌面端与 WebUI 都必须原样透传。",
+    "api_save_travel_config": "同上：旅行配置含轮次/时间段等可变字段，schema 在 core。",
+    "api_save_rotate_config": "同上：轮换配置含客户端/间隔等可变字段，schema 在 core。",
+    "api_save_update_config": "同上：更新代理配置（owner/repo/proxy）由 core 归一化，宿主不重复定义。"
+  }
+}

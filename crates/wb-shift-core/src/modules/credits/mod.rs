@@ -1,0 +1,101 @@
+//! WorkBuddy 积分资源查询。
+//!
+//! WorkBuddy 套餐页使用 summary/paid/free 三个资源接口；旧的
+//! `POST /v2/billing/meter/get-user-resource` 仍作为兼容回退。
+//! 这里仅返回脱敏后的资源摘要，不把 token 或完整响应交给前端。
+
+use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+use crate::modules::account::{
+    account_display_name, build_auth_headers, enterprise_id_of, envelope_token_error,
+    is_enterprise_account, variant_of,
+};
+use crate::modules::config::{
+    http_request, is_route_missing, load_checkin_config, now_ms, CHECKIN_API_PREFIX,
+    WORKBUDDY_API_ENDPOINT,
+};
+use crate::modules::credit_usage;
+use crate::modules::refresh::{ensure_fresh_token, refresh_account_token};
+use crate::modules::variant::WbVariant;
+
+/// 查询单账号的积分资源及到期时间。
+pub async fn get_credit_expiry(account: &Value) -> Value {
+    // 加密信封凭据短路：明文解不出来，任何请求都只会发出空 Bearer 并换回网关 401。
+    // 本入口同时覆盖新三路接口与旧接口回退两条取数链路，不再空跑请求。
+    if let Some(error) = envelope_token_error(account) {
+        return json!({
+            "ok": false,
+            "accountId": account.get("id").cloned().unwrap_or(Value::Null),
+            "accountName": account_display_name(account),
+            "error": error,
+        });
+    }
+
+    let now = now_ms();
+
+    // 企业版分流（issue #167）：企业配额不在个人版资源接口里。必须放在 cn/ai
+    // 分派之前——官方国内/国际版企业账号都走企业接口（两侧 asar 已验证同构）。
+    if is_enterprise_account(account) {
+        let enterprise_id = match enterprise_id_of(account) {
+            Some(enterprise_id) => Some(enterprise_id),
+            // 兜底判定命中但缺 ID（历史备份）：补拉一次。
+            None => resolve_enterprise_id(account).await,
+        };
+        return match enterprise_id {
+            Some(enterprise_id) => fetch_enterprise_credit(account, &enterprise_id, now).await,
+            // 补不到 ID 时给出可读错误，不得回落个人版接口把企业账号显示成「暂无可用积分」。
+            None => {
+                credit_error_result(account, "企业账号缺少企业 ID，无法查询企业配额".to_string())
+            }
+        };
+    }
+
+    if !uses_three_endpoint_query(variant_of(account)) {
+        return fetch_legacy_credit(account, now).await;
+    }
+
+    let responses = fetch_new_resource_responses(account).await;
+    if let Some(resources) =
+        normalized_new_resources(&responses.summary, &responses.paid, &responses.free, now)
+    {
+        return credit_result(account, resources, now);
+    }
+
+    // 旧接口回退必须复用三路请求已刷新过的账号，避免再次拿原始 refresh token
+    // 发起第二次刷新并把刚落盘的新 token 覆盖成失效状态。
+    let mut fallback_account = responses.account;
+    let mut response = fetch_legacy_user_resource(&fallback_account).await;
+    if is_unauthorized(&response)
+        && !responses.refresh_attempted
+        && !fallback_account
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+    {
+        // 新接口没有触发过 401 刷新时，仍保留旧接口原有的一次重试能力；
+        // 若新接口已刷新过，则禁止这里再次刷新，保证一次查询最多一次 401 refresh。
+        fallback_account = refresh_account_token(fallback_account).await;
+        response = fetch_legacy_user_resource(&fallback_account).await;
+    }
+    legacy_credit_result(account, &response, now)
+}
+
+use http::*;
+use resources::*;
+
+mod http;
+mod resources;
+
+pub use http::{api_base_for, authenticated_post};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    include!("tests/fixtures.rs");
+    include!("tests/resources.rs");
+    include!("tests/http.rs");
+}

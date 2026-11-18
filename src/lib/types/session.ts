@@ -1,0 +1,342 @@
+
+
+import { AccountMeta, WbVariant } from "./account";
+
+export interface Session {
+  id: string;
+  title: string;
+  cwd: string;
+  updatedAt: number;
+  hasHistory: boolean;
+  /** WorkBuddy playground（侧栏「任务」）；缺省视为空间会话。 */
+  isPlayground?: boolean;
+  /**
+   * 空间 id（WorkBuddy 5.x `sessions.space_id`）；老库不返回该字段。
+   *
+   * 分组键：有它按空间合组，没有则回退 `cwd` 最后一段（老库行为不变）。
+   */
+  spaceId?: string | null;
+  /**
+   * 空间真名（`spaces.name`）；空间行缺失或已删除时后端给 null，前端回退文件夹名。
+   */
+  spaceName?: string | null;
+}
+
+/** 临时备份的清理状态：cleaned 已回收；pending 已保留待下次维护重试；legacyRetained 旧操作无生命周期记录。 */
+export type SessionBackupCleanupState = "cleaned" | "pending" | "legacyRetained";
+
+/**
+ * 临时备份残留（待清理 / 待恢复）：复制、同步、恢复报告共用同一结构。
+ * `cleanupPending` 表示已完成但本轮没清理成功（下次切号重试）；`needsRecovery`
+ * 表示必须保留材料、需要恢复流程或人工确认。
+ */
+export interface TemporaryFileInfo {
+  operationId: string;
+  sessionId?: string;
+  title?: string;
+  state: "cleanupPending" | "needsRecovery";
+  reason: string;
+}
+
+/** 本次新建的副本（目标 UUID 由后端预分配）。 */
+export interface CopyResult {
+  id: string;
+  newId: string;
+  groupId: string;
+  /** 待清理位置（已清理为 null）；仅表示待清理，不是可撤销备份。 */
+  backup: string | null;
+  /** 成功后立即清理：cleaned 已回收 / pending 待下次维护重试；旧后端可能缺字段。 */
+  cleanupState?: SessionBackupCleanupState;
+  /** 清理失败原因（`cleanupState` 为 pending 时有值）。 */
+  cleanupError?: string;
+}
+
+/** 目标账号上已有真实有效的副本：复用而不是重复复制。 */
+export interface LinkedCopyResult {
+  id: string;
+  sessionId: string;
+  groupId: string;
+}
+
+/** 切换时的会话复制报告；复制失败时后端只回 `error`（切换本身仍继续）。 */
+export interface SessionCopyReport {
+  sourceUid?: string;
+  targetUid?: string;
+  /** 跨档复制时带两侧档位；同档复制不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
+  copied?: CopyResult[];
+  alreadyLinked?: LinkedCopyResult[];
+  errors?: { id: string; error: string }[];
+  /** 仍有未完成的会话写入时为 true（失败项可重试，不会产生第二个副本）。 */
+  needsRecovery?: boolean;
+  /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
+  temporaryFiles?: TemporaryFileInfo[];
+  error?: string;
+}
+
+/** 切换前对未完成会话写入的恢复结果。 */
+export interface SessionRecoveryReport {
+  recovered: number;
+  abandoned: number;
+  needsRecovery: { operationId: string; reason: string; retryable: boolean }[];
+  /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
+  temporaryFiles?: TemporaryFileInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// 会话同步（关联组）：预览与执行契约，与 core / Tauri / HTTP 三端同形
+// ---------------------------------------------------------------------------
+
+/**
+ * 同步判定结果（design §3.2 优先级表）：
+ * `identical` 两边一致、`fastForward` 有新增可同步、`ahead` 仅目标账号有更新、
+ * `diverge` 两边都改过需显式覆盖、`unknown` 无法确认。
+ */
+export type SessionSyncVerdict = "identical" | "fastForward" | "ahead" | "diverge" | "unknown";
+
+/** 同步写入模式：只有后端 `availableModes` 里给出的模式才允许提交。 */
+export type SessionSyncMode = "fastForward" | "overwrite" | "unifyOverwrite" | "statusOnly";
+
+/** 关联组成员（不含正文）：`state` 为 active 时才算该账号的有效成员。 */
+export interface SessionLinkMember {
+  memberId: string;
+  uid: string;
+  accountId: string | null;
+  sessionId: string;
+  state: "active" | "stale" | "superseded";
+}
+
+/** 关联组的预览项；`defaultChecked` 与 `availableModes` 是勾选权限的唯一来源。 */
+export interface SessionLinkPreviewGroup {
+  groupId: string;
+  title: string;
+  cwd: string;
+  verdict: SessionSyncVerdict;
+  /** 来源独有记录数（多重集差集，仅用于向用户解释）。 */
+  extraA: number;
+  /** 目标独有记录数（多重集差集，仅用于向用户解释）。 */
+  extraB: number;
+  common: number;
+  defaultChecked: boolean;
+  /**
+   * 正文写入模式；为空且没有 `archiveAction` 时才不可勾选
+   * （identical / ahead / unknown / 预览凭据不可用，但仅同步归档仍可勾选）。
+   */
+  availableModes: SessionSyncMode[];
+  reason: string;
+  /**
+   * 仅同步生命周期状态（把目标对齐为已归档），正文零写入。
+   * 由后端在生成预览时给出，不随用户勾选变化。
+   */
+  archiveAction?: "statusOnly";
+  /** 记录数（不是消息数）：不可验证时 source/target 为 0、baseline 为 null。 */
+  recordCount: { source: number; target: number; baseline: number | null };
+  source: SessionLinkMember | null;
+  target: SessionLinkMember | null;
+  /** 勾选时必须原样回传的预览凭据；缺失即不可勾选。 */
+  previewToken?: string;
+}
+
+/** 关联会话预览：`supported` 为 false（或 storeStatus 为 unsupported）时不展示同步区块。 */
+export interface SessionLinksPreview {
+  supported: boolean;
+  storeStatus: "ready" | "missing" | "unavailable" | "unsupported";
+  storeError?: string;
+  sourceUid: string;
+  targetUid: string;
+  /** 跨档预览时带两侧档位；同档预览不出现这两个字段。 */
+  sourceVariant?: WbVariant;
+  targetVariant?: WbVariant;
+  groups: SessionLinkPreviewGroup[];
+}
+
+/** 一条同步选择：与预览凭据绑定，执行时后端会重新校验。 */
+export interface SessionSyncSelection {
+  groupId: string;
+  previewToken: string;
+  mode: SessionSyncMode;
+}
+
+/** 已同步的关联组（保留目标 sessionId 与标题）。 */
+export interface SessionSyncResultItem {
+  groupId: string;
+  status: "synced";
+  verdict: SessionSyncVerdict;
+  mode: SessionSyncMode;
+  sourceSessionId: string;
+  targetSessionId: string;
+  recordCount: { source: number; targetBefore: number; target: number };
+  updatedAt: number;
+  /** 待清理位置（已清理为 null）；旧操作可能仍返回目录路径。 */
+  backup: string | null;
+  backupManifest: string | null;
+  /** 成功后立即清理：cleaned 表示临时备份已回收；pending 表示待下次维护重试。 */
+  cleanupState?: SessionBackupCleanupState;
+  cleanupError?: string;
+  message: string;
+}
+
+/** 被跳过的关联组：`reasonCode` 为 previewStale 时说明预览已过期，不得显示为成功。 */
+export interface SessionSyncSkippedItem {
+  groupId: string;
+  status: "skipped";
+  reasonCode: string;
+  message: string;
+  verdict: SessionSyncVerdict | null;
+}
+
+/** 同步执行报告；`errors` 里可能是整批被拒（无 groupId）。 */
+export interface SessionSyncReport {
+  synced: SessionSyncResultItem[];
+  skipped: SessionSyncSkippedItem[];
+  errors: { groupId?: string; error: string }[];
+  /** 仍有未完成/无法安全恢复的会话写入时为 true。 */
+  needsRecovery?: boolean;
+  /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
+  temporaryFiles?: TemporaryFileInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// Client-scoped session group directory
+// ---------------------------------------------------------------------------
+
+export type SessionGroupClient = "workbuddy" | "codebuddyIde" | "vscodeExt";
+
+export type SessionGroupStatus = "latest" | "behind" | "diverge" | "missing" | "unknown";
+
+export type SessionMemberVersionStatus = SessionGroupStatus | "stale" | "superseded";
+
+export interface SessionGroupSummary {
+  key: string;
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  groupVariant: WbVariant;
+  title: string;
+  projectLabel: string;
+  latestActivityAt: number;
+  memberCount: number;
+  activeMemberCount: number;
+  accountNames: string[];
+  summaryStatus: SessionGroupStatus;
+  summaryText: string;
+  safeSourceMemberId: string | null;
+  hasSafeSource: boolean;
+}
+
+export interface SessionGroupMemberDetail {
+  memberId: string;
+  accountId: string | null;
+  uid: string;
+  sessionId: string;
+  accountName: string;
+  variant: WbVariant;
+  linkState: "active" | "stale" | "superseded";
+  versionStatus: SessionMemberVersionStatus;
+  title: string;
+  projectLabel: string;
+  updatedAt: number;
+  recordCount: number | null;
+  contentPreview?: { speaker: string; text: string }[];
+  contentState: "ready" | "missing" | "unavailable";
+  reason: string;
+  canBeSource: boolean;
+}
+
+export interface SessionGroupList {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  storeStatus: "missing" | "ready" | "unavailable";
+  storeError?: string;
+  /**
+   * 被列表隐藏的失效组数量（组内所有成员的会话行都已失效）。
+   *
+   * 老后端没有该字段：缺省按 0 处理。列表为空时仍要靠它触达「清理失效关联组」。
+   */
+  deadGroupCount?: number;
+  /**
+   * 清理会被拒绝的原因（`null` = 可以清理）。
+   *
+   * 后端用**同一次判定**产出：只要非空，「清理失效关联组」点下去必然整次失败（例如某个
+   * 账号的会话索引读不全）。前端据此禁用入口并展示原因，而不是让用户白点一次。
+   * 老后端没有该字段：缺省按「没有阻塞」处理。
+   */
+  pruneBlocked?: string | null;
+  groups: SessionGroupSummary[];
+}
+
+/**
+ * 清理失效关联组的回报。
+ *
+ * `dryRun: true` 表示「将要删除」（不写盘），`false` 表示已经写盘；
+ * `removedGroups` / `removedMembers` 只统计受影响的关联关系，不涉及任何会话内容。
+ */
+export interface SessionGroupPruneReport {
+  dryRun: boolean;
+  removedGroups: number;
+  removedMembers: number;
+  groupIds: string[];
+}
+
+export interface SessionGroupDetail extends SessionGroupSummary {
+  members: SessionGroupMemberDetail[];
+  addTargets: AccountMeta[];
+  divergence?: {
+    commonMemberIds: string[];
+    branches: string[][];
+  };
+}
+
+export interface SessionGroupPairPreview {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groupId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  verdict: SessionSyncVerdict;
+  availableModes: SessionSyncMode[];
+  previewToken: string | null;
+  reason: string;
+  recordCount: { source: number; target: number; baseline: number | null } | null;
+  extraTargetCount: number;
+}
+
+/** One read-only plan for making every active copy match a chosen group member. */
+export interface SessionGroupUnifyPlan {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId: string;
+  sourceName: string;
+  targets: {
+    memberId: string;
+    accountName: string;
+    preview: SessionGroupPairPreview | null;
+    error: string | null;
+  }[];
+}
+
+/** A client-reported current login, matched by stable UID or saved account ID. */
+export interface SessionGroupCurrentAccount {
+  variant?: WbVariant;
+  uid?: string | null;
+  accountId?: string | null;
+  running?: boolean;
+}
+
+export interface SessionGroupActionReport {
+  client: SessionGroupClient;
+  groupId: string;
+  sourceMemberId?: string;
+  targetMemberId?: string;
+  synced: SessionSyncResultItem[];
+  skipped: SessionSyncSkippedItem[];
+  errors: { groupId?: string; error: string }[];
+  needsRecovery?: boolean;
+  temporaryFiles?: TemporaryFileInfo[];
+  restartedVariants?: WbVariant[];
+  /** 插件侧：本次由 workbuddy-shift 关闭并成功重开了 VS Code。 */
+  restartedEditor?: boolean;
+  /** 插件侧：写入已完成但 VS Code 未能自动重新打开（无 `errors` 数组的入口用它兜底）。 */
+  editorError?: string;
+}
