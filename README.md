@@ -166,6 +166,9 @@ workbuddy-shift              # 启动本地服务 + 自动打开浏览器
 workbuddy-shift status       # 终端查看当前账号
 ```
 
+> 国内镜像（npmmirror）同步可能延迟；若安装时提示找不到最新版本，可加
+> `--registry=https://registry.npmjs.org`，或等镜像同步。
+
 界面与桌面 App 一致，功能覆盖上方全部模块，但不提供会话悬浮窗与开机自启（桌面版专属）。webui 模式下的 macOS 权限由启动服务的终端进程决定；若终端已授权完全磁盘访问则无需额外操作。
 
 npm 版支持 macOS（Apple Silicon / Intel）、Windows x64、Linux x64 与 Linux ARM64；Linux ARM64 只提供 npm / webui 形态，桌面安装包仍只有 x64。
