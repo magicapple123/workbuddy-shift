@@ -241,23 +241,51 @@ pub(super) fn ide_file_weight(path: &Path) -> Option<(String, usize, u64)> {
     Some((key?, count, total))
 }
 
+/// 会话文件归属的账号 uid：IDE 数据根下第一段目录名。
+///
+/// 实测布局是 `Data/<uid>/VSCode/<uid>/history/<md5(工作区)>/<会话>/index.json`，
+/// 第一段就是切号后的账号目录；root 级文件（例如公共索引）取不到第一段 → 未归属。
+/// 路径 uid 与账号库 `AccountMeta.uid` 理论上同源；对不上时前端按「uid 后 6 位」兜底，
+/// 不强行猜。
+pub(super) fn ide_uid(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// 一次会话副本归并的共用参数（模型/项目/时间窗由会话元信息决定，与账号无关）。
+pub(super) struct IdeRequestContext<'a> {
+    pub(super) cutoff: Option<i64>,
+    pub(super) model_name: &'a str,
+    pub(super) project: &'a str,
+}
+
 /// 把一个会话（`requests` 是它的某一份副本）里可计入的请求并入统计。
 ///
 /// `seen` 按请求指纹去重、跨副本共享：副本重放父历史时带的是原始时间戳，所以并集
 /// 既不会把历史日期重复抬高，也不会丢掉各副本复制后各自追加的请求。指纹缺失的记录
 /// 一律计入。
+///
+/// 归属按**文件**走：`uid` 是这一份副本所在账号，`totals_by_uid` 按账号分别累加，
+/// 于是「重放历史归最早文件（原账号）、副本新增归副本账号」自然成立。
 pub(super) fn collect_ide_requests(
     collector: &mut SourceCollector,
     requests: &[Value],
-    cutoff: Option<i64>,
-    model_name: &str,
-    project: &str,
+    context: &IdeRequestContext<'_>,
+    uid: &str,
     seen: &mut HashSet<String>,
-    session_totals: &mut Totals,
+    totals_by_uid: &mut HashMap<String, Totals>,
 ) {
     for request in requests {
         let ts = ide_request_timestamp(request);
-        if cutoff.is_some_and(|minimum| ts.is_none_or(|value| value < minimum)) {
+        if context
+            .cutoff
+            .is_some_and(|minimum| ts.is_none_or(|value| value < minimum))
+        {
             continue;
         }
         let Some(usage) = ide_request_usage(request) else {
@@ -269,8 +297,8 @@ pub(super) fn collect_ide_requests(
                 continue;
             }
         }
-        session_totals.add(usage);
-        collector.add(usage, model_name, project, ts);
+        totals_by_uid.entry(uid.to_string()).or_default().add(usage);
+        collector.add(usage, context.model_name, context.project, ts, uid);
     }
 }
 
@@ -282,14 +310,32 @@ pub(super) fn ide_source(
 ) -> Value {
     let mut paths = Vec::new();
     ide_index_files(&root, &mut paths);
-    paths.sort();
+    // 复用 `Target`：mtime 只取一次，既用于「副本按落地顺序处理」，也用于窗口裁剪。
+    let mut targets: Vec<Target> = paths
+        .into_iter()
+        .map(|path| Target::new(root.clone(), path))
+        .collect();
+    // 组内必须按 mtime 从旧到新处理：重放的历史请求归最早出现的那份文件（原账号），
+    // 副本复制之后新增的请求才归副本账号。同一 mtime 用路径兜底保证顺序稳定。
+    targets.sort_by(|left, right| {
+        left.modified_ms
+            .unwrap_or(i64::MAX)
+            .cmp(&right.modified_ms.unwrap_or(i64::MAX))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let uids: Vec<String> = targets
+        .iter()
+        .map(|target| ide_uid(&root, &target.path))
+        .collect();
 
     // 同一会话（按起点请求判身份）因切号复制可能散落在多个账号数据目录里。各份之间按
     // 请求指纹取**并集**：父历史只算一次（副本会把历史日期回溯性抬高），副本复制后各自
     // 追加的请求也都保留（只取「最长一份」会漏掉别的副本独有的请求）。会话标题、模型与
     // 项目归属取最完整的那份。
-    let weights: Vec<Option<(String, usize, u64)>> =
-        paths.iter().map(|path| ide_file_weight(path)).collect();
+    let weights: Vec<Option<(String, usize, u64)>> = targets
+        .iter()
+        .map(|target| ide_file_weight(&target.path))
+        .collect();
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut lead: HashMap<&str, (usize, usize, u64)> = HashMap::new();
     for (index, weight) in weights.iter().enumerate() {
@@ -307,7 +353,7 @@ pub(super) fn ide_source(
 
     let mut collector = SourceCollector::default();
 
-    for (index, _) in paths.iter().enumerate() {
+    for (index, _) in targets.iter().enumerate() {
         let fingerprint = weights[index]
             .as_ref()
             .map(|(fingerprint, _, _)| fingerprint.as_str());
@@ -322,8 +368,8 @@ pub(super) fn ide_source(
         let lead_index = fingerprint
             .and_then(|fingerprint| lead.get(fingerprint).map(|current| current.0))
             .unwrap_or(index);
-        let lead_session_id = ide_session_id(&paths[lead_index]);
-        let (title, model_name) = ide_workspace_meta(&paths[lead_index], &lead_session_id);
+        let lead_session_id = ide_session_id(&targets[lead_index].path);
+        let (title, model_name) = ide_workspace_meta(&targets[lead_index].path, &lead_session_id);
         let project = project_by_session
             .get(&lead_session_id)
             .cloned()
@@ -335,10 +381,16 @@ pub(super) fn ide_source(
                 .unwrap_or_default(),
             None => std::slice::from_ref(&index),
         };
-        let mut session_totals = Totals::default();
+        // 每个账号一份会话合计：同一会话跨账号时各出一行（各自有用量），键加序号避免撞键。
+        let context = IdeRequestContext {
+            cutoff,
+            model_name: &model_name,
+            project: &project,
+        };
+        let mut totals_by_uid: HashMap<String, Totals> = HashMap::new();
         let mut seen: HashSet<String> = HashSet::new();
         for member in members {
-            let Ok(text) = std::fs::read_to_string(&paths[*member]) else {
+            let Ok(text) = std::fs::read_to_string(&targets[*member].path) else {
                 collector.note_parse_error();
                 continue;
             };
@@ -352,16 +404,26 @@ pub(super) fn ide_source(
             collect_ide_requests(
                 &mut collector,
                 requests,
-                cutoff,
-                &model_name,
-                &project,
+                &context,
+                &uids[*member],
                 &mut seen,
-                &mut session_totals,
+                &mut totals_by_uid,
             );
         }
 
-        collector.push_session(lead_session_id, title, project, session_totals);
+        let mut ordered: Vec<(String, Totals)> = totals_by_uid.into_iter().collect();
+        // 固定顺序（uid 升序）让同一份数据的响应可重复对比。
+        ordered.sort_by(|left, right| left.0.cmp(&right.0));
+        for (uid, totals) in ordered {
+            collector.push_session(
+                lead_session_id.clone(),
+                title.clone(),
+                project.clone(),
+                uid,
+                totals,
+            );
+        }
     }
 
-    collector.into_value(name, paths.len())
+    collector.into_value(name, targets.len())
 }

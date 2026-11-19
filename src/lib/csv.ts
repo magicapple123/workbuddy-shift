@@ -51,11 +51,26 @@ export function buildCsv(sections: CsvSection[]): string {
   return `${CSV_BOM}${lines.join("\r\n")}\r\n`;
 }
 
+/**
+ * 文件名片段清洗：去掉 Windows 非法字符、路径分隔符与空白。
+ *
+ * 账号显示名可能带 `@`、`/`（例如邮箱、`国内版/国际版`），直接拼进文件名会让
+ * 保存对话框失败或写到别的目录。
+ */
+export function sanitizeFileScope(scope: string): string {
+  const cleaned = scope
+    .replace(/[\\/:*?"<>|\s]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  return cleaned.length > 0 ? cleaned : "all";
+}
+
 /** 文件名：`token-stats-<source>-<yyyyMMdd-HHmm>.csv`。 */
 export function csvFileName(prefix: string, scope: string, now = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
     now.getHours(),
   )}${pad(now.getMinutes())}`;
-  return `${prefix}-${scope}-${stamp}.csv`;
+  return `${prefix}-${sanitizeFileScope(scope)}-${stamp}.csv`;
 }

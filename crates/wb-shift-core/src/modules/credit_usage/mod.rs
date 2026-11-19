@@ -212,6 +212,7 @@ pub use project::get_statistics;
 mod tests {
     use super::*;
 
+    use super::collect::*;
     use super::project::*;
     include!("tests/project.rs");
 }

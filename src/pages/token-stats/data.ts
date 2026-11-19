@@ -96,6 +96,18 @@ export function formatRequestTime(timestamp: number): string {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
+/**
+ * 行级账号短标签：`账号 …abc123`（uid 后 6 位）；空 uid 是「未归属」。
+ *
+ * 排行榜/请求明细里同名会话可能属于不同账号，必须能区分；这里不查账号库，避免把
+ * 账号昵称（可能含隐私）渲染到图表行里，也便于纯逻辑单测。
+ */
+export function shortAccountLabel(uid?: string): string | null {
+  if (uid === undefined) return null;
+  if (!uid) return "未归属";
+  return `账号 …${uid.slice(-6)}`;
+}
+
 export function formatHeatmapDate(date: Date): string {
   return date.toLocaleDateString("zh-CN", {
     month: "long",

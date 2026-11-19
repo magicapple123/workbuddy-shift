@@ -225,12 +225,14 @@ impl<'de> Visitor<'de> for JsonlLineVisitor {
 #[derive(Default)]
 pub(super) struct SourceCollector {
     pub(super) total: Totals,
-    pub(super) models: HashMap<String, Totals>,
-    pub(super) projects: HashMap<String, Totals>,
+    pub(super) dims: DimensionTotals,
+    /// 按账号聚合：key = uid，空串 = 未归属。
+    ///
+    /// 一次扫描同时产出全局与 per-account 数字，前端切账号只做客户端过滤，不再扫盘
+    /// （第 7 条 7.2）。全局 `summary` 必须等于 `accounts` 之和，`accounts_sum_matches_global`
+    /// 用例钉住这个不变量。
+    pub(super) accounts: HashMap<String, AccountTotals>,
     pub(super) sessions: Vec<SessionTotals>,
-    pub(super) daily: HashMap<String, Totals>,
-    pub(super) daily_by_model: HashMap<String, HashMap<String, Totals>>,
-    pub(super) hours: HashMap<String, Totals>,
     pub(super) parse_errors: u64,
     pub(super) coverage_start_at: Option<i64>,
     pub(super) coverage_end_at: Option<i64>,
@@ -264,32 +266,30 @@ impl SourceCollector {
         }
     }
 
-    /// 把一条已解码的记录并入各维度聚合。
+    /// 把一条已解码的记录并入各维度聚合（全局 + 所属账号）。
     ///
     /// 时间戳、模型名、项目名都由调用方传入解码结果，这里不再回头读 `Value`：
     /// 逐条聚合是扫描阶段的热路径，重复解码与重复分配都在这里放大。
+    /// `uid` 为空串表示「未归属」（DB 缺行、孤儿文件、CLI 日志不记录账号）。
     pub(super) fn add(
         &mut self,
         usage: Usage,
         model_name: &str,
         project: &str,
         timestamp: Option<i64>,
+        uid: &str,
     ) {
         self.total.add(usage);
-        add_to(&mut self.models, model_name, usage);
-        add_to(&mut self.projects, project, usage);
+        self.dims.add(usage, model_name, project, timestamp);
+        // 先查后插：uid 在日志里高度重复，每条都 `to_string()` 会多一次分配。
+        if let Some(account) = self.accounts.get_mut(uid) {
+            account.add(usage, model_name, project, timestamp);
+        } else {
+            let mut account = AccountTotals::default();
+            account.add(usage, model_name, project, timestamp);
+            self.accounts.insert(uid.to_string(), account);
+        }
         if let Some(timestamp) = timestamp {
-            if let Some((day, hour)) = local_buckets(timestamp) {
-                add_to(&mut self.daily, &day, usage);
-                if !self.daily_by_model.contains_key(model_name) {
-                    self.daily_by_model
-                        .insert(model_name.to_string(), HashMap::new());
-                }
-                if let Some(per_model) = self.daily_by_model.get_mut(model_name) {
-                    add_to(per_model, &day, usage);
-                }
-                add_to(&mut self.hours, &hour, usage);
-            }
             self.coverage_start_at = Some(
                 self.coverage_start_at
                     .map_or(timestamp, |current| current.min(timestamp)),
@@ -306,6 +306,7 @@ impl SourceCollector {
         session_id: String,
         title: Option<String>,
         project: String,
+        uid: String,
         totals: Totals,
     ) {
         if totals.records == 0 {
@@ -314,6 +315,7 @@ impl SourceCollector {
         let base_key = format!("{project} · {session_id}");
         let count = self.session_key_counts.entry(base_key.clone()).or_default();
         *count += 1;
+        // 同一会话可能在不同账号下各有一行（各有用量）：键加序号避免撞键，前端按 uid 过滤。
         let key = if *count == 1 {
             base_key
         } else {
@@ -324,30 +326,44 @@ impl SourceCollector {
             title,
             project,
             session_id,
+            uid,
             totals,
         });
     }
 
     pub(super) fn into_value(mut self, name: &str, files_scanned: usize) -> Value {
-        let daily_by_model = self
-            .daily_by_model
-            .into_iter()
-            .map(|(model, points)| (model, Value::Array(groups(points))))
-            .collect::<Map<String, Value>>();
+        let daily_by_model = self.dims.daily_by_model_value();
+        // 只返回有用量的账号：零用量账号由前端按账号库补 0 显示，避免 payload 膨胀。
+        let mut accounts: Vec<(String, AccountTotals)> = self
+            .accounts
+            .drain()
+            .filter(|(_, account)| account.total.records > 0)
+            .collect();
+        accounts.sort_by(|left, right| {
+            total_value(&right.1.total.value())
+                .cmp(&total_value(&left.1.total.value()))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let account_values: Vec<Value> = accounts
+            .iter()
+            .map(|(uid, account)| account.value(uid))
+            .collect();
         let mut value = json!({
             "source": name,
             "summary": self.total.value(),
-            "models": groups(self.models),
-            "projects": groups(self.projects),
+            "models": groups(self.dims.models),
+            "projects": groups(self.dims.projects),
             "sessions": session_groups(self.sessions),
-            "daily": groups(self.daily),
+            "daily": groups(self.dims.daily),
             "dailyByModel": daily_by_model,
-            "hours": groups(self.hours),
+            "hours": groups(self.dims.hours),
+            "accounts": account_values,
             "filesScanned": files_scanned,
             "parseErrors": self.parse_errors,
             "coverageStartAt": self.coverage_start_at,
             "coverageEndAt": self.coverage_end_at,
         });
+
         // Only detail sources take the new key; every other source keeps its
         // previous response shape byte for byte.
         if self.collect_requests {
@@ -364,8 +380,62 @@ impl SourceCollector {
 /// `detail` additionally keeps a bounded window of per-call request rows; both
 /// outputs share the same decode, cutoff, dedupe, and `subagents`-exclusion
 /// pipeline so a detail row can never disagree with the aggregate totals.
+///
+/// CLI 日志不按账号分目录，也没有账号字段：这里不传 uid 映射，全部记录归「未归属」。
+/// **禁止**用当前登录账号反推历史用量——切过号就会错归属。
 pub(super) fn source(root: PathBuf, name: &str, cutoff: Option<i64>, detail: bool) -> Value {
-    source_from_roots(std::slice::from_ref(&root), name, cutoff, detail)
+    source_from_roots(
+        std::slice::from_ref(&root),
+        name,
+        cutoff,
+        detail,
+        &HashMap::new(),
+    )
+}
+
+/// 读 `workbuddy.db` 的 `sessions(id, user_id)`，得到「会话 id → 归属账号 uid」。
+///
+/// 归因依据是**请求所在文件**：JSONL 文件名就是 conversation id，`sessions.user_id`
+/// 就是它第一次被创建时所在的账号。副本重放历史时带的是原时间戳与同一个会话 id
+/// 的派生文件，但复制会生成新 id，所以「重放历史归原账号、副本新增归副本账号」
+/// 由 `seen` 指纹 + 文件 mtime 顺序自然成立。
+///
+/// 库打不开 / 没有 `sessions` 表 / 缺 `user_id` 列 / 查询失败都返回空表：
+/// 归因失败只能退化成「未归属」，绝不能因此让整次统计失败。
+pub(super) fn session_uid_index_at(data_root: &Path) -> HashMap<String, String> {
+    let mut index = HashMap::new();
+    if data_root.as_os_str().is_empty() {
+        return index;
+    }
+    let db = data_root.join("workbuddy.db");
+    if !db.is_file() {
+        return index;
+    }
+    let Some(conn) = crate::modules::session::open_db(&db, true) else {
+        return index;
+    };
+    if !crate::modules::session::table_exists(&conn, "sessions") {
+        return index;
+    }
+    let Ok(mut stmt) = conn.prepare("SELECT id, user_id FROM sessions") else {
+        return index;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    }) else {
+        return index;
+    };
+    for (id, uid) in rows.flatten() {
+        if let (Some(id), Some(uid)) = (id, uid) {
+            if !id.is_empty() && !uid.is_empty() {
+                index.insert(id, uid);
+            }
+        }
+    }
+    index
 }
 
 /// 多根合并统计：同一档位下的多个 jsonl 根合并成**一个** source。
@@ -377,6 +447,7 @@ pub(super) fn source_from_roots(
     name: &str,
     cutoff: Option<i64>,
     detail: bool,
+    uid_by_session: &HashMap<String, String>,
 ) -> Value {
     let mut targets: Vec<Target> = Vec::new();
     for root in roots {
@@ -412,6 +483,8 @@ pub(super) fn source_from_roots(
             continue;
         }
         let session_id = target.session_id();
+        // 归属账号：文件名（conversation id）在 `sessions.user_id` 里的映射；查不到即未归属。
+        let uid = uid_by_session.get(&session_id).cloned().unwrap_or_default();
         let fallback_project = project_name(&target.root, &target.path);
         let Some(parsed) = parsed_file(&target.path) else {
             collector.note_parse_error();
@@ -454,7 +527,7 @@ pub(super) fn source_from_roots(
                 session_project = Some(project.to_string());
             }
             session_totals.add(record.usage);
-            collector.add(record.usage, &record.model, project, record.timestamp);
+            collector.add(record.usage, &record.model, project, record.timestamp, &uid);
             if collector.collect_requests {
                 if let Some(ts) = record.timestamp {
                     file_requests.push(RequestRow {
@@ -463,6 +536,7 @@ pub(super) fn source_from_roots(
                         project: project.to_string(),
                         session_id: session_id.clone(),
                         title: None,
+                        uid: uid.clone(),
                         usage: record.usage,
                         thinking: record.thinking,
                     });
@@ -485,6 +559,7 @@ pub(super) fn source_from_roots(
             session_id,
             title,
             session_project.unwrap_or(fallback_project),
+            uid,
             session_totals,
         );
     }

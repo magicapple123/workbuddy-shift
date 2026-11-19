@@ -6,6 +6,8 @@ const refreshOfficialUsage = vi.fn();
 vi.mock("@/lib/api", () => ({
   getCreditStatistics: (...args: unknown[]) => getCreditStatistics(...args),
   refreshOfficialUsage: (...args: unknown[]) => refreshOfficialUsage(...args),
+  asError: (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+  logError: async () => undefined,
 }));
 
 import type { CreditStatistics } from "@/lib/types";
@@ -110,5 +112,36 @@ describe("积分统计渐进式刷新", () => {
       },
     );
     expect(phases).toContain("phase-credits");
+  });
+
+  it("官方用量抛错时归一成 unavailable，页面仍能拿到失败原因", async () => {
+    getCreditStatistics.mockResolvedValue(stats("local"));
+    refreshOfficialUsage.mockRejectedValue(new Error("error sending request"));
+    const committed: CreditStatistics[] = [];
+    const official: unknown[] = [];
+    const phases: string[] = [];
+
+    await runProgressiveRefresh(
+      {
+        commit: (next) => committed.push(next),
+        refreshCredits: async () => undefined,
+        loadAccountIds: async () => ["a1"],
+      },
+      {
+        onLocal: () => undefined,
+        onCredits: () => undefined,
+        onOfficial: (usage) => official.push(usage),
+        onPhase: (patch) => {
+          if (patch.official) phases.push("phase-official");
+        },
+      },
+    );
+
+    const failure = committed[committed.length - 1]?.officialUsage;
+    expect(failure?.status).toBe("unavailable");
+    expect(failure?.errors[0]?.error).toContain("error sending request");
+    // 官方任务必须收尾：否则「更新中 N/2 项」会一直卡住。
+    expect(phases).toContain("phase-official");
+    expect(official.length).toBe(1);
   });
 });

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { CircleAlert, Download, ListTree, Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CircleAlert, Download, FileSpreadsheet, ListTree, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyAiMark, WorkBuddyMark } fro
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDate, formatDateTime } from "@/lib/format";
 import {
   isTokenStatisticsCacheFresh,
   loadTokenStatistics,
@@ -17,13 +17,41 @@ import {
 import type {
   TokenStatistics,
 } from "@/lib/types";
+import { useAccountsStore } from "@/stores/accounts";
 
-import { saveCsvFile } from "@/lib/export-download";
+import { saveCsvFile, saveXlsxFile } from "@/lib/export-download";
+import {
+  type AccountSelection,
+  accountOptions,
+  cliAccountsUnsupported,
+  filterSourceByAccount,
+  hasAccountDimension,
+  parseSelection,
+  persistAccountSelection,
+  readAccountSelection,
+  selectionLabel,
+  serializeSelection,
+} from "./accounts";
+import { TokenAccountSelect } from "./account-select";
 import { Dashboard } from "./dashboard";
-import { buildTokenStatsCsv, tokenStatsFileName } from "./export";
+import { buildTokenStatsCsv, buildTokenStatsXlsx, tokenStatsFileName, tokenStatsXlsxFileName } from "./export";
 import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredTokenSource } from "./data";
 import { RequestDetailDialog } from "./request-detail";
 import { TokenStatsLoadingSkeleton } from "./skeleton";
+
+const SOURCE_KEYS: SourceKey[] = ["workbuddy", "workbuddy-ai", "codebuddy-cli", "codebuddy-ide"];
+
+/** 每个来源记住上次选择的账号（第 7 条：筛选层级按来源独立）。 */
+function readAllSelections(): Record<SourceKey, AccountSelection> {
+  return SOURCE_KEYS.reduce(
+    (all, key) => {
+      all[key] = readAccountSelection(key);
+      return all;
+    },
+    {} as Record<SourceKey, AccountSelection>,
+  );
+}
+
 
 export default function TokenStatsPage() {
   // 首帧直接用共享缓存（启动预热可能已经扫完盘），避免把整页推回骨架屏再等一次 IPC。
@@ -79,20 +107,76 @@ export default function TokenStatsPage() {
     persistPreferredTokenSource(next);
   }, [active, stats]);
 
-  const source = stats?.sources.find((item) => item.source === active);
+  const accounts = useAccountsStore((state) => state.accounts);
+  const fetchAccounts = useAccountsStore((state) => state.fetchAll);
+  const [selections, setSelections] = useState<Record<SourceKey, AccountSelection>>(readAllSelections);
 
-  /** 导出当前数据源：范围是全量日期，图表时间范围不参与。 */
+  useEffect(() => {
+    // 账号下拉的选项来自账号库：没有账号时补拉一次（与积分页同一数据源）。
+    if (accounts.length === 0) void fetchAccounts();
+  }, [accounts.length, fetchAccounts]);
+
+  const source = stats?.sources.find((item) => item.source === active);
+  const options = useMemo(
+    () => accountOptions(active, accounts, source?.accounts),
+    [active, accounts, source],
+  );
+  // 保存的 uid 不在当前列表（账号被删、换机器、旧后端没有账号维度）时回退「所有账号」。
+  const selection = useMemo<AccountSelection>(() => {
+    const current = selections[active];
+    if (!current || current.kind === "all") return { kind: "all" };
+    const value = serializeSelection(current);
+    return options.some((option) => option.value === value) ? current : { kind: "all" };
+  }, [selections, active, options]);
+  const selectionValue = serializeSelection(selection);
+  const filteredSource = useMemo(
+    () => (source ? filterSourceByAccount(source, selection) : undefined),
+    [source, selection],
+  );
+  const scopeLabel = selectionLabel(selection, accounts);
+  const accountNotice = cliAccountsUnsupported(active)
+    ? "CLI 日志不记录账号，只能按「未归属」统计；IDE 来源按数据目录 uid 归因。"
+    : null;
+
+  /** 导出当前来源 + 当前账号：范围是全量日期，图表时间范围不参与。 */
   async function exportCsv() {
-    if (!source) {
+    if (!filteredSource) {
       toast.error("当前数据源没有可导出的数据");
       return;
     }
     try {
-      const content = buildTokenStatsCsv(source);
-      const outcome = await saveCsvFile(tokenStatsFileName(source.source), content);
+      const content = buildTokenStatsCsv(filteredSource);
+      const outcome = await saveCsvFile(
+        tokenStatsFileName(filteredSource.source, selection.kind === "all" ? undefined : scopeLabel),
+        content,
+      );
       if (outcome === "saved") {
         toast.success("已导出 Token 统计 CSV", {
-          description: `${source.source} · ${(content.length / 1024).toFixed(0)} KB`,
+          description: `${filteredSource.source} · ${scopeLabel} · ${(content.length / 1024).toFixed(0)} KB`,
+        });
+      }
+    } catch (cause) {
+      toast.error("导出失败", { description: api.asError(cause) });
+    }
+  }
+
+
+
+  /** 导出 Excel（xlsx）：同样按「当前来源 + 当前账号」，7 个 sheet 各一段。 */
+  async function exportXlsx() {
+    if (!filteredSource) {
+      toast.error("当前数据源没有可导出的数据");
+      return;
+    }
+    try {
+      const bytes = buildTokenStatsXlsx(filteredSource);
+      const outcome = await saveXlsxFile(
+        tokenStatsXlsxFileName(filteredSource.source, selection.kind === "all" ? undefined : scopeLabel),
+        bytes,
+      );
+      if (outcome === "saved") {
+        toast.success("已导出 Token 统计 Excel", {
+          description: `${filteredSource.source} · ${scopeLabel} · ${(bytes.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -115,6 +199,12 @@ export default function TokenStatsPage() {
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
                 当前数据更新于 {stats ? formatDateTime(stats.generatedAt) : "—"}
               </p>
+              {source ? (
+                <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
+                  本地日志口径（不是官方账单）：覆盖 {formatDate(source.coverageStartAt)} ~{" "}
+                  {formatDate(source.coverageEndAt)} · 账号：{scopeLabel} · 逐请求明细仅 CodeBuddy CLI 提供
+                </p>
+              ) : null}
             </>
           )}
         </div>
@@ -136,11 +226,24 @@ export default function TokenStatsPage() {
               variant="outline"
               size="sm"
               onClick={() => void exportCsv()}
-              disabled={!source}
-              title={source ? "导出当前数据源的 CSV" : "没有可导出的数据"}
+              disabled={!filteredSource}
+              title={filteredSource ? "导出当前数据源 + 当前账号的 CSV" : "没有可导出的数据"}
             >
               <Download />
               导出 CSV
+            </Button>
+          </DemoAction>
+          <DemoAction>
+            <Button
+              className="shrink-0"
+              variant="outline"
+              size="sm"
+              onClick={() => void exportXlsx()}
+              disabled={!filteredSource}
+              title={filteredSource ? "导出当前数据源 + 当前账号的 Excel（xlsx）" : "没有可导出的数据"}
+            >
+              <FileSpreadsheet />
+              导出 Excel
             </Button>
           </DemoAction>
           <DemoAction>
@@ -162,50 +265,65 @@ export default function TokenStatsPage() {
       {loading && !stats ? (
         <Skeleton className="mb-8 h-9 w-full max-w-md rounded-lg" aria-hidden="true" />
       ) : (
-        <Tabs
-          className="mb-8 min-w-0 gap-0"
-          value={active}
-          onValueChange={(value) => {
-            if (!isSourceKey(value)) return;
-            if (stats && !stats.sources.some((item) => item.source === value)) return;
-            setActive(value);
-          }}
-        >
-          <TabsList className="h-auto max-w-full flex-wrap" aria-label="Token 数据来源">
-            <TabsTrigger
-              className="max-w-full gap-2 whitespace-normal"
-              value="workbuddy"
-              disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy"))}
-            >
-              <WorkBuddyMark size={16} />
-              WorkBuddy
-            </TabsTrigger>
-            <TabsTrigger
-              className="max-w-full gap-2 whitespace-normal"
-              value="workbuddy-ai"
-              disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy-ai"))}
-            >
-              <WorkBuddyAiMark size={16} />
-              WorkBuddy 国际版
-            </TabsTrigger>
-            <TabsTrigger
-              className="max-w-full gap-2 whitespace-normal"
-              value="codebuddy-cli"
-              disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-cli"))}
-            >
-              <CodeBuddyMark size={16} />
-              CodeBuddy CLI
-            </TabsTrigger>
-            <TabsTrigger
-              className="max-w-full gap-2 whitespace-normal"
-              value="codebuddy-ide"
-              disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-ide"))}
-            >
-              <CodeBuddyCnIdeMark size={16} />
-              CodeBuddy IDE / VS Code
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+        <div className="mb-8 flex min-w-0 flex-wrap items-center justify-between gap-3">
+          <Tabs
+            className="min-w-0 gap-0"
+            value={active}
+            onValueChange={(value) => {
+              if (!isSourceKey(value)) return;
+              if (stats && !stats.sources.some((item) => item.source === value)) return;
+              setActive(value);
+            }}
+          >
+            <TabsList className="h-auto max-w-full flex-wrap" aria-label="Token 数据来源">
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
+                value="workbuddy"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy"))}
+              >
+                <WorkBuddyMark size={16} />
+                WorkBuddy
+              </TabsTrigger>
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
+                value="workbuddy-ai"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy-ai"))}
+              >
+                <WorkBuddyAiMark size={16} />
+                WorkBuddy 国际版
+              </TabsTrigger>
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
+                value="codebuddy-cli"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-cli"))}
+              >
+                <CodeBuddyMark size={16} />
+                CodeBuddy CLI
+              </TabsTrigger>
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
+                value="codebuddy-ide"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-ide"))}
+              >
+                <CodeBuddyCnIdeMark size={16} />
+                CodeBuddy IDE / VS Code
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {hasAccountDimension(source) ? (
+            <TokenAccountSelect
+              options={options}
+              value={selectionValue}
+              notice={accountNotice}
+              onChange={(value) => {
+                const next = parseSelection(value);
+                if (!next) return;
+                setSelections((previous) => ({ ...previous, [active]: next }));
+                persistAccountSelection(active, next);
+              }}
+            />
+          ) : null}
+        </div>
       )}
 
       {error && (
@@ -221,8 +339,10 @@ export default function TokenStatsPage() {
         </Alert>
       )}
 
-      {loading && !stats ? <TokenStatsLoadingSkeleton /> : source ? (
-        <Dashboard source={source} />
+      {loading && !stats ? (
+        <TokenStatsLoadingSkeleton />
+      ) : filteredSource ? (
+        <Dashboard source={filteredSource} scopeLabel={scopeLabel} />
       ) : (
         !error && (
           <div className="rounded-xl border border-dashed px-4 py-16 text-center text-sm text-muted-foreground">
@@ -231,11 +351,11 @@ export default function TokenStatsPage() {
         )
       )}
 
-      {source && (
+      {filteredSource && (
         <RequestDetailDialog
           open={detailOpen}
           onOpenChange={setDetailOpen}
-          source={source}
+          source={filteredSource}
         />
       )}
     </div>

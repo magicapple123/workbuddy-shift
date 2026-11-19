@@ -8,7 +8,7 @@ import type {
   TokenStatsSource,
 } from "@/lib/types";
 
-import { REQUEST_PAGE_SIZE, exact, formatRequestTime } from "./data";
+import { REQUEST_PAGE_SIZE, exact, formatRequestTime, shortAccountLabel } from "./data";
 import { RequestUsageCell } from "./usage-detail";
 
 /**
@@ -34,6 +34,7 @@ function RequestDetailRows({ rows, records }: { rows: TokenStatsRequestRow[]; re
               <TableHead>模型</TableHead>
               <TableHead>会话</TableHead>
               <TableHead>项目</TableHead>
+              <TableHead>账号</TableHead>
               <TableHead className="w-[150px] text-right">用量</TableHead>
             </TableRow>
           </TableHeader>
@@ -57,6 +58,9 @@ function RequestDetailRows({ rows, records }: { rows: TokenStatsRequestRow[]; re
                   </TableCell>
                   <TableCell className="max-w-[160px] truncate" title={row.project}>
                     {row.project}
+                  </TableCell>
+                  <TableCell className="max-w-[120px] truncate text-muted-foreground" title={row.uid ?? ""}>
+                    {shortAccountLabel(row.uid) ?? "—"}
                   </TableCell>
                   <RequestUsageCell row={row} />
                 </TableRow>
@@ -116,7 +120,8 @@ export function RequestDetailDialog({
         <DialogHeader>
           <DialogTitle>请求明细</DialogTitle>
           <DialogDescription>
-            每次模型调用一行，按时间倒序展示本地 CodeBuddy CLI 日志记录。
+            每次模型调用一行，按时间倒序展示本地 CodeBuddy CLI 日志记录（仅 CLI 提供逐请求明细，
+            其它来源只有聚合）。
           </DialogDescription>
         </DialogHeader>
         {rows.length === 0 ? (

@@ -76,6 +76,15 @@ pub(super) fn build_statistics(
         .values()
         .flat_map(|snapshots| snapshots.iter().map(|snapshot| snapshot.ts))
         .min();
+    let coverage_end_at = by_account
+        .values()
+        .flat_map(|snapshots| snapshots.iter().map(|snapshot| snapshot.ts))
+        .max();
+    // 窗口覆盖判定：本地快照只有从窗口第一天起就存在，窗口内的消耗才是完整的。
+    // 只看今天快照时 7 天/本月必须标「未覆盖」，否则页面会把今日值当成 7 天/本月
+    // （issue #225 截图里 28.7 / 28.7 / 28.7 的直接成因）。
+    let (coverage_days, covers_7_days, covers_this_month) =
+        coverage_windows(coverage_start_at.and_then(local_date), today);
 
     let mut usage_events = Vec::new();
     let mut usage_totals: HashMap<String, (f64, f64, f64)> = HashMap::new();
@@ -284,6 +293,15 @@ pub(super) fn build_statistics(
         "generatedAt": at_ms,
         "retentionDays": CREDIT_SNAPSHOT_RETENTION_DAYS,
         "coverageStartAt": coverage_start_at,
+        "coverageEndAt": coverage_end_at,
+        // 本地观察口径的覆盖面：前端据此决定哪些窗口可以显示数字、哪些必须是「—」。
+        "coverage": {
+            "startAt": coverage_start_at,
+            "endAt": coverage_end_at,
+            "days": coverage_days,
+            "covers7Days": covers_7_days,
+            "coversThisMonth": covers_this_month,
+        },
         "summary": {
             "currentRemaining": current_remaining,
             "currentCapacity": current_capacity,

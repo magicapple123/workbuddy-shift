@@ -7,7 +7,7 @@ import type {
   TokenStatsGroup,
 } from "@/lib/types";
 
-import { RANKING_LIMIT, formatTokenCompact, formatTokenExact, percentage, tokenTotal } from "./data";
+import { RANKING_LIMIT, formatTokenCompact, formatTokenExact, percentage, shortAccountLabel, tokenTotal } from "./data";
 import { SectionTitle } from "./metric";
 
 export function Ranking({
@@ -89,7 +89,7 @@ export function SessionRanking({ groups, denominator }: { groups: TokenStatsGrou
             const amount = tokenTotal(row);
             const share = percentage(amount, denominator);
             const label = row.title?.trim() || "未命名会话";
-            const detail = [row.project, row.title ? undefined : row.sessionId]
+            const detail = [row.project, row.title ? undefined : row.sessionId, shortAccountLabel(row.uid)]
               .filter(Boolean)
               .join(" · ");
             return (

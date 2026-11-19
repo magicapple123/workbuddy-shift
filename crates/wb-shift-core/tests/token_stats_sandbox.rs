@@ -124,6 +124,20 @@ fn statistics_only_scan_the_sandbox_home() {
         "会话标识没跟着沙箱数据走: {statistics}"
     );
 
+    // 2.5) 账号维度（第 7 条）：沙箱里没有 `workbuddy.db`，归因不到账号 → 全部进
+    //      「未归属」(uid 为空串)，且全局 summary == 各账号之和。
+    let accounts = source(&statistics, "workbuddy")["accounts"]
+        .as_array()
+        .expect("响应必须带 accounts 数组");
+    assert_eq!(accounts.len(), 1, "无 sessions 表时只应有一个未归属桶");
+    assert_eq!(accounts[0]["uid"], Value::String(String::new()));
+    assert_eq!(accounts[0]["summary"]["records"], 1);
+    assert_eq!(
+        accounts[0]["summary"]["input"],
+        source(&statistics, "workbuddy")["summary"]["input"],
+        "全局 summary 必须等于各账号之和: {statistics}"
+    );
+
     // 3) 另外三个来源在沙箱里没有任何对应数据：必须是 0。
     //    任何一条非 0，都说明那一路仍然在扫真实家目录（探针里没有这些目录）。
     for name in ["workbuddy-ai", "codebuddy-cli", "codebuddy-ide"] {

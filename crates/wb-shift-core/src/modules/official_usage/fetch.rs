@@ -193,6 +193,18 @@ pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
                 }));
             }
             Err(error) => {
+                // 失败必须可诊断（issue #225）：账号、接口 URL 与错误链一起落到
+                // `~/.workbuddy-shift/error.log`，与更新器/限额 hook 共用同一出口。
+                // 页面只会显示「官方用量暂不可用」，具体原因在这里留证。
+                crate::modules::error_log::record(
+                    "backend",
+                    "官方用量取数失败",
+                    &format!(
+                        "account={account_name} accountId={account_id} variant={} url={} error={error}",
+                        variant_of(account).as_str(),
+                        official_usage_url_for(account),
+                    ),
+                );
                 errors.push(json!({
                     "accountId": account_id,
                     "accountName": account_name,

@@ -61,6 +61,23 @@ pub(super) fn parse_snapshots(values: &[Value], at_ms: i64) -> Vec<Snapshot> {
     snapshots
 }
 
+/// 本地观察的窗口覆盖：`(覆盖天数, 是否覆盖近 7 天, 是否覆盖本月)`。
+///
+/// 「覆盖」指本地快照的起点早于（含等于）该窗口的第一天：只有这样才能保证窗口内
+/// 每一次余额下降都被观察到。快照只覆盖今天时，7 天/本月都是**不完整**的观察，
+/// 调用方必须据此显示「—」而不是把今日值当成 7 天/本月（issue #225 的三个相同数字）。
+///
+/// 天数含首尾：今天唯一的快照 → 1 天；昨天起有快照 → 2 天。无快照为 0 天且都不覆盖。
+pub(super) fn coverage_windows(start: Option<NaiveDate>, today: NaiveDate) -> (i64, bool, bool) {
+    let Some(start) = start else {
+        return (0, false, false);
+    };
+    let days = (today - start).num_days().max(0) + 1;
+    let week_start = today - ChronoDuration::days(6);
+    let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+    (days, start <= week_start, start <= month_start)
+}
+
 pub(super) fn usage_in_windows(date: &str, today: NaiveDate) -> (bool, bool, bool) {
     let Some(date) = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok() else {
         return (false, false, false);

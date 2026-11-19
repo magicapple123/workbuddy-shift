@@ -36,6 +36,33 @@ const ACCOUNTS_WAIT_TIMEOUT_MS = 5000;
 
 /** 模块级调度标记：一次应用会话只预热一次。 */
 let scheduled = false;
+
+/**
+ * 统计预热是否已经结束（成功、失败、跳过都算结束）。
+ *
+ * 存储预热要用它把「总览扫描」排在统计之后（第三轮第 6 条决策：统计优先），
+ * 同时不能死等：调用方（`use-storage-warmup`）自己带兜底超时。
+ */
+let statsSettled = false;
+const statsSettledWaiters: Array<() => void> = [];
+
+function markStatsSettled(): void {
+  if (statsSettled) return;
+  statsSettled = true;
+  for (const resolve of statsSettledWaiters.splice(0)) resolve();
+}
+
+/**
+ * 等统计预热结束（永不 reject）。
+ *
+ * 统计预热没有调度过（例如单测只挂了存储预热）时由调用方的超时兜底，不会永久挂起。
+ */
+export function whenStatsWarmupSettled(): Promise<void> {
+  if (statsSettled) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    statsSettledWaiters.push(resolve);
+  });
+}
 /** 本模块自己发起的账号拉取（用于 join，不会产生第二份请求）。 */
 let accountsFetch: Promise<void> | null = null;
 
@@ -203,6 +230,7 @@ export function scheduleStatsWarmup(overrides: Partial<WarmupSchedulerDeps> = {}
     // 演示模式没有真实后端：标记为已处理，避免反复尝试。
     console.info("[stats-warmup] skipped (demo)");
     scheduled = true;
+    markStatsSettled();
     return () => {};
   }
 
@@ -229,9 +257,12 @@ export function scheduleStatsWarmup(overrides: Partial<WarmupSchedulerDeps> = {}
     cancelIdle = schedule(() => {
       cancelIdle = null;
       executed = true;
-      void run(resolveDeps()).catch((cause: unknown) => {
-        console.info("[stats-warmup] dispatch failed", api.asError(cause));
-      });
+      void run(resolveDeps())
+        .catch((cause: unknown) => {
+          console.info("[stats-warmup] dispatch failed", api.asError(cause));
+        })
+        // 无论成功、失败还是跳过，都要放行排队在后面的存储预热。
+        .finally(markStatsSettled);
     });
   };
 
@@ -261,4 +292,6 @@ export function useStatsWarmup(): void {
 export function __resetWarmupScheduleForTests(): void {
   scheduled = false;
   accountsFetch = null;
+  statsSettled = false;
+  statsSettledWaiters.splice(0);
 }

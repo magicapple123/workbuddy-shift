@@ -1,7 +1,30 @@
 import { useCallback, useState } from "react";
 
 import * as api from "@/lib/api";
-import type { CreditStatistics } from "@/lib/types";
+import type { CreditOfficialUsage, CreditStatistics } from "@/lib/types";
+
+/**
+ * 官方用量「整页不可用」占位对象。
+ *
+ * 渐进式刷新的官方任务一旦抛错（网络层 reject、IPC 失败、命令超时），旧实现没有 `catch`，
+ * `officialUsage` 会停在 `undefined`：既没有警告条，四张卡也悄悄退回本地口径——比
+ * 「官方面返回 unavailable」更静默（issue #225 根因 C）。这里把异常归一成与后端
+ * `status: "unavailable"` 完全同构的响应，保证页面一定有横幅与失败原因。
+ */
+export function unavailableOfficialUsage(reason: string): CreditOfficialUsage {
+  return {
+    status: "unavailable",
+    rangeStart: "",
+    rangeEnd: "",
+    summary: { usageToday: 0, usage7Days: 0, usageThisMonth: 0 },
+    daily: [],
+    accounts: [],
+    requests: [],
+    models: [],
+    detailLimitPerAccount: 0,
+    errors: [{ accountId: "", accountName: "官方用量", error: reason }],
+  };
+}
 
 /** 三段进度：本地数字（磁盘）→ 积分余额（12 账号 × 3 接口）→ 官方用量（12 账号并发）。 */
 export interface RefreshPhase {
@@ -66,12 +89,28 @@ export async function runProgressiveRefresh(
 
   const officialTask = (async () => {
     const start = performance.now();
-    const result = await api.refreshOfficialUsage();
-    const base = await api.getCreditStatistics(false);
-    deps.commit({ ...base, officialUsage: result.officialUsage, elapsedMs: result.elapsedMs });
-    hooks.onOfficial(result.officialUsage, result.elapsedMs, performance.now() - start);
-    hooks.onPhase({ official: true });
+    try {
+      const result = await api.refreshOfficialUsage();
+      const base = await api.getCreditStatistics(false);
+      deps.commit({ ...base, officialUsage: result.officialUsage, elapsedMs: result.elapsedMs });
+      hooks.onOfficial(result.officialUsage, result.elapsedMs, performance.now() - start);
+    } catch (cause) {
+      // 失败原因必须留证并回写到页面状态：不抛、不静默，也不让官方的坏结果覆盖本地数字。
+      const reason = api.asError(cause);
+      api.logError("frontend_unhandled", "官方用量刷新失败", reason).catch(() => {});
+      const failure = unavailableOfficialUsage(reason);
+      try {
+        const base = await api.getCreditStatistics(false);
+        deps.commit({ ...base, officialUsage: failure });
+      } catch {
+        // 连本地统计都取不到时保持页面现状：横幅仍由 `officialUsage` 缺失时的默认分支兜住。
+      }
+      hooks.onOfficial(failure, 0, performance.now() - start);
+    } finally {
+      hooks.onPhase({ official: true });
+    }
   })();
+
 
   await Promise.all([creditsTask, officialTask]);
 }

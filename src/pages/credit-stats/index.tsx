@@ -28,10 +28,16 @@ import type {
   CreditStatistics,
   WbVariant,
 } from "@/lib/types";
+
 import { accountVariant } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 import { SelectedAccountDetails } from "./account-details";
 import { AccountUsageShare } from "./account-usage-share";
+import {
+  creditSourceBadge,
+  localCoverageText,
+  usageWindowValue,
+} from "./coverage";
 import { StatsVariantView, VARIANT_VIEW_OPTIONS, isOfficialUsageAvailable, recomputeLocalStats, recomputeOfficialUsage, resolveAccountVariant, statsVariantViewLabel } from "./data";
 import { ModelBreakdown } from "./model-breakdown";
 import { useProgressiveRefresh } from "./progressive-refresh";
@@ -45,6 +51,7 @@ function formatMs(value: number | null): string {
 
 /** 进入统计页时距上次采集超过此时长（ms）则自动重新采集一次 */
 const STATISTICS_AUTO_REFRESH_MS = 30 * 60 * 1000;
+
 
 export default function CreditStatsPage() {
   const {
@@ -183,6 +190,28 @@ export default function CreditStatsPage() {
   const variantEmpty =
     viewVariant !== "all" && variantAccountIds !== null && variantAccountIds.size === 0;
 
+  // 本地观察口径的覆盖面：官方不可用时用它解释「哪些窗口是完整的」。
+  // 档位过滤后的 `coverage` 沿用全局快照区间（后端只下发一份），因此是最保守的下界：
+  // 单档位账号的快照可能更晚，绝不会更早，不会把未覆盖说成已覆盖。
+  const coverage = filteredStats?.coverage;
+  const todayValue = filteredStats ? usageWindowValue("today", official, filteredStats, coverage) : null;
+  const weekValue = filteredStats ? usageWindowValue("7d", official, filteredStats, coverage) : null;
+  const monthValue = filteredStats ? usageWindowValue("month", official, filteredStats, coverage) : null;
+  const coverageHint = weekValue?.absenceReason ?? monthValue?.absenceReason ?? null;
+  const officialRangeText = official ? `${official.rangeStart} ~ ${official.rangeEnd}` : "";
+  // 失败原因取**未过滤**的官方响应：档位过滤会按 accountId 收紧 `errors`，
+  // 而归一化出来的「整页不可用」没有任何账号行，过滤后会把原因一起丢掉。
+  const failureSource = stats?.officialUsage ?? officialUsage;
+  const officialFailureText = (failureSource?.errors ?? [])
+    .map((item) => `${item.accountName}: ${item.error}`)
+    .join("；");
+
+  // 明细已取到但总览仍回退本地时额外提示，避免「明细有数字、总览是另一个数」的自相矛盾。
+  const detailHasData =
+    !official &&
+    (officialUsage?.requests.length ?? 0) > 0 &&
+    (officialUsage?.accounts ?? []).some((account) => account.ok && account.requestCount > 0);
+
   return (
     <div className="mx-auto w-full max-w-[1180px] min-w-0 px-4 py-6 sm:px-8 sm:py-9">
       <header className="mb-10 flex min-w-0 flex-wrap items-start justify-between gap-4 sm:mb-12">
@@ -191,6 +220,18 @@ export default function CreditStatsPage() {
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
             当前数据更新于 {stats ? formatDateTime(official?.collectedAt ?? stats.generatedAt) : "—"}
           </p>
+          <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
+            仅统计 WorkBuddy 账号的积分（国内版与国际版分开计算，不合并其它客户端）；
+            官方用量接口只提供近 30 天，逐请求明细每账号上限 1000 条（聚合不受此限制）。
+          </p>
+          {stats ? (
+            <p className="mt-0.5 max-w-2xl text-[11px] leading-5 text-muted-foreground">
+              {official
+                ? `官方口径：${officialRangeText} · 明细上限 ${official.detailLimitPerAccount} 条/账号`
+                : `本地观察口径：${localCoverageText(coverage)}`}
+            </p>
+          ) : null}
+
           {progressive.running || progressive.timing.officialMs !== null ? (
             <p className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
               <span>本地 {formatMs(progressive.timing.localMs)}</span>
@@ -286,26 +327,57 @@ export default function CreditStatsPage() {
             </div>
           ) : (
             <>
-              {officialUsage && officialUsage.status !== "complete" && (
+              {!official && (
                 <Alert variant="warning">
                   <CircleAlert />
-                  <AlertTitle>
-                    {officialUsage.status === "partial" ? "部分账号官方用量未同步" : "官方用量暂不可用"}
-                  </AlertTitle>
-                  <AlertDescription>
-                    {officialUsage.status === "partial"
-                      ? `已同步 ${officialUsage.accounts.filter((account) => account.ok).length}/${officialUsage.accounts.length} 个当前账号；失败账号的官方数值显示为“—”。`
-                      : "今日、近 7 天和本月消耗将使用本地观察口径；官方接口恢复后刷新即可重新同步。"}
-                    {officialUsage.errors.length > 0 && (
-                      <span className="text-xs text-warning-foreground">
-                        {officialUsage.errors.map((item) => `${item.accountName}: ${item.error}`).join("；")}
+                  <AlertTitle>官方用量暂不可用，当前为本地观察数据</AlertTitle>
+                  <AlertDescription className="flex flex-col gap-1">
+                    <span>
+                      本地观察覆盖：{localCoverageText(coverage)}。今日值为本地快照差值；
+                      近 7 天/本月在本地覆盖不足时显示「—」，不用今日值代替。
+                      失败原因已写入 error.log，官方接口恢复后点「刷新统计」即可重新同步。
+                    </span>
+                    {detailHasData && (
+                      <span className="text-xs">
+                        明细已取到部分官方请求，但总览暂用本地口径；明细与总览的差异来自这里。
                       </span>
+                    )}
+                    {officialFailureText && (
+                      <span className="text-xs text-warning-foreground">{officialFailureText}</span>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {official && official.status === "partial" && (
+                <Alert variant="warning">
+                  <CircleAlert />
+                  <AlertTitle>部分账号官方用量未同步（partial）</AlertTitle>
+                  <AlertDescription className="flex flex-col gap-1">
+                    <span>
+                      已同步 {official.accounts.filter((account) => account.ok).length}/
+                      {official.accounts.length} 个当前账号；失败账号的官方数值显示为「—」，
+                      总览为已同步账号之和，不代表全部账号。
+                    </span>
+                    {officialFailureText && (
+                      <span className="text-xs text-warning-foreground">{officialFailureText}</span>
                     )}
                   </AlertDescription>
                 </Alert>
               )}
 
               <Card className="min-w-0 gap-0 overflow-hidden rounded-2xl bg-card/70 py-0 shadow-none" aria-label="积分总览">
+                <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 px-4 py-2 text-[11px] leading-5 text-muted-foreground sm:px-5">
+                  <span className="min-w-0">
+                    {creditSourceBadge(official)}：
+                    {official
+                      ? `${officialRangeText}（官方仅提供近 30 天）`
+                      : localCoverageText(coverage)}
+                  </span>
+                  <span className="min-w-0">
+                    {coverageHint ?? "明细每账号上限 1000 条，聚合与趋势不受限"}
+                  </span>
+                </div>
                 <CardContent className="grid min-w-0 grid-cols-1 divide-y divide-border/60 p-0 sm:grid-cols-4 sm:divide-y-0 sm:py-5">
                   <StatMetric
                     icon={Sparkles}
@@ -315,19 +387,19 @@ export default function CreditStatsPage() {
                   <StatMetric
                     icon={TrendingDown}
                     label="今日消耗"
-                    value={formatAmount(official ? official.summary.usageToday : filteredStats.summary.usageToday)}
+                    value={todayValue?.text ?? "—"}
                     divided
                   />
                   <StatMetric
                     icon={CalendarDays}
                     label="近 7 天消耗"
-                    value={formatAmount(official ? official.summary.usage7Days : filteredStats.summary.usage7Days)}
+                    value={weekValue?.text ?? "—"}
                     divided
                   />
                   <StatMetric
                     icon={CalendarRange}
                     label="本月消耗"
-                    value={formatAmount(official ? official.summary.usageThisMonth : filteredStats.summary.usageThisMonth)}
+                    value={monthValue?.text ?? "—"}
                     divided
                   />
                 </CardContent>

@@ -22,7 +22,91 @@ pub(super) struct SessionTotals {
     pub(super) title: Option<String>,
     pub(super) project: String,
     pub(super) session_id: String,
+    /// 该会话用量的归属账号（`sessions.user_id` / IDE 路径 uid / CLI 未归属为空串）。
+    pub(super) uid: String,
     pub(super) totals: Totals,
+}
+
+/// 一条记录的维度聚合：模型、项目、逐日、逐模型逐日、小时。
+///
+/// 全局聚合与 per-account 聚合共用这一份实现：切换账号筛选时两处数字必须逐项对得上，
+/// 各写一遍迟早分叉（第 7 条的核心不变量就是「全局 == 各账号之和」）。
+#[derive(Clone, Debug, Default)]
+pub(super) struct DimensionTotals {
+    pub(super) models: HashMap<String, Totals>,
+    pub(super) projects: HashMap<String, Totals>,
+    pub(super) daily: HashMap<String, Totals>,
+    pub(super) daily_by_model: HashMap<String, HashMap<String, Totals>>,
+    pub(super) hours: HashMap<String, Totals>,
+}
+
+impl DimensionTotals {
+    pub(super) fn add(
+        &mut self,
+        usage: Usage,
+        model_name: &str,
+        project: &str,
+        timestamp: Option<i64>,
+    ) {
+        add_to(&mut self.models, model_name, usage);
+        add_to(&mut self.projects, project, usage);
+        let Some(timestamp) = timestamp else {
+            return;
+        };
+        let Some((day, hour)) = local_buckets(timestamp) else {
+            return;
+        };
+        add_to(&mut self.daily, &day, usage);
+        if !self.daily_by_model.contains_key(model_name) {
+            self.daily_by_model
+                .insert(model_name.to_string(), HashMap::new());
+        }
+        if let Some(per_model) = self.daily_by_model.get_mut(model_name) {
+            add_to(per_model, &day, usage);
+        }
+        add_to(&mut self.hours, &hour, usage);
+    }
+
+    /// 逐模型逐日序列：只保留有条目的模型，值按总量倒序。
+    pub(super) fn daily_by_model_value(&self) -> Map<String, Value> {
+        self.daily_by_model
+            .iter()
+            .map(|(model, points)| (model.clone(), Value::Array(groups(points.clone()))))
+            .collect()
+    }
+}
+
+/// 单个账号的聚合（key = uid；空串代表「未归属」）。
+#[derive(Clone, Debug, Default)]
+pub(super) struct AccountTotals {
+    pub(super) total: Totals,
+    pub(super) dims: DimensionTotals,
+}
+
+impl AccountTotals {
+    pub(super) fn add(
+        &mut self,
+        usage: Usage,
+        model_name: &str,
+        project: &str,
+        timestamp: Option<i64>,
+    ) {
+        self.total.add(usage);
+        self.dims.add(usage, model_name, project, timestamp);
+    }
+
+    /// 响应里的 `accounts[]` 行：`{ uid, summary, models, projects, daily, dailyByModel, hours }`。
+    pub(super) fn value(&self, uid: &str) -> Value {
+        json!({
+            "uid": uid,
+            "summary": self.total.value(),
+            "models": groups(self.dims.models.clone()),
+            "projects": groups(self.dims.projects.clone()),
+            "daily": groups(self.dims.daily.clone()),
+            "dailyByModel": self.dims.daily_by_model_value(),
+            "hours": groups(self.dims.hours.clone()),
+        })
+    }
 }
 
 /// 展示总量：`input` 已包含 cache reads，因此只追加 output 与 cache write，
@@ -71,6 +155,8 @@ pub(super) struct RequestRow {
     pub(super) project: String,
     pub(super) session_id: String,
     pub(super) title: Option<String>,
+    /// 该请求的归属账号（空串 = 未归属），前端按账号筛选时直接用它。
+    pub(super) uid: String,
     pub(super) usage: Usage,
     /// 思考过程 token 数（`output` 的子集），仅用于拆分「思考 / 回复」。
     pub(super) thinking: u64,
@@ -84,6 +170,7 @@ impl RequestRow {
             "project": self.project,
             "sessionId": self.session_id,
             "title": self.title,
+            "uid": self.uid,
             "input": self.usage.input,
             "output": self.usage.output,
             "cacheRead": self.usage.read,
@@ -392,6 +479,9 @@ pub(super) fn session_groups(sessions: Vec<SessionTotals>) -> Vec<Value> {
             value["title"] = json!(session.title);
             value["project"] = json!(session.project);
             value["sessionId"] = json!(session.session_id);
+            // 会话可能在同一来源的不同账号下各有一行（重放历史归原账号、副本新增归副本
+            // 账号），`uid` 就是前端按账号过滤会话表的依据。
+            value["uid"] = json!(session.uid);
             value
         })
         .collect();

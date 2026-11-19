@@ -204,13 +204,30 @@ fn collect_statistics(home: &Path, days: Option<i64>) -> Value {
     let range_days = normalize_days(days);
     let cutoff = range_days.map(|value| generated_at - value * 86_400_000);
     let ide_projects = ide_project_by_session();
+    // 账号归因：一次扫描就把 per-account 数字算出来（第 7 条），切账号不重新扫盘。
+    // DB 读不到时返回空表 → 全部「未归属」，绝不阻塞整次统计。
+    let cn_uids = session_uid_index_at(&WbVariant::Cn.data_root_at(home));
+    let ai_uids = session_uid_index_at(&WbVariant::Ai.data_root_at(home));
     json!({
         "generatedAt": generated_at,
         "rangeDays": range_days,
         "sources": [
-            source_from_roots(&existing_roots(&roots.workbuddy), "workbuddy", cutoff, false),
-            source_from_roots(&existing_roots(&roots.workbuddy_ai), "workbuddy-ai", cutoff, false),
+            source_from_roots(
+                &existing_roots(&roots.workbuddy),
+                "workbuddy",
+                cutoff,
+                false,
+                &cn_uids,
+            ),
+            source_from_roots(
+                &existing_roots(&roots.workbuddy_ai),
+                "workbuddy-ai",
+                cutoff,
+                false,
+                &ai_uids,
+            ),
             // 请求明细目前只对 CodeBuddy CLI 开放（见 spec 的 requests 契约）。
+            // CLI 日志不按账号分目录、也没有账号字段 → 全部归「未归属」。
             source(roots.codebuddy_cli, "codebuddy-cli", cutoff, true),
             ide_source(roots.codebuddy_ide, "codebuddy-ide", cutoff, &ide_projects),
         ],
@@ -274,6 +291,7 @@ mod tests {
     include!("tests/fixtures.rs");
     include!("tests/decode.rs");
     include!("tests/detail.rs");
+    include!("tests/accounts.rs");
     include!("tests/ide_roots.rs");
     include!("tests/cache.rs");
     include!("tests/memo.rs");
