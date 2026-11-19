@@ -88,6 +88,18 @@ export function sessionCwdTitle(session: Session): string {
   return cwd ? `${session.title}\n${cwd}` : session.title;
 }
 
+/**
+ * 行尾的项目标签（仅 JetBrains 插件会话）。
+ *
+ * 同一会话可能同时出现在「无项目」桶与某个项目桶里，两行的标题 / 时间完全一样，只有项目
+ * 能区分；`projectPath` 解不出来时说明项目段退化成了账号 uid，如实显示「未打开项目」。
+ * 其它客户端不返回这两个字段 → 返回空串 → 行尾不渲染任何东西（既有版式不变）。
+ */
+export function sessionProjectLabel(session: Session): string {
+  if (session.projectPath === undefined && session.projectKey === undefined) return "";
+  return session.projectPath ? `项目：${session.projectPath}` : "项目：未打开项目";
+}
+
 export function SessionPickRow({
   session,
   checked,
@@ -115,6 +127,14 @@ export function SessionPickRow({
       <span className="min-w-0 flex-1 truncate text-sm" title={sessionCwdTitle(session)}>
         {session.title}
       </span>
+      {sessionProjectLabel(session) && (
+        <span
+          className="hidden max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground sm:inline"
+          title={sessionProjectLabel(session)}
+        >
+          {sessionProjectLabel(session)}
+        </span>
+      )}
       {session.hasHistory && (
         <Badge variant="outline" className="shrink-0 text-[10px]">
           有内容

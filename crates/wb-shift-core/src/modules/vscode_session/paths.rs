@@ -72,18 +72,154 @@ pub fn ext_data_root() -> Option<PathBuf> {
 }
 
 /// 账号 uid 的数据目录：`<root>/<uid>/<client_dir>/<uid>`。
+///
+/// 只在 [`ScopeSegment::Uid`] 的数据仓里等于「客户端段之后那一级」；JetBrains 那里是
+/// **项目 key**，因此该函数的唯一用途是「无项目桶」兜底路径，不要拿它拼真实路径。
 pub fn uid_data_dir_in(spec: SessionStoreSpec, root: &Path, uid: &str) -> PathBuf {
     root.join(uid).join(spec.client_dir).join(uid)
 }
 
+/// 账号在数据仓下的客户端段：`<root>/<uid>/<client_dir>`（其下一级是 uid 或 projectKey）。
+pub fn account_client_dir_in(spec: SessionStoreSpec, root: &Path, uid: &str) -> PathBuf {
+    root.join(uid).join(spec.client_dir)
+}
+
+/// 某个「项目段」的会话历史根：`<root>/<uid>/<client_dir>/<project_key>/history`。
+///
+/// `project_key` 的语义由 [`SessionStoreSpec::scope`] 决定：`Uid` 语义下必须是账号 uid
+/// （否则会拼出一个客户端永远不会读的目录）；`ProjectKey` 语义下是项目 key。
+pub fn scope_history_root_in(
+    spec: SessionStoreSpec,
+    root: &Path,
+    uid: &str,
+    project_key: &str,
+) -> PathBuf {
+    account_client_dir_in(spec, root, uid)
+        .join(project_key)
+        .join(HISTORY_DIR)
+}
+
 /// 账号 uid 的会话历史根：`<root>/<uid>/<client_dir>/<uid>/history`。
+///
+/// 等价于 [`scope_history_root_in`] 传入 `project_key = uid`，即两种语义下都成立：
+/// VS Code 系这是唯一的历史根；JetBrains 这是「没有打开项目」时的退化项目段。
 pub fn history_root_in(spec: SessionStoreSpec, root: &Path, uid: &str) -> PathBuf {
-    uid_data_dir_in(spec, root, uid).join(HISTORY_DIR)
+    scope_history_root_in(spec, root, uid, uid)
 }
 
 /// VS Code 插件侧的历史根（历史入口）。
 pub fn history_root(root: &Path, uid: &str) -> PathBuf {
     history_root_in(VSCODE_STORE, root, uid)
+}
+
+/// 一个「账号 × 项目」的历史根。
+///
+/// 读路径据 [`Self::history_root`] 枚举会话桶；写路径据 [`Self::project_key`] 决定目标
+/// 目录（项目 key 由项目路径决定，**跨账号同值**，因此可以沿用源侧的 key）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryScope {
+    /// 客户端段之后那一级的目录名（`Uid` 语义 = 账号 uid；`ProjectKey` 语义 = 项目 key）。
+    pub project_key: String,
+    /// `<root>/<uid>/<client_dir>/<project_key>/history`。
+    pub history_root: PathBuf,
+}
+
+/// 账号在数据仓下的全部历史根。
+///
+/// - [`ScopeSegment::Uid`]：恒定返回 1 个（`project_key = uid`），目录是否存在由调用方判；
+/// - [`ScopeSegment::ProjectKey`]：枚举 `<root>/<uid>/<client_dir>/*` 中**确实带 `history/`**
+///   子目录的那些（多项目并列；「未打开项目」时项目段退化成 uid，同样被枚举到）。
+///
+/// 枚举失败（权限 / 并发删除）返回空表：读路径据此判「没有判定依据」，不会把读不到
+/// 当成「没有会话」而误删关联组。
+pub fn history_scopes_in(spec: SessionStoreSpec, root: &Path, uid: &str) -> Vec<HistoryScope> {
+    match spec.scope {
+        ScopeSegment::Uid => vec![HistoryScope {
+            project_key: uid.to_string(),
+            history_root: history_root_in(spec, root, uid),
+        }],
+        ScopeSegment::ProjectKey => {
+            let client_dir = account_client_dir_in(spec, root, uid);
+            let Ok(entries) = std::fs::read_dir(&client_dir) else {
+                return Vec::new();
+            };
+            let mut scopes: Vec<HistoryScope> = entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| {
+                    let project_key = entry.file_name().to_str()?.to_string();
+                    if !is_safe_segment(&project_key) {
+                        return None;
+                    }
+                    let history_root = entry.path().join(HISTORY_DIR);
+                    history_root
+                        .is_dir()
+                        .then_some(HistoryScope {
+                            project_key,
+                            history_root,
+                        })
+                })
+                .collect();
+            scopes.sort_by(|left, right| left.project_key.cmp(&right.project_key));
+            scopes
+        }
+    }
+}
+
+/// 反解 JetBrains 项目 key 为项目路径（仅供展示；解码不出来返回空串）。
+///
+/// 插件写盘用的是项目路径的 base64url（无 padding）；`recentProjects.xml` 里是同一路径的
+/// 原生形态（Windows 盘符大写），因此展示时把盘符统一成大写，与用户在 IDE 里看到的一致。
+/// 解码结果必须**看起来像路径**（含分隔符、无控制字符）才采信：账号 uid 这类 32 位 hex
+/// 偶尔也能被 base64 解成字节，但它不是项目。
+pub fn decode_project_key(project_key: &str) -> String {
+    use base64::Engine as _;
+    let trimmed = project_key.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    for decoded in [
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed),
+        base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed),
+        base64::engine::general_purpose::STANDARD.decode(trimmed),
+    ] {
+        let Ok(bytes) = decoded else { continue };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let path = normalize_project_path(&text);
+        if !path.is_empty() {
+            return path;
+        }
+    }
+    String::new()
+}
+
+/// 把解码出的原文规整成可展示的项目路径：拒绝控制字符与「不像路径」的文本。
+fn normalize_project_path(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(char::is_control)
+        || !trimmed.contains(['/', '\\'])
+    {
+        return String::new();
+    }
+    let mut chars = trimmed.chars();
+    match (chars.next(), chars.next(), chars.next()) {
+        // Windows 盘符大小写无关，统一按大写展示（与 recentProjects.xml 一致）。
+        (Some(drive), Some(':'), Some(sep))
+            if drive.is_ascii_alphabetic() && (sep == '/' || sep == '\\') =>
+        {
+            format!("{}:{}{}", drive.to_ascii_uppercase(), sep, chars.as_str())
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// 目录名白名单校验（项目 key / 项目段）：非空、不含路径分隔符、不是 `.` / `..`。
+pub(crate) fn is_safe_segment(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
 /// uid 白名单校验：非空、不含路径分隔符 / `..`、且不是 `default` / `Public`。

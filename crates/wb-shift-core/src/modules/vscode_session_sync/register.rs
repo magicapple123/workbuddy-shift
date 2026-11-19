@@ -9,22 +9,34 @@ use super::*;
 // 登记上下文
 // ---------------------------------------------------------------------------
 
+/// 一条被显式指名的会话的定位与内容。
+///
+/// `project_key` 必须与 `workspace_hash` 一起回传：多项目数据仓（JetBrains）里只凭工作区桶
+/// 无法还原 `<项目>/history/<桶>` 这条路径。
+pub(crate) struct SessionLocation {
+    /// 项目段：`Uid` 语义 = 账号 uid；`ProjectKey` 语义 = 项目 key。
+    pub(crate) project_key: String,
+    /// 工作区桶目录名（不透明，仅作定位与展示）。
+    pub(crate) workspace_hash: String,
+    pub(crate) content: ContentState,
+}
+
 /// Resolve one explicitly identified session without consulting the client's active login UID.
-/// The opaque workspace hash is returned only as a display locator; it is never decoded.
+/// The opaque workspace bucket is returned only as a display locator; it is never decoded.
 pub(crate) fn session_location_and_content(
     spec: SessionStoreSpec,
     root: &Path,
     uid: &str,
     conversation_id: &str,
-) -> Option<(String, String, ContentState)> {
+) -> Option<SessionLocation> {
     let index = conversation_index(spec, root, uid);
     let locator = index.get(conversation_id)?;
-    let dir = conversation_dir(spec, root, uid, &locator.workspace_hash, conversation_id);
-    Some((
-        locator.workspace_hash.clone(),
-        locator.title.clone(),
-        vscode_session_link::read_session_content(&dir, conversation_id),
-    ))
+    let dir = conversation_dir(spec, root, uid, locator, conversation_id);
+    Some(SessionLocation {
+        project_key: locator.project_key.clone(),
+        workspace_hash: locator.workspace_hash.clone(),
+        content: vscode_session_link::read_session_content(&dir, conversation_id),
+    })
 }
 
 /// 一次预览 / 同步内不变的输入：数据仓、账号、数据根与两侧会话定位索引。
@@ -53,15 +65,9 @@ impl SyncContext<'_> {
 
     /// 某账号某会话的目录（索引里找不到该会话时为 `None`）。
     pub(super) fn dir_of(&self, uid: &str, conversation_id: &str) -> Option<PathBuf> {
-        self.index_of(uid).get(conversation_id).map(|locator| {
-            conversation_dir(
-                self.spec,
-                self.root,
-                uid,
-                &locator.workspace_hash,
-                conversation_id,
-            )
-        })
+        self.index_of(uid)
+            .get(conversation_id)
+            .map(|locator| conversation_dir(self.spec, self.root, uid, locator, conversation_id))
     }
 
     /// 会话内容状态；索引里找不到该会话（被删除/改归属）时按 `Missing`（判定侧得到 unknown）。

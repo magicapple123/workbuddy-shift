@@ -70,6 +70,14 @@ pub fn copy_sessions_in(
 ///
 /// 逐条隔离：单条失败只回退该条（删临时/成品目录 + 回退该工作区索引），
 /// 记入 `errors[]` 后继续处理其余条目，不整体中止。
+///
+/// **目标位置解析**（本函数的第一个阶段）：
+/// - [`ScopeSegment::Uid`]（VS Code / CodeBuddy IDE）：项目段恒为目标账号 uid、桶取源桶，
+///   目标目录按需创建——行为与历史完全一致；
+/// - [`ScopeSegment::ProjectKey`]（JetBrains）：项目段沿用源侧项目 key（项目路径决定，
+///   跨账号同值），桶只能取**目标该项目下已存在的值**（安装级常量）。目标账号在该项目下
+///   一个会话都没有时**不凭空创建**目录，直接整次拒绝并提示用户先去 IDE 里打开该项目——
+///   凭空造一个桶只会得到一个客户端永远打不开的目录。
 pub(crate) fn copy_sessions_in_with(
     spec: SessionStoreSpec,
     options: CopyOptions,
@@ -89,21 +97,11 @@ pub(crate) fn copy_sessions_in_with(
         return Err("源账号与目标账号相同，无需复制会话".to_string());
     }
 
-    let source_history = history_root_in(spec, root, source_uid);
-    let target_history = history_root_in(spec, root, target_uid);
-
-    // 先为每个目标工作区建立「磁盘备份 + 内存工作副本」，保证逐条隔离与可回退。
-    let mut states: BTreeMap<String, WorkspaceState> = BTreeMap::new();
-    for workspace_hash in distinct_workspaces(items) {
-        let ws_dir = target_history.join(&workspace_hash);
-        let state = WorkspaceState::load(&ws_dir, backup_root, &workspace_hash)
-            .map_err(|error| format!("备份目标工作区索引失败（{workspace_hash}）：{error}"))?;
-        states.insert(workspace_hash, state);
-    }
-
-    let mut copied: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
 
+    // 阶段 1：逐条校验并解析目标位置（不写盘）。
+    let mut prepared: Vec<PreparedCopy> = Vec::with_capacity(items.len());
+    let mut missing_projects: Vec<String> = Vec::new();
     for item in items {
         let workspace_hash = item.workspace_hash.trim();
         let conversation_id = item.conversation_id.trim();
@@ -115,8 +113,10 @@ pub(crate) fn copy_sessions_in_with(
             }));
             continue;
         }
-        let source_dir = source_history.join(workspace_hash).join(conversation_id);
-        if !source_dir.is_dir() {
+        let source_project_key = source_project_key_of(spec, item, source_uid);
+        let source_ws_dir =
+            scope_history_root_in(spec, root, source_uid, &source_project_key).join(workspace_hash);
+        if !source_ws_dir.join(conversation_id).is_dir() {
             errors.push(json!({
                 "workspaceHash": workspace_hash,
                 "conversationId": conversation_id,
@@ -124,27 +124,88 @@ pub(crate) fn copy_sessions_in_with(
             }));
             continue;
         }
-        let Some(state) = states.get_mut(workspace_hash) else {
+        let (target_project_key, target_bucket) = match spec.scope {
+            // 目标那一级恒为目标账号 uid：源桶原样沿用。
+            ScopeSegment::Uid => (target_uid.to_string(), workspace_hash.to_string()),
+            ScopeSegment::ProjectKey => {
+                // 无项目桶的项目段是**账号 uid**（插件在「没有打开项目」时的退化写法），
+                // 跨账号不同值：必须换成目标账号自己的 uid，否则会写进
+                // `<目标>/JetBrains/<源 uid>/`——客户端永远不会去读的目录。
+                // 真实项目 key 由项目路径决定、跨账号同值，原样沿用。
+                let target_project_key = if source_project_key == source_uid {
+                    target_uid.to_string()
+                } else {
+                    source_project_key.clone()
+                };
+                let target_history =
+                    scope_history_root_in(spec, root, target_uid, &target_project_key);
+                match existing_bucket(&target_history, workspace_hash) {
+                    Some(bucket) => (target_project_key, bucket),
+                    None => {
+                        if !missing_projects.contains(&target_project_key) {
+                            missing_projects.push(target_project_key);
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
+        prepared.push(PreparedCopy {
+            source_ws_dir,
+            target_project_key,
+            target_bucket,
+            conversation_id: conversation_id.to_string(),
+        });
+    }
+
+    // 目标账号缺项目：整次拒绝（不写任何文件），并指名是哪个项目。
+    if !missing_projects.is_empty() {
+        return Err(missing_target_project_error(&missing_projects));
+    }
+
+    // 阶段 2：为每个目标工作区建立「磁盘备份 + 内存工作副本」，保证逐条隔离与可回退。
+    let mut states: BTreeMap<String, WorkspaceState> = BTreeMap::new();
+    for item in &prepared {
+        let key = item.state_key();
+        if states.contains_key(&key) {
+            continue;
+        }
+        let ws_dir = item.target_ws_dir(spec, root, target_uid);
+        let state = WorkspaceState::load(&ws_dir, &item.backup_dir(spec, backup_root))
+            .map_err(|error| format!("备份目标工作区索引失败（{key}）：{error}"))?;
+        states.insert(key, state);
+    }
+
+    let mut copied: Vec<Value> = Vec::new();
+    for item in &prepared {
+        let key = item.state_key();
+        let Some(state) = states.get_mut(&key) else {
             errors.push(json!({
-                "workspaceHash": workspace_hash,
-                "conversationId": conversation_id,
+                "workspaceHash": item.target_bucket,
+                "conversationId": item.conversation_id,
                 "error": "工作区状态缺失",
             }));
             continue;
         };
-        let target_dir = target_history.join(workspace_hash);
+        let target_dir = item.target_ws_dir(spec, root, target_uid);
         match copy_one_conversation(
             options,
-            &source_dir,
+            &item.source_ws_dir.join(&item.conversation_id),
             &target_dir,
-            workspace_hash,
-            conversation_id,
+            &item.target_bucket,
+            &item.conversation_id,
             state,
         ) {
-            Ok(outcome) => copied.push(outcome),
+            Ok(mut outcome) => {
+                // 项目 key 只在多项目数据仓里回给调用方（VS Code 系报告形状保持不变）。
+                if spec.scope == ScopeSegment::ProjectKey {
+                    outcome["projectKey"] = json!(item.target_project_key);
+                }
+                copied.push(outcome);
+            }
             Err(error) => errors.push(json!({
-                "workspaceHash": workspace_hash,
-                "conversationId": conversation_id,
+                "workspaceHash": item.target_bucket,
+                "conversationId": item.conversation_id,
                 "error": error,
             })),
         }
@@ -160,6 +221,97 @@ pub(crate) fn copy_sessions_in_with(
         report["errors"] = json!(errors);
     }
     Ok(report)
+}
+
+/// 一条校验通过、目标位置已确定的复制项（[`copy_sessions_in_with`] 阶段 1 的产物）。
+struct PreparedCopy {
+    /// 源会话所在的工作区目录：`<source>/<client>/<project>/history/<bucket>`。
+    source_ws_dir: PathBuf,
+    /// 目标项目段（`Uid` 语义 = 目标账号 uid；`ProjectKey` 语义 = 源侧项目 key）。
+    target_project_key: String,
+    /// 目标会话桶目录名（`Uid` 语义 = 源桶；`ProjectKey` 语义 = 目标该项目下已存在的桶）。
+    target_bucket: String,
+    conversation_id: String,
+}
+
+impl PreparedCopy {
+    /// 目标工作区目录：`<target>/<client>/<project>/history/<bucket>`。
+    fn target_ws_dir(&self, spec: SessionStoreSpec, root: &Path, target_uid: &str) -> PathBuf {
+        scope_history_root_in(spec, root, target_uid, &self.target_project_key).join(&self.target_bucket)
+    }
+
+    /// 索引备份目录。
+    ///
+    /// - `Uid` 语义：`<backup>/<bucket>`（与历史布局逐字一致）；
+    /// - `ProjectKey` 语义：`<backup>/<project>/<bucket>`（多项目下同名桶不互相覆盖）。
+    fn backup_dir(&self, spec: SessionStoreSpec, backup_root: &Path) -> PathBuf {
+        match spec.scope {
+            ScopeSegment::Uid => backup_root.join(&self.target_bucket),
+            ScopeSegment::ProjectKey => backup_root
+                .join(&self.target_project_key)
+                .join(&self.target_bucket),
+        }
+    }
+
+    /// 状态表 / 错误文案里的工作区标识（项目 + 桶）。
+    fn state_key(&self) -> String {
+        format!("{}/{}", self.target_project_key, self.target_bucket)
+    }
+}
+
+/// 源侧项目段：`Uid` 语义恒为源账号 uid；`ProjectKey` 语义取条目里的项目 key，缺省回退 uid。
+fn source_project_key_of(spec: SessionStoreSpec, item: &CopyItem, source_uid: &str) -> String {
+    match spec.scope {
+        ScopeSegment::Uid => source_uid.to_string(),
+        ScopeSegment::ProjectKey => item
+            .project_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| is_safe_segment(key))
+            .unwrap_or(source_uid)
+            .to_string(),
+    }
+}
+
+/// 目标项目下**已存在的**会话桶。
+///
+/// 桶是安装级常量（本机所有项目 / 账号共用一个值），因此不能新建：优先沿用源桶，否则取
+/// 该项目下按名排序的第一个桶目录。项目不存在 / 没有任何桶时返回 `None`。
+fn existing_bucket(history_root: &Path, source_bucket: &str) -> Option<String> {
+    let entries = std::fs::read_dir(history_root).ok()?;
+    let mut buckets: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| is_hex32(name))
+        .collect();
+    buckets.sort();
+    if buckets.iter().any(|name| name == source_bucket) {
+        return Some(source_bucket.to_string());
+    }
+    buckets.into_iter().next()
+}
+
+/// 「目标账号在这个项目下还没有会话」的统一文案（项目路径可解码时一并给出）。
+///
+/// 项目 key 解不出路径时只可能是「无项目」桶（项目段退化成了账号 uid）：此时说「未打开项目」
+/// 比把 uid 甩给用户更有用。
+fn missing_target_project_error(project_keys: &[String]) -> String {
+    let labels: Vec<String> = project_keys
+        .iter()
+        .map(|key| {
+            let path = decode_project_key(key);
+            if path.is_empty() {
+                "未打开项目".to_string()
+            } else {
+                path
+            }
+        })
+        .collect();
+    format!(
+        "目标账号在这个项目下还没有会话，请先在 PyCharm 里打开该项目并发一条消息（项目：{}）。",
+        labels.join("、")
+    )
 }
 
 /// 切换 VS Code CodeBuddy 扩展账号，可选「先复制会话」与「把关联会话的新增内容同步过去」。
@@ -286,15 +438,6 @@ pub fn switch_vscode_ext_with_copy(
 }
 
 pub(super) use crate::modules::config::count_items;
-
-/// 目标工作区的去重集合（仅保留合法的 32 位小写 hex，避免建出无关目录）。
-pub(super) fn distinct_workspaces(items: &[CopyItem]) -> BTreeSet<String> {
-    items
-        .iter()
-        .map(|item| item.workspace_hash.trim().to_string())
-        .filter(|workspace_hash| is_hex32(workspace_hash))
-        .collect()
-}
 
 /// 复制单个会话：写临时目录 → 原子提交 → 合并目标工作区索引。失败时回退。
 ///

@@ -31,10 +31,16 @@
 
 use super::*;
 
-/// 会话在客户端数据里的定位信息：所属工作区 hash 与展示标题。
+/// 会话在客户端数据里的定位信息：所属项目段、工作区桶与展示标题。
+///
+/// `project_key` 是「客户端段之后那一级」的目录名——VS Code 系恒为账号 uid，JetBrains 是
+/// 项目 key（多项目并列）。它必须随定位信息一起回传：只凭 `workspace_hash` 无法在多项目
+/// 数据仓里还原 `<项目>/history/<桶>` 这条路径。
 #[derive(Debug, Clone)]
 pub(super) struct ConversationLocator {
     pub(super) workspace_hash: String,
+    /// 项目段：`Uid` 语义 = 账号 uid；`ProjectKey` 语义 = 项目 key（未打开项目时退化成 uid）。
+    pub(super) project_key: String,
     pub(super) title: String,
 }
 
@@ -110,75 +116,80 @@ impl ConversationIndexScan {
 
 /// 扫某账号的工作区索引，得到「定位表 + 可用性原料 + 会话目录证据」（单次遍历）。
 ///
-/// 客户端把会话按 `md5(工作区)` 分桶，会话 id 本身无法还原工作区；这里按工作区目录名
-/// 排序处理，同名会话（不该出现）取字典序最小者，保证结果与目录遍历顺序无关。
+/// 客户端把会话按「项目段 / 工作区桶」分桶，会话 id 本身无法还原任何一级；这里按
+/// [`vscode_session::history_scopes_in`] 枚举出的**每个项目**依次遍历（VS Code 系恰一个），
+/// 并按工作区目录名排序处理，同名会话（不该出现）取字典序最小者，保证结果与目录遍历
+/// 顺序无关。
 pub(super) fn conversation_index_scan(
     spec: SessionStoreSpec,
     root: &Path,
     uid: &str,
 ) -> ConversationIndexScan {
     let mut scan = ConversationIndexScan::default();
-    let history = vscode_session::history_root_in(spec, root, uid);
-    if !history.is_dir() {
-        // 账号从未用过该客户端 / 数据根不对：既没有定位表，也没有判定依据。
-        return scan;
-    }
-    scan.history_present = true;
-    // `read_dir` 失败（权限、并发删除）时保持 `parsed = 0`：目录在但读不到 → Unavailable。
-    let Ok(entries) = std::fs::read_dir(&history) else {
-        return scan;
-    };
-    let workspaces: BTreeSet<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
-    for ws_dir in workspaces {
-        // 目录证据与索引解析共用这一次遍历：会话条目可能缺失，目录还在就说明会话存在。
-        collect_session_dirs(&ws_dir, &mut scan.session_dirs);
-        let index_path = ws_dir.join("index.json");
-        // **分母只统计含 `index.json` 的工作区**：目录在却没有索引文件，通常是客户端正常
-        // 状态（空工作区 / 尚未写入）。把它算进分母会让 `parsed < 分母` 永远成立，该客户端
-        // 的清理被永久判成 `Partial` 而整次拒绝；会话真的存在时目录证据会兜底，放宽安全。
-        if !index_path.is_file() {
+    for scope in vscode_session::history_scopes_in(spec, root, uid) {
+        let history = &scope.history_root;
+        if !history.is_dir() {
+            // 账号从未用过该客户端 / 数据根不对：既没有定位表，也没有判定依据。
             continue;
         }
-        scan.index_workspaces += 1;
-        let Some(index) = vscode_session::read_json(&index_path) else {
-            // 有索引文件却解析不出来：**计入分母**、不计 `parsed` → `Partial`（不得当成可读）。
+        scan.history_present = true;
+        // `read_dir` 失败（权限、并发删除）时保持 `parsed = 0`：目录在但读不到 → Unavailable。
+        let Ok(entries) = std::fs::read_dir(history) else {
             continue;
         };
-        let Some(conversations) = index.get("conversations").and_then(Value::as_array) else {
-            continue;
-        };
-        // 只有「读到并解析成数组」才算这份索引用得上：空数组也算（客户端确实没有会话）。
-        scan.parsed += 1;
-        let workspace_hash = ws_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
-        for conversation in conversations {
-            let Some(id) = conversation
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-            else {
+        let workspaces: BTreeSet<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        for ws_dir in workspaces {
+            // 目录证据与索引解析共用这一次遍历：会话条目可能缺失，目录还在就说明会话存在。
+            collect_session_dirs(&ws_dir, &mut scan.session_dirs);
+            let index_path = ws_dir.join("index.json");
+            // **分母只统计含 `index.json` 的工作区**：目录在却没有索引文件，通常是客户端正常
+            // 状态（空工作区 / 尚未写入）。把它算进分母会让 `parsed < 分母` 永远成立，该客户端
+            // 的清理被永久判成 `Partial` 而整次拒绝；会话真的存在时目录证据会兜底，放宽安全。
+            if !index_path.is_file() {
+                continue;
+            }
+            scan.index_workspaces += 1;
+            let Some(index) = vscode_session::read_json(&index_path) else {
+                // 有索引文件却解析不出来：**计入分母**、不计 `parsed` → `Partial`（不得当成可读）。
                 continue;
             };
-            let title = conversation
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or("(无标题)")
-                .to_string();
-            scan.locators
-                .entry(id.to_string())
-                .or_insert_with(|| ConversationLocator {
-                    workspace_hash: workspace_hash.clone(),
-                    title,
-                });
+            let Some(conversations) = index.get("conversations").and_then(Value::as_array) else {
+                continue;
+            };
+            // 只有「读到并解析成数组」才算这份索引用得上：空数组也算（客户端确实没有会话）。
+            scan.parsed += 1;
+            let workspace_hash = ws_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            for conversation in conversations {
+                let Some(id) = conversation
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                let title = conversation
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("(无标题)")
+                    .to_string();
+                scan.locators
+                    .entry(id.to_string())
+                    .or_insert_with(|| ConversationLocator {
+                        workspace_hash: workspace_hash.clone(),
+                        project_key: scope.project_key.clone(),
+                        title,
+                    });
+            }
         }
     }
     scan
@@ -228,15 +239,18 @@ pub(super) fn conversation_index(
     conversation_index_scan(spec, root, uid).locators
 }
 
-/// 某账号某会话的目录：`history/<workspaceHash>/<conversationId>`。
+/// 某账号某会话的目录：`<项目段>/history/<workspaceHash>/<conversationId>`。
+///
+/// 项目段取自定位信息（见 [`ConversationLocator::project_key`]）：多项目数据仓里只凭
+/// 工作区桶无法还原路径，硬编码成 uid 会指到「无项目」桶里去。
 pub(super) fn conversation_dir(
     spec: SessionStoreSpec,
     root: &Path,
     uid: &str,
-    workspace_hash: &str,
+    locator: &ConversationLocator,
     conversation_id: &str,
 ) -> PathBuf {
-    vscode_session::history_root_in(spec, root, uid)
-        .join(workspace_hash)
+    vscode_session::scope_history_root_in(spec, root, uid, &locator.project_key)
+        .join(&locator.workspace_hash)
         .join(conversation_id)
 }

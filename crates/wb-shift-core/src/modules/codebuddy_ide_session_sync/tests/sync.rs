@@ -153,6 +153,7 @@
             &[CopyItem {
                 workspace_hash: WS.to_string(),
                 conversation_id: CONV_SRC.to_string(),
+                project_key: None,
             }],
         )
         .unwrap()

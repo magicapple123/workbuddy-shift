@@ -562,15 +562,7 @@ pub(super) fn member_snapshot(
                 .and_then(Value::as_str)
                 .unwrap_or("会话标题暂不可用")
                 .to_string();
-            let hash = row
-                .and_then(|row| row.get("workspaceHash"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let project = if hash.is_empty() {
-                String::new()
-            } else {
-                format!("工作区 {}", hash.chars().take(8).collect::<String>())
-            };
+            let project = project_label_of(client, row);
             let updated_at = row
                 .and_then(|row| row.get("updatedAt"))
                 .and_then(Value::as_i64)
@@ -582,12 +574,45 @@ pub(super) fn member_snapshot(
                     &member.uid,
                     &member.session_id,
                 )
-                .map(|(_, _, content)| content)
+                .map(|location| location.content)
                 .unwrap_or(ContentState::Missing),
                 _ => ContentState::Unavailable("未找到客户端会话数据目录".to_string()),
             };
             (title, project, updated_at, content)
         }
+    }
+}
+
+/// 会话行的项目标签（卡片顶端那一行；也是「同一会话出现在两个项目桶」的唯一区分依据）。
+///
+/// - JetBrains：`项目：<项目路径>`（项目 key 是路径的 base64url）；项目段退化成 uid
+///   （插件在「没有打开项目」时写入）时显示 `项目：未打开项目`——不能落回「工作区 xxxxxxxx」，
+///   因为**两个桶的 workspaceHash 是同一个安装级常量**，那样两行仍然一模一样；
+/// - VS Code 插件 / CodeBuddy IDE：沿用既有「工作区 <md5 前 8 位>」（行为不变）。
+fn project_label_of(client: SessionClient, row: Option<&Value>) -> String {
+    if client != SessionClient::Jetbrains {
+        let hash = row
+            .and_then(|row| row.get("workspaceHash"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return if hash.is_empty() {
+            String::new()
+        } else {
+            format!("工作区 {}", hash.chars().take(8).collect::<String>())
+        };
+    }
+    // 行缺失（会话已被删除）时不给项目标签：此时说「未打开项目」是错的。
+    let Some(row) = row else {
+        return String::new();
+    };
+    let path = row
+        .get("projectPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    match path {
+        Some(path) => format!("项目：{path}"),
+        None => "项目：未打开项目".to_string(),
     }
 }
 

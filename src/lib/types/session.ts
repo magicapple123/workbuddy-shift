@@ -20,6 +20,16 @@ export interface Session {
    * 空间真名（`spaces.name`）；空间行缺失或已删除时后端给 null，前端回退文件夹名。
    */
   spaceName?: string | null;
+  /**
+   * JetBrains 插件会话的**项目段**（`<uid>/JetBrains/<projectKey>/history/<bucket>/`）。
+   *
+   * 只有 JetBrains 会返回（VS Code / CodeBuddy IDE 的那一级恒为账号 uid，后端不返回，
+   * 既有载荷逐字不变）：项目 key 是项目路径的 base64url，未打开项目时退化成账号 uid。
+   * 同一会话可能同时出现在「无项目」与「项目」两个桶里，靠它区分。
+   */
+  projectKey?: string;
+  /** 项目路径（由 `projectKey` 反解，解码不出来为空串）；仅 JetBrains 返回。 */
+  projectPath?: string;
 }
 
 /** 临时备份的清理状态：cleaned 已回收；pending 已保留待下次维护重试；legacyRetained 旧操作无生命周期记录。 */

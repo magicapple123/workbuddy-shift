@@ -159,6 +159,7 @@
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
             conversation_id: CONV_SRC.to_string(),
+            project_key: None,
         }];
         let report =
             copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items).unwrap();

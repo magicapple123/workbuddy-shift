@@ -41,6 +41,11 @@ pub fn list_sessions_in(root: &Path, uid: &str) -> Value {
 /// 返回 `{ sourceUid, sessions:[{id, workspaceHash, title, updatedAt, type, hasHistory}], skipped, dataRoot }`。
 /// `skipped` 为无法解析（损坏）的工作区索引数量；`dataRoot` 为解析到的扩展数据根目录
 /// （找不到时为 `null`，调用方据此区分「未找到数据目录」与「该账号无会话」）。
+///
+/// **多项目**（JetBrains）：遍历起点是该账号下**每个项目**的 `history/`，因此每行额外带
+/// `projectKey`（客户端段之后那一级目录名）与 `projectPath`（项目路径，解码不出来为空串）。
+/// `workspaceHash` 保持原义（= 该项目的会话桶目录名，本机安装级常量），前端字段不用改。
+/// 同一会话可能同时出现在「无项目」桶与「项目」桶里，靠 `projectKey` 区分。
 pub fn list_sessions_in_store(spec: SessionStoreSpec, root: &Path, uid: &str) -> Value {
     let mut sessions: Vec<Value> = Vec::new();
     let mut skipped = 0usize;
@@ -55,8 +60,15 @@ pub fn list_sessions_in_store(spec: SessionStoreSpec, root: &Path, uid: &str) ->
         });
     }
 
-    let history = history_root_in(spec, root, uid);
-    if let Ok(entries) = std::fs::read_dir(&history) {
+    for scope in history_scopes_in(spec, root, uid) {
+        let history = &scope.history_root;
+        // 目录不存在 = 该账号在这个项目下没有会话；读不到（权限 / 并发删除）同样跳过。
+        if !history.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(history) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let ws_dir = entry.path();
             if !ws_dir.is_dir() {
@@ -99,14 +111,21 @@ pub fn list_sessions_in_store(spec: SessionStoreSpec, root: &Path, uid: &str) ->
                     .unwrap_or("")
                     .to_string();
                 let has_history = conversation_has_history(&ws_dir, id);
-                sessions.push(json!({
+                let mut row = json!({
                     "id": id,
                     "workspaceHash": workspace_hash,
                     "title": title,
                     "updatedAt": updated_at,
                     "type": conv_type,
                     "hasHistory": has_history,
-                }));
+                });
+                // 只有「客户端段之后是项目 key」的数据仓才带项目字段：
+                // VS Code / CodeBuddy IDE 的载荷保持逐字不变（那一级恒为账号 uid）。
+                if spec.scope == ScopeSegment::ProjectKey {
+                    row["projectKey"] = json!(scope.project_key);
+                    row["projectPath"] = json!(decode_project_key(&scope.project_key));
+                }
+                sessions.push(row);
             }
         }
     }

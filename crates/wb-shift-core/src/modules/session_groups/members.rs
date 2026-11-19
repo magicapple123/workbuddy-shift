@@ -160,19 +160,20 @@ pub fn add_member(
             let spec = client
                 .store_spec()
                 .ok_or_else(|| "客户端数据仓不可用".to_string())?;
-            let (workspace_hash, _, content) = vscode_session_sync::session_location_and_content(
+            let location = vscode_session_sync::session_location_and_content(
                 spec,
                 &root,
                 &source.uid,
                 &source.session_id,
             )
             .ok_or_else(|| "来源会话索引已不存在，请刷新后重试".to_string())?;
-            if !matches!(content, ContentState::Ready(_)) {
+            if !matches!(location.content, ContentState::Ready(_)) {
                 return Err("来源会话内容缺失或无法确认，不能复制".to_string());
             }
             let item = CopyItem {
-                workspace_hash,
+                workspace_hash: location.workspace_hash,
                 conversation_id: source.session_id.clone(),
+                project_key: Some(location.project_key),
             };
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
             let guard = prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
@@ -298,10 +299,13 @@ pub fn copy_linked_sessions(
             &source_uid,
             session_id,
         ) {
-            Some((workspace_hash, _, ContentState::Ready(_))) => items.push(CopyItem {
-                workspace_hash,
-                conversation_id: session_id.clone(),
-            }),
+            Some(location) if matches!(location.content, ContentState::Ready(_)) => {
+                items.push(CopyItem {
+                    workspace_hash: location.workspace_hash,
+                    conversation_id: session_id.clone(),
+                    project_key: Some(location.project_key),
+                })
+            }
             Some(_) => skipped.push(json!({
                 "id": session_id,
                 "error": "来源会话内容缺失或无法确认",

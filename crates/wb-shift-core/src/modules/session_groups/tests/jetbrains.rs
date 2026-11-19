@@ -2,14 +2,16 @@
     // 第 4 个客户端：JetBrains IDE 插件（IDEA / PyCharm 共用同一份数据目录）
     // -----------------------------------------------------------------------
     //
-    // 存储与 VS Code 插件**逐字同构**，只差客户端段目录名（`JetBrains` vs `VSCode`），
-    // 因此本轮复用同一套 spec 参数化内核。这里钉住四件事：
+    // 真实布局：`<uid>/JetBrains/<projectKey>/history/<bucket-32hex>/<convId>/`——客户端段之后
+    // 那一级是**项目 key**（项目路径的 base64url），不是账号 uid；`<bucket>` 是**安装级常量**
+    // （本机所有项目 / 账号共用一个值）。没有打开项目时项目段退化成 `<uid>`（无项目桶）。
+    // 这里钉住五件事：
     //
     // 1. 命名空间隔离：主表 / 目录 / 锁名独立，不与其它三个客户端串台；
-    // 2. 会话发现：`<uid>/JetBrains/<uid>/history/<md5>/index.json` 能被解析，且同一 uid 的
-    //    `VSCode` 目录不会串进结果；
-    // 3. 复制一律新 id（用户决策）：复制体与源会话区分、源目录只读、目标索引保留既有会话；
-    // 4. 同步计划：基线后新增消息 → `fastForward` + 可执行凭据（不写坏目标）。
+    // 2. 会话发现：项目桶与无项目桶都能列出来，行里带 `projectKey`（`workspaceHash` 仍是 bucket）；
+    // 3. 复制一律新 id（用户决策），且落到**目标账号该项目下已存在的 bucket**；
+    // 4. 目标账号没有这个项目时整次拒绝，且绝不凭空创建目录；
+    // 5. 同步计划：基线后新增消息 → `fastForward` + 可执行凭据（不写坏目标）。
 
     const JB_WS: &str = "0123456789abcdef0123456789abcdef";
     const JB_SRC_UID: &str = "uid-jb-src";
@@ -17,9 +19,67 @@
     const JB_CONV: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const JB_MSG_1: &str = "11111111111111111111111111111111";
     const JB_MSG_2: &str = "22222222222222222222222222222222";
+    /// 项目 key = `d:/Python基础练习` 的 base64url（无 padding），取自真机目录名。
+    const JB_PROJECT_KEY: &str = "ZDovUHl0aG9u5Z+656GA57uD5Lmg";
+    /// 目标账号侧该项目的会话桶（安装级常量，真机实测值）。
+    const JB_TARGET_BUCKET: &str = "f6b91d610bcb56eaf9e6a28b52c30c2f";
 
     fn jb_paths(store: &TempStore) -> SessionPaths {
         SessionPaths::for_jetbrains_at(store.paths.store_root.clone())
+    }
+
+    /// 某账号某项目的会话历史根：`<uid>/JetBrains/<projectKey>/history`。
+    fn jb_project_history(root: &Path, uid: &str, project_key: &str) -> PathBuf {
+        vscode_session::scope_history_root_in(JETBRAINS_STORE, root, uid, project_key)
+    }
+
+    /// 在指定项目桶下写一个工作区索引（`conversations` 为 `(会话 id, 标题)`）。
+    fn jb_write_project_index(
+        root: &Path,
+        uid: &str,
+        project_key: &str,
+        workspace: &str,
+        items: &[(&str, &str)],
+    ) {
+        let ws_dir = jb_project_history(root, uid, project_key).join(workspace);
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let conversations: Vec<Value> = items
+            .iter()
+            .map(|(id, name)| json!({ "id": id, "type": "craft", "name": name }))
+            .collect();
+        std::fs::write(
+            ws_dir.join("index.json"),
+            json!({ "conversations": conversations }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// 在指定项目桶下造一条完整会话（`index.json` + `messages/<id>.json`）。
+    fn jb_write_project_conversation(
+        root: &Path,
+        uid: &str,
+        project_key: &str,
+        workspace: &str,
+        conversation: &str,
+        messages: &[(&str, &str)],
+    ) {
+        let conv_dir = jb_project_history(root, uid, project_key)
+            .join(workspace)
+            .join(conversation);
+        std::fs::create_dir_all(conv_dir.join("messages")).unwrap();
+        let ids: Vec<Value> = messages.iter().map(|(id, _)| json!({ "id": id })).collect();
+        std::fs::write(
+            conv_dir.join("index.json"),
+            json!({ "messages": ids, "requests": [] }).to_string(),
+        )
+        .unwrap();
+        for (id, text) in messages {
+            std::fs::write(
+                conv_dir.join("messages").join(format!("{id}.json")),
+                json!({ "id": id, "role": "user", "text": text }).to_string(),
+            )
+            .unwrap();
+        }
     }
 
     /// 写一个工作区索引（`conversations` 为 `(会话 id, 标题)`）。
@@ -142,6 +202,173 @@
         assert!(empty["sessions"].as_array().unwrap().is_empty());
     }
 
+    /// 项目桶与无项目桶都能被列出：两条同 bucket、不同 projectKey 的会话靠 `projectKey` 区分。
+    #[test]
+    fn jetbrains_project_buckets_are_listed_with_their_project_key() {
+        let store = TempStore::new("jb-project-list");
+        let root = store.index_root();
+        jb_write_project_index(
+            &root,
+            JB_SRC_UID,
+            JB_PROJECT_KEY,
+            JB_WS,
+            &[(JB_CONV, "项目里的会话")],
+        );
+        jb_write_workspace_index(&root, JB_SRC_UID, JB_WS, &[(JB_MSG_1, "无项目的会话")]);
+
+        let listed = vscode_session::list_sessions_in_store(JETBRAINS_STORE, &root, JB_SRC_UID);
+        let sessions = listed["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2, "{listed}");
+        let project_row = sessions
+            .iter()
+            .find(|row| row["id"] == json!(JB_CONV))
+            .expect("项目桶里的会话必须被列出");
+        assert_eq!(project_row["projectKey"], json!(JB_PROJECT_KEY));
+        assert_eq!(
+            project_row["projectPath"],
+            json!("D:/Python基础练习"),
+            "项目 key 必须能反解成项目路径（盘符统一大写）"
+        );
+        // `workspaceHash` 保持原义 = bucket（安装级常量），前端既有字段不用改。
+        assert_eq!(project_row["workspaceHash"], json!(JB_WS));
+        let legacy_row = sessions
+            .iter()
+            .find(|row| row["id"] == json!(JB_MSG_1))
+            .expect("无项目桶里的会话必须被列出");
+        // 无项目桶的项目段退化成 uid：它不是一个能解码出路径的项目 key。
+        assert_eq!(legacy_row["projectKey"], json!(JB_SRC_UID));
+        assert_eq!(legacy_row["projectPath"], json!(""));
+    }
+
+    /// 复制落到**目标账号该项目下已存在的 bucket**（bucket 是安装级常量，不能沿用源值）。
+    #[test]
+    fn jetbrains_copy_writes_into_the_target_project_bucket() {
+        let store = TempStore::new("jb-project-copy");
+        let paths = jb_paths(&store);
+        let root = store.index_root();
+        jb_write_project_index(
+            &root,
+            JB_SRC_UID,
+            JB_PROJECT_KEY,
+            JB_WS,
+            &[(JB_CONV, "项目会话")],
+        );
+        jb_write_project_conversation(
+            &root,
+            JB_SRC_UID,
+            JB_PROJECT_KEY,
+            JB_WS,
+            JB_CONV,
+            &[(JB_MSG_1, "第一条")],
+        );
+        // 目标账号同一项目（项目 key 由项目路径决定，跨账号同值），bucket 用本机实际值。
+        jb_write_project_index(&root, JB_DST_UID, JB_PROJECT_KEY, JB_TARGET_BUCKET, &[]);
+
+        let items = [CopyItem {
+            workspace_hash: JB_WS.to_string(),
+            conversation_id: JB_CONV.to_string(),
+            project_key: Some(JB_PROJECT_KEY.to_string()),
+        }];
+        let (report, link_errors) = plugin_copy_and_register(
+            JETBRAINS_STORE,
+            &root,
+            &paths,
+            WbVariant::Cn,
+            JB_SRC_UID,
+            JB_DST_UID,
+            &items,
+        )
+        .unwrap();
+        assert!(link_errors.is_empty(), "{link_errors:?}");
+        assert_eq!(
+            report["copied"][0]["projectKey"],
+            json!(JB_PROJECT_KEY),
+            "报告必须回传项目 key：{report}"
+        );
+        let new_id = report["copied"][0]["newId"].as_str().unwrap();
+
+        let project_history = jb_project_history(&root, JB_DST_UID, JB_PROJECT_KEY);
+        let target_bucket = project_history.join(JB_TARGET_BUCKET);
+        assert!(
+            target_bucket.join(new_id).is_dir(),
+            "副本必须写进目标该项目下已存在的 bucket"
+        );
+        assert!(
+            !project_history.join(JB_WS).exists(),
+            "不得凭空创建源侧 bucket 目录"
+        );
+        assert!(
+            !vscode_session::history_root_in(JETBRAINS_STORE, &root, JB_DST_UID)
+                .join(JB_WS)
+                .exists(),
+            "绝不能写进「无项目」桶"
+        );
+        let index: Value = serde_json::from_str(
+            &std::fs::read_to_string(target_bucket.join("index.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            index["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == json!(new_id)),
+            "副本必须登记进目标 bucket 的工作区索引：{index}"
+        );
+    }
+
+    /// 目标账号在这个项目下没有会话：整次拒绝、指名项目、且不创建任何目录。
+    #[test]
+    fn jetbrains_copy_refuses_when_the_target_has_no_session_in_that_project() {
+        let store = TempStore::new("jb-project-missing");
+        let paths = jb_paths(&store);
+        let root = store.index_root();
+        jb_write_project_index(
+            &root,
+            JB_SRC_UID,
+            JB_PROJECT_KEY,
+            JB_WS,
+            &[(JB_CONV, "项目会话")],
+        );
+        jb_write_project_conversation(
+            &root,
+            JB_SRC_UID,
+            JB_PROJECT_KEY,
+            JB_WS,
+            JB_CONV,
+            &[(JB_MSG_1, "第一条")],
+        );
+
+        let items = [CopyItem {
+            workspace_hash: JB_WS.to_string(),
+            conversation_id: JB_CONV.to_string(),
+            project_key: Some(JB_PROJECT_KEY.to_string()),
+        }];
+        let error = plugin_copy_and_register(
+            JETBRAINS_STORE,
+            &root,
+            &paths,
+            WbVariant::Cn,
+            JB_SRC_UID,
+            JB_DST_UID,
+            &items,
+        )
+        .expect_err("目标账号没有该项目时必须拒绝");
+        assert!(error.contains("目标账号在这个项目下还没有会话"), "{error}");
+        assert!(error.contains("先在 PyCharm 里打开该项目"), "{error}");
+        assert!(
+            error.contains("D:/Python基础练习"),
+            "必须指出是哪个项目：{error}"
+        );
+        // 不凭空创建：项目目录与 bucket 目录都不得出现。
+        assert!(!jb_project_history(&root, JB_DST_UID, JB_PROJECT_KEY).exists());
+        assert!(
+            !vscode_session::history_root_in(JETBRAINS_STORE, &root, JB_DST_UID)
+                .join(JB_WS)
+                .exists()
+        );
+    }
+
     /// 复制（一律新 id）+ 登记：源目录只读、目标索引合并保留既有会话、关联表建在同一命名空间。
     #[test]
     fn jetbrains_copy_uses_a_new_id_and_registers_in_its_own_namespace() {
@@ -156,6 +383,7 @@
         let items = [CopyItem {
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
+            project_key: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -214,10 +442,13 @@
         let root = store.index_root();
         jb_write_workspace_index(&root, JB_SRC_UID, JB_WS, &[(JB_CONV, "同步计划")]);
         jb_write_conversation(&root, JB_SRC_UID, JB_WS, JB_CONV, &[(JB_MSG_1, "第一条")]);
+        // 目标账号在这个项目下已有会话（bucket 是安装级常量，只能沿用不能新建）。
+        jb_write_workspace_index(&root, JB_DST_UID, JB_WS, &[]);
 
         let items = [CopyItem {
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
+            project_key: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -429,10 +660,13 @@
         let root = store.index_root();
         jb_write_workspace_index(&root, JB_SRC_UID, JB_WS, &[(JB_CONV, "执行同步")]);
         jb_write_conversation(&root, JB_SRC_UID, JB_WS, JB_CONV, &[(JB_MSG_1, "第一条")]);
+        // 目标账号在这个项目下已有会话（bucket 是安装级常量，只能沿用不能新建）。
+        jb_write_workspace_index(&root, JB_DST_UID, JB_WS, &[]);
 
         let items = [CopyItem {
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
+            project_key: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -541,10 +775,13 @@
         let root = store.index_root();
         jb_write_workspace_index(&root, JB_SRC_UID, JB_WS, &[(JB_CONV, "缺文件")]);
         jb_write_conversation(&root, JB_SRC_UID, JB_WS, JB_CONV, &[(JB_MSG_1, "第一条")]);
+        // 目标账号在这个项目下已有会话（bucket 是安装级常量，只能沿用不能新建）。
+        jb_write_workspace_index(&root, JB_DST_UID, JB_WS, &[]);
 
         let items = [CopyItem {
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
+            project_key: None,
         }];
         plugin_copy_and_register(
             JETBRAINS_STORE,

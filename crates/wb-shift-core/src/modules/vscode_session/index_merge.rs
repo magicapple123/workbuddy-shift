@@ -18,26 +18,24 @@ pub(super) struct WorkspaceState {
     pub(super) original: Option<Vec<u8>>,
     /// 当前工作副本（已合并成功条目）。
     pub(super) current: Value,
-    /// 索引备份落盘目录（`<backup_root>\<workspaceHash>`）。
+    /// 索引备份落盘目录（`<backup_root>\<项目段>\<workspaceHash>`）。
     pub(super) backup_dir: PathBuf,
 }
 
 impl WorkspaceState {
     /// 加载目标工作区：读取既有索引、备份将被修改的索引、建立内存工作副本。
     ///
+    /// `backup_dir` 由调用方按「项目段 / 工作区桶」拼好（多项目数据仓下同名桶不能互相覆盖）。
+    ///
     /// **延迟创建**：此处**不**创建目标工作区目录，只有确有会话写入（[`Self::persist`] 或
     /// [`write_conversation`] 落临时目录）时才创建，避免「该工作区所有条目最终都失败」
     /// 时留下空目录。备份目录也仅在确有既有索引需要备份时才落盘。
-    pub(super) fn load(
-        dir: &Path,
-        backup_root: &Path,
-        workspace_hash: &str,
-    ) -> Result<Self, String> {
+    pub(super) fn load(dir: &Path, backup_dir: &Path) -> Result<Self, String> {
         let index_path = dir.join("index.json");
         let original = std::fs::read(&index_path).ok();
         let original_bak = std::fs::read(dir.join(".index_bak.json")).ok();
 
-        let workspace_backup = backup_root.join(workspace_hash);
+        let workspace_backup = backup_dir.to_path_buf();
         if original.is_some() || original_bak.is_some() {
             std::fs::create_dir_all(&workspace_backup).map_err(|error| error.to_string())?;
             if let Some(bytes) = &original {

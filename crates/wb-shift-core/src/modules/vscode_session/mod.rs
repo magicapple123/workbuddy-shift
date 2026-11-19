@@ -21,6 +21,24 @@
 //!       assets\*
 //! ```
 //!
+//! **JetBrains 插件不是这个形状**（同一份会话内容，只多一层项目分段）：
+//! ```text
+//! %LOCALAPPDATA%\CodeBuddyExtension\Data\<uid>\JetBrains\<projectKey>\
+//!   history\<bucket-32hex>\    # bucket 是**安装级常量**，本机所有项目/账号共用一个值
+//!     ...                      # 内部与 VS Code 逐字同构
+//!   check-point\ file-tree\ plan-task\   # 与 history 并列的同层目录（用途未验证，见下）
+//! ```
+//!
+//! `projectKey` = 项目路径的 base64url（无 padding，如 `ZDovUHl0aG9u5Z+656GA57uD5Lmg`
+//! ↔ `D:/Python基础练习`）；**没有打开项目时退化成 `<uid>`**（无项目桶）。所以
+//! 「客户端段之后那一级」的语义按数据仓区分（[`ScopeSegment`]）：VS Code 系是账号 uid，
+//! JetBrains 是项目 key。读写都按 [`history_scopes_in`] 枚举出来的多项目历史根进行，
+//! 绝不把该级硬编码成 uid。
+//!
+//! TODO(未验证)：JetBrains 插件还写了 `check-point/`、`file-tree/`、`plan-task/` 三个与
+//! `history/` 并列的目录（同样按 `<bucket>/<convId>` 分层）。**不要**为了「让复制体打开」
+//! 就盲目复制这三个目录——它们是否需要随会话一起复制尚未在真机验证，本轮只复制 `history/`。
+//!
 //! 约定与约束：
 //! - 会话 / 消息 / 请求 id 一律 **32 位小写 hex**（扩展 `generateId()` 产物），
 //!   不得使用带连字符的 UUID。
@@ -51,18 +69,32 @@ use crate::modules::vscode_session_sync;
 /// 会话历史目录名。
 const HISTORY_DIR: &str = "history";
 
+/// 「客户端段之后那一级」的语义：决定 `history/` 的父目录是什么。
+///
+/// 两个插件型数据仓的目录前缀完全相同（`<app>/Data/<uid>/<client_dir>/`），只有这一级
+/// 的含义不同——这正是历史上把所有会话都读进「无项目」桶的根因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeSegment {
+    /// `<root>/<uid>/<client_dir>/<uid>/history/<bucket>`：该级是**账号 uid**。
+    Uid,
+    /// `<root>/<uid>/<client_dir>/<projectKey>/history/<bucket>`：该级是**项目 key**。
+    ProjectKey,
+}
+
 /// 扩展数据仓的分段与备份命名：区分「VS Code 插件」与「CodeBuddy IDE」两棵同构的会话树。
 ///
-/// 布局：`<平台本地数据根>/<app_dir>/Data/<uid>/<client_dir>/<uid>/history/<工作区目录名>/`。
+/// 布局：`<平台本地数据根>/<app_dir>/Data/<uid>/<client_dir>/<scope_segment>/history/<工作区目录名>/`。
 /// 工作区目录名是**不透明字符串**（实现只做目录枚举与按名复制，不重算 md5）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionStoreSpec {
     /// 应用数据目录名（`CodeBuddyExtension`）。
     pub app_dir: &'static str,
-    /// 客户端段目录名（`VSCode` / `CodeBuddyIDE`）。
+    /// 客户端段目录名（`VSCode` / `CodeBuddyIDE` / `JetBrains`）。
     pub client_dir: &'static str,
     /// 会话索引备份根目录名：`<工具存储根>/backups/<backup_kind>/<utc_iso>/`。
     pub backup_kind: &'static str,
+    /// `history/` 的父目录语义（见 [`ScopeSegment`]）。
+    pub scope: ScopeSegment,
 }
 
 /// VS Code 内 CodeBuddy 插件（`tencent-cloud.coding-copilot`）的数据仓。
@@ -70,6 +102,7 @@ pub const VSCODE_STORE: SessionStoreSpec = SessionStoreSpec {
     app_dir: "CodeBuddyExtension",
     client_dir: "VSCode",
     backup_kind: "vscode-sessions",
+    scope: ScopeSegment::Uid,
 };
 
 /// CodeBuddy IDE（国内版桌面客户端）的数据仓：与插件同根，只有客户端段不同。
@@ -77,26 +110,35 @@ pub const CODEBUDDY_IDE_STORE: SessionStoreSpec = SessionStoreSpec {
     app_dir: "CodeBuddyExtension",
     client_dir: "CodeBuddyIDE",
     backup_kind: "codebuddy-ide-sessions",
+    scope: ScopeSegment::Uid,
 };
 
 /// JetBrains IDE 内 CodeBuddy 插件的数据仓（IDEA / PyCharm 共用同一份）。
 ///
-/// 与 VS Code 插件**逐字同构**，只有客户端段目录名不同（`JetBrains`）；因此索引读取、
-/// 内容摘要、复制、登记、预览、增量同步全部走同一套 spec 参数化内核，不需要第二份实现。
+/// 索引读取、内容摘要、复制、登记、预览、增量同步全部走同一套 spec 参数化内核；
+/// 与 VS Code 插件的差别是**多一层项目分段**（见 [`ScopeSegment::ProjectKey`]）。
 pub const JETBRAINS_STORE: SessionStoreSpec = SessionStoreSpec {
     app_dir: "CodeBuddyExtension",
     client_dir: "JetBrains",
     backup_kind: "jetbrains-sessions",
+    scope: ScopeSegment::ProjectKey,
 };
 
-/// 待复制的会话引用（工作区 hash + 会话 id）。
+/// 待复制的会话引用（项目段 + 工作区桶 + 会话 id）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyItem {
-    /// 工作区目录名 = `md5(工作区)`（32 位小写 hex）。
+    /// 工作区目录名：VS Code 系 = `md5(工作区)`，JetBrains = 安装级 bucket（均 32 位小写 hex）。
     pub workspace_hash: String,
     /// 会话 id（32 位小写 hex）。
     pub conversation_id: String,
+    /// 项目 key（`<client_dir>` 之后那一级目录名）。
+    ///
+    /// 只有 [`ScopeSegment::ProjectKey`] 的数据仓（JetBrains）用它定位项目；缺省 / 非法时
+    /// **回退源账号 uid**（= 插件「未打开项目」时写入的退化项目段，与历史行为一致）。
+    /// VS Code 系忽略该字段：那一级恒为账号 uid。
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 /// 副本 id 策略：决定复制体沿用源 id 还是取新 id。
@@ -145,11 +187,13 @@ pub use copy::{copy_sessions_in, copy_vscode_sessions, switch_vscode_ext_with_co
 pub use list::{list_sessions_in, list_sessions_in_store, list_vscode_sessions};
 #[allow(unused_imports)]
 pub(crate) use paths::{
-    copy_dir_recursive, is_hex32, is_safe_uid, read_json, remove_dir_all_if_exists,
+    copy_dir_recursive, decode_project_key, is_hex32, is_safe_segment, is_safe_uid, read_json,
+    remove_dir_all_if_exists,
 };
 pub use paths::{
-    ext_data_root, ext_data_root_candidates, history_root, history_root_in, store_data_root,
-    store_data_root_candidates, uid_data_dir_in,
+    account_client_dir_in, ext_data_root, ext_data_root_candidates, history_root, history_root_in,
+    history_scopes_in, scope_history_root_in, store_data_root, store_data_root_candidates,
+    uid_data_dir_in, HistoryScope,
 };
 #[allow(unused_imports)]
 pub(crate) use remap::{

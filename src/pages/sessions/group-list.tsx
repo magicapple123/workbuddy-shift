@@ -25,10 +25,26 @@ export function GroupSkeleton() {
 }
 
 export function SessionGroupCard({ group, selected, onSelect, onRequestDelete }: { group: SessionGroupSummary; selected: boolean; onSelect: () => void; onRequestDelete: () => void }) {
+  // JetBrains 的「工作区」不是 md5(工作目录) 而是安装级会话桶（全机同一个值），只有项目名能
+  // 区分同一标题的两条会话（「无项目」桶 vs 某个项目桶）——所以第 4 张卡把项目放到**行尾**。
+  // 其余三个客户端维持既有版式：位置标签在行首、相对时间在行尾。
+  const projectAtTail = group.client === "jetbrains";
+  const projectLabel = group.projectLabel || "未标记项目";
   // 「…」不能嵌在整卡按钮里（button 不能嵌套 button），所以绝对定位到卡片右上角。
   return <div className="relative min-w-0">
     <button type="button" onClick={onSelect} aria-pressed={selected} className={`w-full min-w-0 cursor-pointer rounded-lg border bg-card px-4 py-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-brand shadow-sm" : "border-border hover:border-brand/50"}`}>
-      <div className="flex min-w-0 items-center justify-between gap-2 pr-7 text-xs text-muted-foreground"><span className="flex min-w-0 items-center gap-2"><Folder className="size-4 shrink-0" /><span className="truncate" title={group.projectLabel}>{group.projectLabel || "未标记项目"}</span></span><span className="shrink-0" title={formatDateTime(group.latestActivityAt)}>{relativeDate(group.latestActivityAt)}</span></div>
+      <div className="flex min-w-0 items-center justify-between gap-2 pr-7 text-xs text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-2">
+          <Folder className="size-4 shrink-0" />
+          {projectAtTail
+            ? <span className="shrink-0 tabular-nums" title={formatDateTime(group.latestActivityAt)}>{relativeDate(group.latestActivityAt)}</span>
+            : <span className="truncate" title={projectLabel}>{projectLabel}</span>}
+        </span>
+        <span className="flex min-w-0 items-center gap-2">
+          {projectAtTail && <span className="truncate text-right" title={projectLabel}>{projectLabel}</span>}
+          {!projectAtTail && <span className="shrink-0" title={formatDateTime(group.latestActivityAt)}>{relativeDate(group.latestActivityAt)}</span>}
+        </span>
+      </div>
       <h3 className="my-3 truncate text-base font-semibold" title={group.title}>{group.title}</h3>
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"><span className="flex items-center gap-2" title={group.accountNames.join("、")}><MessageCircle className="size-4" />{group.memberCount} 个账号</span><span className="flex min-w-0 items-center gap-2 text-xs"><span className={`size-2 shrink-0 rounded-full ${group.summaryStatus === "latest" ? "bg-success" : group.summaryStatus === "behind" ? "bg-warning" : group.summaryStatus === "diverge" ? "bg-danger" : "bg-muted-foreground"}`} /><span className="truncate" title={group.summaryText}>{{ latest: "内容一致", behind: "待同步", diverge: "有分歧", missing: "内容缺失", unknown: "无法确认" }[group.summaryStatus]}</span></span></div>
     </button>

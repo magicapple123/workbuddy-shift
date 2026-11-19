@@ -104,6 +104,7 @@
             &[CopyItem {
                 workspace_hash: workspace_hash.to_string(),
                 conversation_id: CONV_OLD.to_string(),
+                project_key: None,
             }],
         )
         .expect("copy ok")

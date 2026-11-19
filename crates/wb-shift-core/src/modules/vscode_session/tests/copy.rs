@@ -57,6 +57,7 @@
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
+            project_key: None,
         }];
         let error = switch_vscode_ext_with_copy(&missing, true, &items, &[]).unwrap_err();
         assert!(error.contains("账号不存在"), "{error}");
@@ -189,6 +190,7 @@
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
+            project_key: None,
         }];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)
             .expect("copy ok");
@@ -229,6 +231,7 @@
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
+            project_key: None,
         }];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)
             .expect("copy ok");
@@ -300,6 +303,7 @@
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
+            project_key: None,
         }];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)
             .expect("copy ok");
