@@ -152,6 +152,9 @@ pub fn get_rate_limits() -> Value {
 pub fn rate_limit_hook_status() -> Value {
     let mut status = crate::modules::rate_limit_hook::hook_status();
     status["lastEventAt"] = json!(crate::modules::rate_limit_events::last_event_at());
+    // VS Code 插件能力探测（第三轮第 20 条）：只作诊断字段，前端类型不含它，
+    // UI 的「暂不支持」是静态事实，不随探测结果变化 —— 否则探测失败会被误读成「支持」。
+    status["vscodeExt"] = super::vscode_ext::probe();
     status
 }
 

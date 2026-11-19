@@ -35,8 +35,12 @@ mod payload;
 mod scan;
 #[cfg(test)]
 mod tests;
+mod vscode_ext;
 
 pub use self::ledger::*;
 pub(crate) use self::parse::*;
 pub(crate) use self::payload::*;
 pub(crate) use self::scan::*;
+pub use self::vscode_ext::{
+    log_roots as vscode_ext_log_roots, probe as vscode_ext_probe, UPSTREAM_ISSUE_NUMBER,
+};

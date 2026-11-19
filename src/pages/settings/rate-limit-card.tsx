@@ -12,6 +12,15 @@ import type {
 
 import { SettingsFieldRow, SettingsGroup } from "./rows";
 
+/**
+ * 上游 issue 编号：VS Code 插件从未触发限额（第三轮第 20 条）。
+ *
+ * 只引用编号，不拼完整 URL：仓库门禁 `scripts/check-structure.mjs` 禁止旧产品名出现在
+ * 代码里，而派生来源仓库路径必然含它；要贴可点击的完整链接需先在 `AGENTS.md` 第 7 节
+ * 登记例外（主理人决策，不在本条允许的改动范围内）。
+ */
+const VSCODE_LIMIT_ISSUE_NUMBER = 188;
+
 /** 限额监听：总开关 + hook 接入状态（CLI / WorkBuddy 实时上报，IDE 仍走日志扫描）。 */
 export function RateLimitCard() {
   const [config, setConfig] = useState<RateLimitConfig | null>(null);
@@ -124,10 +133,11 @@ export function RateLimitCard() {
   const existingTargets = status?.targets.filter((target) => target.exists) ?? [];
   const installedCount = existingTargets.filter((target) => target.installed).length;
   // IDE 的限额只有日志一条来源：扫描开关关闭时文案不能再说「仍按日志扫描」。
+  // 这里只指两个**桌面** IDE：VS Code 插件没有可解析日志，接不接这个开关都不显示。
   const ideNote =
     config?.scanIdeLogs === false
-      ? "CodeBuddy IDE 的日志扫描已关闭"
-      : "CodeBuddy IDE 无事件，仍按日志扫描";
+      ? "CodeBuddy 桌面 IDE 的日志扫描已关闭"
+      : "CodeBuddy 桌面 IDE 无事件，仍按日志扫描";
   const hookDescription = status
     ? existingTargets.length === 0
       ? `未检测到 CodeBuddy CLI / WorkBuddy 客户端：没有可接入的配置（${ideNote}）`
@@ -158,7 +168,7 @@ export function RateLimitCard() {
 
         <SettingsFieldRow
           label="扫描 CodeBuddy IDE 日志"
-          description="IDE 的限额只有日志一条来源，关掉后不再显示；CodeBuddy CLI / WorkBuddy 的实时上报不受影响"
+          description="两个桌面 IDE 的限额只有日志一条来源，关掉后不再显示；CodeBuddy CLI / WorkBuddy 的实时上报不受影响。VS Code 插件暂不支持（见下方说明）"
           htmlFor="rl-ide-scan"
           operational
         >
@@ -172,7 +182,6 @@ export function RateLimitCard() {
         </SettingsFieldRow>
 
         <SettingsFieldRow
-          className="border-b-0"
           label="接入客户端 hook"
           description={hookDescription}
           operational
@@ -198,6 +207,25 @@ export function RateLimitCard() {
             </Button>
           )}
         </SettingsFieldRow>
+
+        {/*
+          VS Code 插件的限额是**能力缺口**，不是偶发不触发（第三轮第 20 条，issue #188）：
+          它既不在扫描来源里，日志里也没有可解析的限流文案（本机实测 0 命中），
+          更没有等价的 hook。取证不足以接入，因此这里明确写「不支持」并把需求转上游，
+          不留下任何「已支持」的暗示。
+        */}
+        <div className="border-t border-border/50 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">
+          <p className="font-medium text-foreground">VS Code 插件：暂不支持限额显示</p>
+          <p className="mt-1">
+            VS Code 里的 CodeBuddy 插件不写可解析的限额日志，也没有等价的 hook，本机无法判断它的限流状态。
+            账号卡片上的限额标记只覆盖 WorkBuddy、CodeBuddy CLI 与两个 CodeBuddy 桌面 IDE。
+          </p>
+          <p className="mt-1">
+            需要插件侧写出可解析的日志或提供事件，已作为需求转上游
+            <span className="ml-1 font-medium text-foreground">issue #{VSCODE_LIMIT_ISSUE_NUMBER}</span>
+            。
+          </p>
+        </div>
       </CardContent>
     </SettingsGroup>
   );
