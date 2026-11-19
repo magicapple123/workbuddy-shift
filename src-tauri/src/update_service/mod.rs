@@ -363,6 +363,42 @@ mod tests {
         drop(first);
     }
 
+    /// 清单不可达但 tag 判出新版本：仍要保留下载入口，同时带出提示。
+    #[test]
+    fn check_result_without_manifest_keeps_download_target() {
+        let _guard = lock();
+        reset();
+        let snapshot = apply_check_result(&json!({
+            "ok": true,
+            "latest": "0.2.1",
+            "hasUpdate": true,
+            "manifestAvailable": false,
+            "message": "已发现新版本，但更新清单不可达，请配置并保存更新代理后重试",
+        }));
+        assert_eq!(snapshot.phase, UpdatePhase::Available);
+        assert_eq!(snapshot.latest.as_deref(), Some("0.2.1"));
+    }
+
+    /// 签名失败必须引导手动安装；下一次普通检查要清掉该标记。
+    #[test]
+    fn signature_failure_requires_manual_install() {
+        let _guard = lock();
+        reset();
+        begin_download("0.2.1");
+        let failed = fail_signature("更新包签名校验失败".to_string());
+        assert_eq!(failed.phase, UpdatePhase::Error);
+        assert!(failed.manual_install_required);
+        assert_eq!(failed.latest.as_deref(), Some("0.2.1"));
+
+        let recovered = apply_check_result(&json!({
+            "ok": true,
+            "latest": "0.2.1",
+            "hasUpdate": true,
+        }));
+        assert!(!recovered.manual_install_required);
+        assert_eq!(recovered.phase, UpdatePhase::Available);
+    }
+
     #[test]
     fn busy_message_names_task_and_elapsed() {
         let _guard = lock();
