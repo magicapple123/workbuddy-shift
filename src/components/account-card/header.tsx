@@ -164,9 +164,9 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
         </div>
 
         {compact ? (
-          <div className="relative z-10 flex w-full min-w-0 items-center gap-2 pr-10">
+          <div className="relative z-10 flex w-full min-w-0 flex-col gap-1 pr-10">
+            <div className="flex w-full min-w-0 items-center gap-2">
             <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
-            <div className="hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {toolEntryEnabled(enabledTools, "workbuddy") && (workbuddyActive ? (
                 <ProductCurrentState product="workbuddy" compact iconOnly />
@@ -259,6 +259,9 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
                 </Tooltip>
               ))}
             </div>
+            </div>
+            {/* 限额等文案 chip 单独一行：与账号名争宽度会把名字挤成 0（1280 宽下必现）。 */}
+            <div className="flex min-w-0 flex-wrap items-center gap-1 empty:hidden">{statusChips}</div>
           </div>
         ) : (
           /* 文本让位按「有没有水印」而不是按产品：之前只有 VS Code / JetBrains 在线时
