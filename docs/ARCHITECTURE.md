@@ -358,6 +358,8 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `src/pages/credit-stats/data.ts` | 586 | 纯逻辑 | 档位过滤、客户端筛选（明细重算）、账本形状转换三套口径都在这里收敛，页面只调用；拆开会让同一口径出现多份实现。 | 下一轮把账本转换抽到 credit-stats/ledger-view.ts。 |
 | `src/pages/credit-stats/index.tsx` | 636 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
 
+| `crates/wb-shift-core/src/modules/credit_ledger/mod.rs` | 573 | 本地账本 | 建表/去重写入/官方修正回写/日-模型-客户端-账号四组聚合/降级策略共用同一份 schema 与 SQL，拆开会让「账本口径」出现多份定义。 | 下一轮把只读聚合抽到 `credit_ledger/query.rs`，写入与 schema 留在 `mod.rs`。 |
+
 > 该表由 `node scripts/check-structure.mjs` **双向校验**：未登记的 >500 行文件、行数与实际不符、
 > 已缩小到 500 行以内但条目未删，都会让 CI 失败。新增文件必须先拆分，或按同一格式登记理由与计划。
 
