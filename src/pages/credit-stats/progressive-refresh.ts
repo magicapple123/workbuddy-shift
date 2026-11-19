@@ -129,7 +129,7 @@ export function useProgressiveRefresh(deps: Options) {
     setTiming(EMPTY_TIMING);
     try {
       await runProgressiveRefresh(
-        { commit, refreshCredits, loadAccountIds, range: deps.range },
+        { commit, refreshCredits, loadAccountIds, range },
         {
           onLocal: (_stats, ms) =>
             setTiming((previous) => ({ ...previous, localMs: ms })),

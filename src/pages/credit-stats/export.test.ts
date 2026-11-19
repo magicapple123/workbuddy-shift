@@ -32,8 +32,12 @@ const stats: CreditStatistics = {
       usageToday: 3,
       usage7Days: 9,
       usageThisMonth: 21,
-      resources: [],
       variant: "cn",
+      lastSnapshotAt: Date.UTC(2026, 10, 19),
+      checkedInToday: true,
+      checkinStatusToday: "success",
+      lastCheckinAt: Date.UTC(2026, 10, 19),
+      lastCheckinResult: "success",
     },
   ],
   events: [],
@@ -95,7 +99,7 @@ describe("creditStatsSheets", () => {
       "本地事件",
     ]);
     for (const sheet of sheets) {
-      const last = sheet.rows.at(-1)?.[0];
+      const last = sheet.rows[sheet.rows.length - 1]?.[0];
       expect(String(last)).toMatch(/^说明：/);
     }
     // 表头仍是第 1 行：说明不污染数据区。
@@ -126,7 +130,7 @@ describe("creditStatsSheets", () => {
     };
     const sheets = creditStatsSheets(stats, undefined, { range: "all", ledger });
     expect(sheets[4].rows[0]).toEqual(["JetBrainsPyCharm", 4, 10]);
-    expect(String(sheets[4].rows.at(-1)?.[0])).toContain("本地账本");
+    expect(String(sheets[4].rows[sheets[4].rows.length - 1]?.[0])).toContain("本地账本");
   });
 
   it("xlsx 产物非空，文件名后缀正确", () => {

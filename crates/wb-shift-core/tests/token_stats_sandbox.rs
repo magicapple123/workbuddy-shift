@@ -87,18 +87,20 @@ fn statistics_only_scan_the_sandbox_home() {
 
     let statistics = get_statistics(None);
 
-    // 1) 四个来源都在（国内版 / 国际版 / CLI / IDE）。
+    // 1) 六个来源都在（国内版 / 国际版 / CLI / VS Code / JetBrains / IDE）。
     let sources = statistics["sources"]
         .as_array()
         .expect("sources must be an array");
-    assert_eq!(sources.len(), 4, "来源数量变了: {statistics}");
+    assert_eq!(sources.len(), 6, "来源数量变了: {statistics}");
     for name in [
         "workbuddy",
         "workbuddy-ai",
         "codebuddy-cli",
+        "vscode-ext",
+        "jetbrains",
         "codebuddy-ide",
     ] {
-        // `source()` 缺项即 panic，这里只是把四个名字都过一遍。
+        // `source()` 缺项即 panic，这里只是把六个名字都过一遍。
         let _ = source(&statistics, name);
     }
 

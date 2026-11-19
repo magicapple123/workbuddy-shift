@@ -60,11 +60,7 @@ pub(crate) use plan::{sync_selected_in_for_variant, SyncItemPlan};
 pub(crate) use preview::links_preview_in_for_variant;
 pub use preview::{links_preview, links_preview_at, links_preview_in};
 pub use register::{register_copied_sessions, register_copied_sessions_in};
-// `SessionLocation` 只作返型出现，调用方按字段访问、不必具名。
-#[allow(unused_imports)]
-pub(crate) use register::{
-    register_copied_sessions_isolated, session_location_and_content, SessionLocation,
-};
+pub(crate) use register::{register_copied_sessions_isolated, session_location_and_content};
 
 #[cfg(test)]
 mod tests {

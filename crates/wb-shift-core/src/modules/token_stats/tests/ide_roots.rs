@@ -95,7 +95,7 @@ fn decode_genie_workspace_recovers_unix_project_path() {
 }
 
 #[test]
-fn get_statistics_returns_four_isolated_sources() {
+fn get_statistics_returns_six_isolated_sources() {
     // memo 是进程级单格全局状态，这里也要串行（见 `memo_test_guard` 的注释）。
     let _guard = memo_test_guard();
     let value = get_statistics(None);
@@ -110,11 +110,14 @@ fn get_statistics_returns_four_isolated_sources() {
             "workbuddy",
             "workbuddy-ai",
             "codebuddy-cli",
+            "vscode-ext",
+            "jetbrains",
             "codebuddy-ide"
         ]
     );
-    // 国际版与国内版是两个独立 source，不合并。
+    // 国际版与国内版是两个独立 source，不合并；三个插件来源也各自独立。
     assert_ne!(sources[0]["source"], sources[1]["source"]);
+    assert_ne!(sources[3]["source"], sources[4]["source"]);
 }
 
 /// 国际版数据根缺少 jsonl 根时返回空集，不报错。

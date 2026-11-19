@@ -758,8 +758,8 @@ fn rate_limit_config_defaults_to_enabled_and_keeps_only_known_fields() {
     assert!(saved.get("extra").is_none(), "只保留已知字段: {saved}");
     assert_eq!(
         saved.as_object().unwrap().len(),
-        3,
-        "只有 enabled + hookOptOut + scanIdeLogs"
+        4,
+        "只有 enabled + hookOptOut + scanIdeLogs + crossClientInfer"
     );
     assert_eq!(
         load_rate_limit_config_at(&path)
