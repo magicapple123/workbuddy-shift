@@ -113,8 +113,12 @@ pub async fn window_probe(accounts: &[Value], refresh: bool) -> Value {
         "probedAt": now,
         "reason": result["reason"],
     });
-    let _ = std::fs::create_dir_all(store_dir())
-        .and_then(|_| atomic_write(&probe_path(), &serde_json::to_string(&body).unwrap_or_default()));
+    let _ = std::fs::create_dir_all(store_dir()).and_then(|_| {
+        atomic_write(
+            &probe_path(),
+            &serde_json::to_string(&body).unwrap_or_default(),
+        )
+    });
     result
 }
 

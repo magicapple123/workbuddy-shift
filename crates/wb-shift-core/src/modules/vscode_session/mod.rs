@@ -185,15 +185,15 @@ mod remap;
 pub(crate) use copy::copy_sessions_in_with;
 pub use copy::{copy_sessions_in, copy_vscode_sessions, switch_vscode_ext_with_copy};
 pub use list::{list_sessions_in, list_sessions_in_store, list_vscode_sessions};
-#[allow(unused_imports)]
-pub(crate) use paths::{
-    copy_dir_recursive, decode_project_key, is_hex32, is_safe_segment, is_safe_uid, read_json,
-    remove_dir_all_if_exists,
-};
 pub use paths::{
     account_client_dir_in, ext_data_root, ext_data_root_candidates, history_root, history_root_in,
     history_scopes_in, scope_history_root_in, store_data_root, store_data_root_candidates,
     uid_data_dir_in, HistoryScope,
+};
+#[allow(unused_imports)]
+pub(crate) use paths::{
+    copy_dir_recursive, decode_project_key, is_hex32, is_safe_segment, is_safe_uid, read_json,
+    remove_dir_all_if_exists,
 };
 #[allow(unused_imports)]
 pub(crate) use remap::{

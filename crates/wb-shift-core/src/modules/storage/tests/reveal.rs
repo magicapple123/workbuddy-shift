@@ -328,8 +328,8 @@ fn cwd_accepts_forward_slash_absolute_path() {
     std::fs::create_dir_all(&dir).expect("建目录");
     let raw = dir.to_string_lossy().replace('\\', "/");
 
-    let target =
-        reveal_api::resolve_target(&sandbox.roots, &raw, "open", Some(SCOPE_CWD)).expect("必须允许");
+    let target = reveal_api::resolve_target(&sandbox.roots, &raw, "open", Some(SCOPE_CWD))
+        .expect("必须允许");
     assert!(!target.fell_back, "目录存在时不能标记回退：{raw}");
     assert_eq!(target.path, dir);
 }

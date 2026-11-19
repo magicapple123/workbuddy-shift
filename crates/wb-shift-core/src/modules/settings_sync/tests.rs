@@ -457,8 +457,14 @@ fn state_history_keeps_only_the_latest_twenty() {
 #[test]
 fn list_and_restore_backup_round_trip() {
     let fixture = Fixture::new("restore");
-    fixture.write_prefs("uid-a", json!({ "theme": "dark", "appearanceTheme": "dark" }));
-    fixture.write_prefs("uid-b", json!({ "theme": "light", "appearanceTheme": "light" }));
+    fixture.write_prefs(
+        "uid-a",
+        json!({ "theme": "dark", "appearanceTheme": "dark" }),
+    );
+    fixture.write_prefs(
+        "uid-b",
+        json!({ "theme": "light", "appearanceTheme": "light" }),
+    );
 
     let result = apply(&fixture.ctx, Some("a1"), false).expect("同步成功");
     let stamp = fixture
@@ -510,9 +516,15 @@ fn restore_rejects_bad_uid_and_stamp() {
         let error = restore_backup(&fixture.ctx, bad, &stamp).expect_err("uid 必须被拒绝");
         assert!(error.contains("uid"), "{bad} → {error}");
     }
-    for bad in ["", "2025", "20250101", "20250101-1200", "../20250101-120000", "20251301-120000"] {
-        let error =
-            restore_backup(&fixture.ctx, "uid-b", bad).expect_err("stamp 必须被拒绝");
+    for bad in [
+        "",
+        "2025",
+        "20250101",
+        "20250101-1200",
+        "../20250101-120000",
+        "20251301-120000",
+    ] {
+        let error = restore_backup(&fixture.ctx, "uid-b", bad).expect_err("stamp 必须被拒绝");
         assert!(error.contains("时间戳"), "{bad} → {error}");
     }
     // 合法 stamp 但目录不存在。

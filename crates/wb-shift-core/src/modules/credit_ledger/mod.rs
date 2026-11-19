@@ -204,7 +204,9 @@ fn read_snapshot(path: &Path, now: i64) -> Result<Value, String> {
         )
         .map_err(|error| format!("账本汇总失败：{error}"))?;
 
-    let today = Local.timestamp_millis_opt(now).single()
+    let today = Local
+        .timestamp_millis_opt(now)
+        .single()
         .map(|value| value.format("%Y-%m-%d").to_string())
         .unwrap_or_default();
     let month = today.get(..7).unwrap_or_default().to_string();
@@ -417,7 +419,13 @@ mod tests {
             .map(|value| value.format("%Y-%m-%d").to_string())
             .unwrap();
         let rows = vec![
-            request("r1", "WorkBuddy", 1.5, &format!("{today} 10:00:00"), "acc-1"),
+            request(
+                "r1",
+                "WorkBuddy",
+                1.5,
+                &format!("{today} 10:00:00"),
+                "acc-1",
+            ),
             request("r2", "VSCode", 2.5, &format!("{today} 11:00:00"), "acc-1"),
             request("r3", "—", 4.0, &format!("{today} 12:00:00"), "acc-2"),
         ];

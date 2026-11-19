@@ -704,12 +704,18 @@ mod tests {
         );
 
         assert_eq!(manifest_notes(&json!({"version": "0.2.0"})), None);
-        assert_eq!(manifest_notes(&json!({"version": "0.2.0", "notes": "   "})), None);
-        assert_eq!(manifest_notes(&json!({"version": "0.2.0", "notes": null})), None);
+        assert_eq!(
+            manifest_notes(&json!({"version": "0.2.0", "notes": "   "})),
+            None
+        );
+        assert_eq!(
+            manifest_notes(&json!({"version": "0.2.0", "notes": null})),
+            None
+        );
 
         let long = "改".repeat(NOTES_MAX_CHARS + 500);
-        let notes = manifest_notes(&json!({"version": "0.2.0", "notes": long}))
-            .expect("截断后仍应有说明");
+        let notes =
+            manifest_notes(&json!({"version": "0.2.0", "notes": long})).expect("截断后仍应有说明");
         assert_eq!(notes.chars().count(), NOTES_MAX_CHARS);
         assert!(
             notes.chars().all(|c| c == '改'),
@@ -721,7 +727,10 @@ mod tests {
     #[test]
     fn auto_check_defaults_to_true_and_follows_config() {
         let absent = TempConfig::new("auto-check-default", None);
-        assert_eq!(load_github_config_at(&absent.file)["autoCheck"], json!(true));
+        assert_eq!(
+            load_github_config_at(&absent.file)["autoCheck"],
+            json!(true)
+        );
         assert!(auto_check_enabled_at(&absent.file), "缺省应允许自动检查");
 
         let off = TempConfig::new("auto-check-off", Some(r#"{"autoCheck":false}"#));
@@ -731,12 +740,21 @@ mod tests {
         // 旧配置带 token 会被归一化改写，autoCheck 同样要保留。
         let legacy = TempConfig::new(
             "auto-check-legacy",
-            Some(r#"{"owner":"magicapple123","repo":"workbuddy-shift","token":"","autoCheck":false}"#),
+            Some(
+                r#"{"owner":"magicapple123","repo":"workbuddy-shift","token":"","autoCheck":false}"#,
+            ),
         );
-        assert_eq!(load_github_config_at(&legacy.file)["autoCheck"], json!(false));
+        assert_eq!(
+            load_github_config_at(&legacy.file)["autoCheck"],
+            json!(false)
+        );
         assert!(!auto_check_enabled_at(&legacy.file));
         assert!(!legacy.raw().contains("token"), "token 必须被清掉");
-        assert!(legacy.raw().contains("\"autoCheck\": false"), "{}", legacy.raw());
+        assert!(
+            legacy.raw().contains("\"autoCheck\": false"),
+            "{}",
+            legacy.raw()
+        );
     }
 
     /// 保存代理时前端不提交 autoCheck：必须沿用旧值，不能重置回默认开启。
@@ -760,8 +778,12 @@ mod tests {
         assert_eq!(config["owner"], "magicapple123");
 
         // 设置页开关显式提交时按提交值落盘。
-        save_github_config_at(&temp.dir, &temp.file, &json!({"proxy": "", "autoCheck": true}))
-            .unwrap();
+        save_github_config_at(
+            &temp.dir,
+            &temp.file,
+            &json!({"proxy": "", "autoCheck": true}),
+        )
+        .unwrap();
         let config = load_github_config_at(&temp.file);
         assert_eq!(config["autoCheck"], json!(true));
         assert_eq!(config["proxy"], "");
@@ -771,8 +793,12 @@ mod tests {
     #[test]
     fn save_github_config_defaults_auto_check_when_absent() {
         let temp = TempConfig::new("save-auto-check-default", None);
-        save_github_config_at(&temp.dir, &temp.file, &json!({"owner": "someone", "repo": "r"}))
-            .unwrap();
+        save_github_config_at(
+            &temp.dir,
+            &temp.file,
+            &json!({"owner": "someone", "repo": "r"}),
+        )
+        .unwrap();
         let config = load_github_config_at(&temp.file);
         assert_eq!(config["autoCheck"], json!(true));
         assert_eq!(config["owner"], "someone");

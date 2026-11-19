@@ -126,7 +126,11 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
             LogFormat::WorkBuddy,
             AuthMarker::None,
         );
-        resolved.extend(resolve(variant, &events, ScanSource::WorkBuddy(variant).label()));
+        resolved.extend(resolve(
+            variant,
+            &events,
+            ScanSource::WorkBuddy(variant).label(),
+        ));
     }
     // ② CodeBuddy CLI：日志与 WorkBuddy 同格式（时间戳/事件 id/模型归因全部兼容），
     // 但会话不在 WorkBuddy 的 `sessions` 表里，归因走日志内鉴权 uid + 轮换状态文件回落。

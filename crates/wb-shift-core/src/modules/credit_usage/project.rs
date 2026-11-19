@@ -380,7 +380,10 @@ pub async fn get_statistics(refresh: bool, range: Option<&str>) -> Value {
         .get("status")
         .cloned()
         .unwrap_or_else(|| serde_json::json!("degraded"));
-    statistics["ledgerRows"] = ledger.get("rows").cloned().unwrap_or_else(|| serde_json::json!(0));
+    statistics["ledgerRows"] = ledger
+        .get("rows")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(0));
     statistics["ledgerStartAt"] = ledger.get("startAt").cloned().unwrap_or(Value::Null);
     statistics["ledgerEndAt"] = ledger.get("endAt").cloned().unwrap_or(Value::Null);
     statistics["ledger"] = ledger;

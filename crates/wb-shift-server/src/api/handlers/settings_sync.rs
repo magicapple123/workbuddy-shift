@@ -103,11 +103,10 @@ pub(crate) async fn api_list_settings_sync_backups(
     let Some(uid) = query.get("uid").cloned() else {
         return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
     };
-    let result =
-        tokio::task::spawn_blocking(move || {
-            settings_sync::list_backups(&SettingsSyncContext::production(), &uid)
-        })
-        .await;
+    let result = tokio::task::spawn_blocking(move || {
+        settings_sync::list_backups(&SettingsSyncContext::production(), &uid)
+    })
+    .await;
     match result {
         Ok(Ok(value)) => json_ok(value),
         Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),

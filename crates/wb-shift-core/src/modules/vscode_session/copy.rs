@@ -237,7 +237,8 @@ struct PreparedCopy {
 impl PreparedCopy {
     /// 目标工作区目录：`<target>/<client>/<project>/history/<bucket>`。
     fn target_ws_dir(&self, spec: SessionStoreSpec, root: &Path, target_uid: &str) -> PathBuf {
-        scope_history_root_in(spec, root, target_uid, &self.target_project_key).join(&self.target_bucket)
+        scope_history_root_in(spec, root, target_uid, &self.target_project_key)
+            .join(&self.target_bucket)
     }
 
     /// 索引备份目录。

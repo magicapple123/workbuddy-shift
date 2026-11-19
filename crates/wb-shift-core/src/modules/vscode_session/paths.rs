@@ -152,12 +152,10 @@ pub fn history_scopes_in(spec: SessionStoreSpec, root: &Path, uid: &str) -> Vec<
                         return None;
                     }
                     let history_root = entry.path().join(HISTORY_DIR);
-                    history_root
-                        .is_dir()
-                        .then_some(HistoryScope {
-                            project_key,
-                            history_root,
-                        })
+                    history_root.is_dir().then_some(HistoryScope {
+                        project_key,
+                        history_root,
+                    })
                 })
                 .collect();
             scopes.sort_by(|left, right| left.project_key.cmp(&right.project_key));
@@ -198,9 +196,7 @@ pub fn decode_project_key(project_key: &str) -> String {
 /// 把解码出的原文规整成可展示的项目路径：拒绝控制字符与「不像路径」的文本。
 fn normalize_project_path(text: &str) -> String {
     let trimmed = text.trim();
-    if trimmed.is_empty()
-        || trimmed.chars().any(char::is_control)
-        || !trimmed.contains(['/', '\\'])
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) || !trimmed.contains(['/', '\\'])
     {
         return String::new();
     }

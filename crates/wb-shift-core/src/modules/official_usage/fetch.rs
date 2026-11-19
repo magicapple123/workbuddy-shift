@@ -8,7 +8,8 @@ pub(super) async fn fetch_account_usage(
     account: &Value,
     range_start: NaiveDate,
     range_end: NaiveDate,
-) -> Result<AccountFetch, String> {    let url = official_usage_url_for(account);
+) -> Result<AccountFetch, String> {
+    let url = official_usage_url_for(account);
     let end_time = format!("{range_end} 23:59:59");
     let mut start_time = format!("{range_start} 00:00:00");
     let mut rounds = 0usize;

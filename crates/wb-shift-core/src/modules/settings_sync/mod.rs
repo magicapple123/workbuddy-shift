@@ -200,7 +200,10 @@ fn read_prefs(path: &Path) -> Option<Map<String, Value>> {
 }
 
 fn read_state(store_root: &Path) -> Value {
-    read_history(store_root).into_iter().next().unwrap_or(Value::Null)
+    read_history(store_root)
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null)
 }
 
 /// 同步记录历史（最新在前）。兼容旧格式：早期文件只有一条结果对象。

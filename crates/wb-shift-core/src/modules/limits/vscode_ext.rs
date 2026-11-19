@@ -73,7 +73,10 @@ fn redact(line: &str) -> String {
             .unwrap_or(0);
         let end = text[at..]
             .find(|character: char| {
-                character.is_whitespace() || character == '"' || character == '>' || character == ','
+                character.is_whitespace()
+                    || character == '"'
+                    || character == '>'
+                    || character == ','
             })
             .map(|offset| at + offset)
             .unwrap_or(text.len());
@@ -272,12 +275,12 @@ pub(crate) fn probe_at(
         let key = path.to_string_lossy().to_string();
         let previous = files.get(&key).cloned().unwrap_or_default();
         // 文件变小 / mtime 回退 → 被截断或替换，从头按尾读窗口重来。
-        let start =
-            if previous.size > 0 && size >= previous.size && *mtime_ms >= previous.mtime_ms {
-                previous.offset.min(size)
-            } else {
-                size.saturating_sub(FIRST_READ_BYTES)
-            };
+        let start = if previous.size > 0 && size >= previous.size && *mtime_ms >= previous.mtime_ms
+        {
+            previous.offset.min(size)
+        } else {
+            size.saturating_sub(FIRST_READ_BYTES)
+        };
         files.insert(
             key.clone(),
             FileState {
@@ -444,7 +447,10 @@ mod tests {
         assert_eq!(first["scannedFiles"], 0, "无强信号的文件不进入扫描");
 
         // 追加一行强信号：第二次必须读到，且只读新增部分。
-        let mut handle = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        let mut handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
         writeln!(handle, "[HTTP STATUS] 429 Too Many Requests").unwrap();
         drop(handle);
 

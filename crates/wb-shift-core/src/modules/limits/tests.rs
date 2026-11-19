@@ -1389,7 +1389,13 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
     let no_uid = HashMap::new();
 
     // ① uid 不可用 + 状态文件缺失 → 丢弃。
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
+    assert!(resolve_by_uid(
+        &events,
+        &no_uid,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli"
+    )
+    .is_empty());
 
     // ② `updatedAt` 晚于事件 → 不可信：IDE 的 detect 会回写状态，但那不是账号切换。
     std::fs::write(
@@ -1397,7 +1403,13 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
         json!({ "activeAccountId": "acc-1", "updatedAt": 2_000 }).to_string(),
     )
     .expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
+    assert!(resolve_by_uid(
+        &events,
+        &no_uid,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli"
+    )
+    .is_empty());
 
     // ③ `updatedAt` 早于事件 → 该时刻生效的账号可用。
     std::fs::write(
@@ -1405,17 +1417,34 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
         json!({ "activeAccountId": "acc-1", "updatedAt": 1_000 }).to_string(),
     )
     .expect("状态文件");
-    let resolved = resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli");
+    let resolved = resolve_by_uid(
+        &events,
+        &no_uid,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli",
+    );
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].account_id, "acc-1");
 
     // ④ 缺 `updatedAt`（老状态文件）→ 无从证实「当时是谁」，丢弃。
     std::fs::write(&path, json!({ "activeAccountId": "acc-1" }).to_string()).expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
+    assert!(resolve_by_uid(
+        &events,
+        &no_uid,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli"
+    )
+    .is_empty());
 
     // ⑤ 内容损坏 → 回落不可用，不报错。
     std::fs::write(&path, "{ not json").expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
+    assert!(resolve_by_uid(
+        &events,
+        &no_uid,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli"
+    )
+    .is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1434,7 +1463,12 @@ fn uid_match_wins_over_the_state_file_fallback() {
     let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-uid".to_string())]);
     let mut event = event_without_uid(1_500);
     event.uid = Some(UID_A.to_string());
-    let resolved = resolve_by_uid(&[event], &uid_to_account, &ActiveAccount::load(&path), "codebuddy-cli");
+    let resolved = resolve_by_uid(
+        &[event],
+        &uid_to_account,
+        &ActiveAccount::load(&path),
+        "codebuddy-cli",
+    );
     assert_eq!(resolved[0].account_id, "acc-uid");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1782,12 +1816,7 @@ fn payload_borrows_latest_other_client_limit_only_without_vscode_record() {
     assert_eq!(borrowed["sourceLabel"], "CodeBuddy CLI");
 
     // 关闭推断：不产出 borrowed。
-    let disabled = build_payload(
-        vec![entry("workbuddy-cn", now + 60_000)],
-        now,
-        now,
-        false,
-    );
+    let disabled = build_payload(vec![entry("workbuddy-cn", now + 60_000)], now, now, false);
     assert!(disabled["accounts"][0]["borrowed"].is_null());
 
     // VS Code 有自有记录：自有优先，不兜底。

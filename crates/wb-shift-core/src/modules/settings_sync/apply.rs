@@ -187,9 +187,7 @@ fn sync_one(
         }));
     }
 
-    let backup_dir = backup_root(&ctx.store_root)
-        .join(target_uid)
-        .join(stamp);
+    let backup_dir = backup_root(&ctx.store_root).join(target_uid).join(stamp);
     backup_targets(target_dir, &writes, &backup_dir, target_uid)?;
 
     let mut written = Vec::new();
@@ -531,11 +529,7 @@ pub fn list_backups(ctx: &SettingsSyncContext, uid: &str) -> Result<Value, Strin
 /// 还原某账号的某次备份：先校验 → 再把当前文件备份一份 → 最后逐文件回拷。
 ///
 /// 备份清单里 `existed: false` 的文件是同步时新建的，还原时删掉，回到同步前状态。
-pub fn restore_backup(
-    ctx: &SettingsSyncContext,
-    uid: &str,
-    stamp: &str,
-) -> Result<Value, String> {
+pub fn restore_backup(ctx: &SettingsSyncContext, uid: &str, stamp: &str) -> Result<Value, String> {
     let uid = validate_uid(uid)?;
     if !is_valid_stamp(stamp) {
         return Err(format!("备份时间戳不合法（需 YYYYMMDD-HHMMSS）：{stamp}"));
@@ -571,10 +565,7 @@ pub fn restore_backup(
     for file in &files {
         let rel = file.get("file").and_then(Value::as_str).unwrap_or_default();
         let safe = safe_relative(rel)?;
-        let existed = file
-            .get("existed")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let existed = file.get("existed").and_then(Value::as_bool).unwrap_or(true);
         let source = backup_dir.join(&safe);
         if existed && !source.is_file() {
             return Err(format!("备份文件缺失：{rel}"));
@@ -605,9 +596,8 @@ pub fn restore_backup(
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("创建目录 {} 失败：{error}", parent.display()))?;
             }
-            std::fs::copy(&plan.source, &plan.dest).map_err(|error| {
-                format!("还原 {} 失败：{error}", plan.dest.display())
-            })?;
+            std::fs::copy(&plan.source, &plan.dest)
+                .map_err(|error| format!("还原 {} 失败：{error}", plan.dest.display()))?;
             restored.push(json!({ "file": plan.rel.clone(), "action": "restored" }));
         } else if plan.dest.is_file() {
             std::fs::remove_file(&plan.dest)
@@ -667,9 +657,8 @@ fn is_valid_stamp(stamp: &str) -> bool {
     {
         return false;
     }
-    let number = |start: usize, end: usize| -> i32 {
-        stamp[start..end].parse::<i32>().unwrap_or(-1)
-    };
+    let number =
+        |start: usize, end: usize| -> i32 { stamp[start..end].parse::<i32>().unwrap_or(-1) };
     let month = number(4, 6);
     let day = number(6, 8);
     let hour = number(9, 11);
