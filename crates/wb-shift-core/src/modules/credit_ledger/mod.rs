@@ -116,6 +116,17 @@ pub fn record_requests_at(path: &Path, requests: &[Value], at_ms: i64) -> Result
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .map_err(|error| format!("账本写入语句准备失败：{error}"))?;
+        // 官方会修正「当天仍在结算」的请求：同一 request_id 再次抓到时分值可能变大。
+        // 只用 INSERT OR IGNORE 会让账本永远停留在首次见到的旧值（实测今日差 59.13 分）。
+        // 这里对已存在的行做 UPDATE（保留 first_seen_at），行数不变但金额跟上官方。
+        let mut update_statement = tx
+            .prepare(
+                "UPDATE requests SET
+                   account_id = ?1, account_name = ?2, request_ts = ?3, date = ?4,
+                   model = ?5, client = ?6, credit = ?7
+                 WHERE request_id = ?8",
+            )
+            .map_err(|error| format!("账本更新语句准备失败：{error}"))?;
         for request in requests {
             let request_id = text_field(request, "requestId");
             if request_id.is_empty() {
@@ -134,19 +145,38 @@ pub fn record_requests_at(path: &Path, requests: &[Value], at_ms: i64) -> Result
             if account_id.is_empty() {
                 continue;
             }
-            inserted += statement
+            let account_name = text_field(request, "accountName");
+            let model = text_field(request, "model");
+            let client = text_field(request, "client");
+            let changed = statement
                 .execute(params![
                     request_id,
                     account_id,
-                    text_field(request, "accountName"),
+                    account_name,
                     request_ts,
                     date,
-                    text_field(request, "model"),
-                    text_field(request, "client"),
+                    model,
+                    client,
                     credit,
                     at_ms,
                 ])
                 .map_err(|error| format!("账本写入失败：{error}"))?;
+            if changed == 0 {
+                update_statement
+                    .execute(params![
+                        account_id,
+                        account_name,
+                        request_ts,
+                        date,
+                        model,
+                        client,
+                        credit,
+                        request_id,
+                    ])
+                    .map_err(|error| format!("账本更新失败：{error}"))?;
+                continue;
+            }
+            inserted += 1;
         }
     }
     tx.commit()
@@ -481,6 +511,52 @@ mod tests {
         let snapshot = snapshot_at(&path, now_ms());
         assert_eq!(snapshot["status"], "empty");
         assert_eq!(snapshot["rows"], 0);
+    }
+
+    #[test]
+    fn revised_credit_updates_the_row_without_adding_rows() {
+        let path = temp_path("revised");
+        let now = now_ms();
+        let today = Local
+            .timestamp_millis_opt(now)
+            .single()
+            .map(|value| value.format("%Y-%m-%d").to_string())
+            .unwrap();
+        assert_eq!(
+            record_requests_at(
+                &path,
+                &[request(
+                    "r1",
+                    "WorkBuddy",
+                    1.0,
+                    &format!("{today} 10:00:00"),
+                    "acc-1"
+                )],
+                now
+            )
+            .unwrap(),
+            1
+        );
+        // 同一条请求被官方修正为 5.0：不能新增行，但金额必须跟上。
+        assert_eq!(
+            record_requests_at(
+                &path,
+                &[request(
+                    "r1",
+                    "WorkBuddy",
+                    5.0,
+                    &format!("{today} 10:00:00"),
+                    "acc-1"
+                )],
+                now
+            )
+            .unwrap(),
+            0
+        );
+        let snapshot = snapshot_at(&path, now);
+        assert_eq!(snapshot["rows"], 1);
+        assert_eq!(snapshot["summary"]["usageToday"], json!(5.0));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
