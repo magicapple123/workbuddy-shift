@@ -150,12 +150,15 @@ export function SettingsSyncCard() {
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<SettingsSyncBackupEntry | null>(null);
 
-  const loadStatus = useCallback(async () => {
+  const loadStatus = useCallback(async (): Promise<SettingsSyncStatus | null> => {
     try {
-      setStatus(await api.getSettingsSyncStatus());
+      const next = await api.getSettingsSyncStatus();
+      setStatus(next);
       setError(null);
+      return next;
     } catch (cause) {
       setError(api.asError(cause));
+      return null;
     }
   }, []);
 
@@ -184,9 +187,12 @@ export function SettingsSyncCard() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      await loadStatus();
-      if (cancelled) return;
-      await runPreview(true);
+      // 演示 / 截图模式没有后端，不额外制造一条「自动预览失败」。
+      if (api.isDemoMode()) return;
+      const next = await loadStatus();
+      if (cancelled || !next) return;
+      // 同步被关掉时预览没有意义，按钮也是禁用的。
+      if (next.config.enabled) await runPreview(true);
     })();
     return () => {
       cancelled = true;
@@ -327,15 +333,17 @@ export function SettingsSyncCard() {
     : [];
 
   /** 按钮旁的状态文案：始终告诉用户「现在能不能点同步、为什么」。 */
-  const statusText = previewing
-    ? "正在预览…"
-    : previewError
-      ? `预览失败：${previewError}`
-      : !plan
-        ? "尚未预览"
-        : changedTargets.length === 0
-          ? "已一致，无需同步"
-          : `将修改 ${changedTargets.length} 个账号 · ${pendingItems} 项`;
+  const statusText = !config?.enabled
+    ? "设置同步已关闭"
+    : previewing
+      ? "正在预览…"
+      : previewError
+        ? `预览失败：${previewError}`
+        : !plan
+          ? "尚未预览"
+          : changedTargets.length === 0
+            ? "已一致，无需同步"
+            : `将修改 ${changedTargets.length} 个账号 · ${pendingItems} 项`;
 
   const backupAccounts = accounts.filter((account) => account.hasDirectory);
 
