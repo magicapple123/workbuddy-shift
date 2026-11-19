@@ -53,6 +53,9 @@ export default function AccountsPage() {
           refreshLabel={page.refreshCreditsLabel}
           demoMode={page.demoMode}
           onRefresh={() => void page.onRefreshCredits()}
+          sort={page.sort}
+          onSortChange={page.onSortChange}
+          rateLimitEnabled={page.rateLimitEnabled}
         />
         <AccountsGrid page={page} />
       </section>

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import * as api from "@/lib/api";
 import { displayName } from "@/lib/account-display";
+import { type PersistedPreferenceOptions, usePersistedPreferenceState } from "@/lib/persisted-preference";
 import { useSupportedTools } from "@/lib/supported-tools";
 import type { AccountMeta } from "@/lib/types";
 import {
@@ -13,13 +14,27 @@ import {
 } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 
-import { orderAccountsByCredit } from "../ordering";
+import { DEFAULT_SORT, nextSortState, parseSort, serializeSort, sortAccounts, type SortKey, type SortState } from "../ordering";
 import { fetchTodayCheckinMap } from "../signals/fetch-maps";
 import { useCheckinSignals } from "../signals/use-checkin-signals";
 import { useClientStatusSignals } from "../signals/use-client-status-signals";
 import { useRateLimitSignals } from "../signals/use-rate-limit-signals";
 import { useTravelSignals } from "../signals/use-travel-signals";
 import { useCompactMode } from "../use-compact-mode";
+
+/**
+ * 排序偏好：`accounts.sort` = `{"key":"name","dir":"asc|desc"}`。
+ *
+ * 国内版 / 国际版共享同一份偏好：用户按「自己关心的账号」排序，不按档位分别记住。
+ * options 必须在模块级定义（对象引用稳定），否则订阅会反复重建。
+ */
+const SORT_PREFERENCE: PersistedPreferenceOptions<SortState> = {
+  key: "accounts.sort",
+  fallback: DEFAULT_SORT,
+  parse: parseSort,
+  serialize: serializeSort,
+  eventName: "workbuddy-shift:accounts-sort-changed",
+};
 
 /**
  * 账号页的装配层：账号库、档位、信号 hooks 与所有动作集中在这里，
@@ -76,6 +91,13 @@ export function useAccountsPage() {
   const travelAvailable = variantSupportsTravel(variant);
   const enabledTools = useSupportedTools();
   const [compact, toggleCompact] = useCompactMode();
+  /** 排序偏好（localStorage `accounts.sort`）：六项单选 + 同一项再点反转。 */
+  const [sort, setSort] = usePersistedPreferenceState(SORT_PREFERENCE);
+  /** 点击某个维度：非当前项切到该维度（用其默认方向），当前项只翻转方向。 */
+  const onSortChange = useCallback(
+    (key: SortKey) => setSort(nextSortState(sort, key)),
+    [sort, setSort],
+  );
 
   const { checkinMap, setCheckinMap, excludedCheckinIds, autoCheckinSettled } = useCheckinSignals({
     visibleAccounts,
@@ -316,9 +338,21 @@ export function useAccountsPage() {
   }
 
   const current = status?.current;
+  /**
+   * 卡片顺序：按当前排序偏好计算。
+   *
+   * 「最近更新」用的是 `creditUpdatedAtMap`（卡片右下「18:33 更新」的同一时间戳），
+   * 「额度恢复时间」用的是限额台账里尚未恢复的最近 `resetAt`。
+   */
   const { ordered: orderedAccounts, priorityAccountId } = useMemo(
-    () => orderAccountsByCredit(visibleAccounts, creditMap, creditLoadingMap),
-    [visibleAccounts, creditMap, creditLoadingMap],
+    () =>
+      sortAccounts(visibleAccounts, sort, {
+        creditMap,
+        creditLoadingMap,
+        creditUpdatedAtMap,
+        rateLimitMap,
+      }),
+    [visibleAccounts, sort, creditMap, creditLoadingMap, creditUpdatedAtMap, rateLimitMap],
   );
 
   return {
@@ -342,6 +376,8 @@ export function useAccountsPage() {
     enabledTools,
     compact,
     toggleCompact,
+    sort,
+    onSortChange,
     checkinMap,
     excludedCheckinIds,
     autoCheckinSettled,
