@@ -131,24 +131,49 @@ pub fn import_accounts(file_text: String, indexes: Vec<usize>) -> Result<Value, 
     }))
 }
 
-/// 打开系统设置授权面板。默认「完全磁盘访问」（该 anchor 各版本均有效）；
-/// 传 `target="app_management"` 尝试「App 管理」（macOS 15+，部分版本不支持深链）。
+/// 打开系统设置授权面板。仅 macOS 提供「完全磁盘访问 / App 管理」；
+/// 传 `target="app_management"` 尝试「App 管理」（macOS 15+，部分版本不支持深链），
+/// 缺省「完全磁盘访问」（该 anchor 各版本均有效）。
 ///
 /// 使用 macOS 13+ 深链接格式（`com.apple.settings.PrivacySecurity.extension?Privacy_*`）。
+///
+/// 其它平台**返回明确错误**，不假装成功：Windows / Linux 没有对应的隐私授权开关，
+/// 写认证文件只受文件读写权限限制。此前这里无 `#[cfg]` 分支且丢弃了 spawn 结果，
+/// 于是 Windows 上点按钮完全没有反馈（第三轮第 11 条）。
 #[tauri::command]
 pub fn open_permission_settings(target: Option<String>) -> Result<(), String> {
-    let t = target.unwrap_or_else(|| "all_files".to_string());
-    let url = match t.as_str() {
-        "app_management" => {
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppManagement"
-        }
-        _ => {
-            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
-        }
-    };
-    let _ = std::process::Command::new("open").arg(url).spawn();
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let t = target.unwrap_or_else(|| "all_files".to_string());
+        let url = match t.as_str() {
+            "app_management" => {
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppManagement"
+            }
+            _ => {
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+            }
+        };
+        return std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("打开系统设置失败：{error}"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        Err("当前系统没有「完全磁盘访问 / App 管理」设置项：Windows 与 Linux 上写认证文件只受文件读写权限限制，请改用「在资源管理器中显示认证文件」检查该文件是否被客户端占用或只读".to_string())
+    }
 }
+
+/// 写入失败时的授权引导文案（按平台给，别让 Windows 用户去找「完全磁盘访问」）。
+#[cfg(target_os = "macos")]
+const PERMISSION_HINT: &str = "请在 系统设置→隐私与安全性 中授权：优先「App 管理」开启 WorkBuddy Shift，若没有则去「完全磁盘访问」把 WorkBuddy Shift 拖进去；授权后需重启 App 生效";
+/// Windows 没有隐私授权开关：写不进去只可能是占用、只读 / ACL 或安全软件拦截。
+#[cfg(target_os = "windows")]
+const PERMISSION_HINT: &str = "写认证文件失败通常是：WorkBuddy 客户端正在占用该文件、文件只读或被 ACL 拒绝（属性→安全），或杀毒 / 受控文件夹访问拦截了写入。关闭客户端后重试，或把 WorkBuddy Shift 加入受控文件夹访问白名单";
+#[cfg(all(unix, not(target_os = "macos")))]
+const PERMISSION_HINT: &str = "写认证文件失败通常是文件所有者或权限位不对：确认该文件属于当前用户且可写（ls -l 后按需 chmod u+w）";
 
 /// 权限自检：尝试在认证文件目录写/删探针文件，确认完全磁盘访问等授权是否生效。
 ///
@@ -169,18 +194,56 @@ pub fn check_auth_permission(variant: Option<String>) -> Value {
             "variant": variant.as_str(),
             "error": e.to_string(),
             "dir": path.parent().map(|p| p.to_string_lossy().to_string()),
-            "hint": "请在 系统设置→隐私与安全性 中授权：优先「App 管理」开启 WorkBuddy Shift，若没有则去「完全磁盘访问」把 WorkBuddy Shift 拖进去；授权后需重启 App 生效",
+            "hint": PERMISSION_HINT,
         }),
     }
 }
 
-/// 在 Finder 中显示当前 App（便于拖拽到「完全磁盘访问」授权框）。
+/// 在系统文件管理器中选中并定位本 App 的可执行文件（macOS 拖拽授权时用）。
+///
+/// 三个平台各有自己的入口，此前只实现了 macOS，且丢弃了 spawn 结果：
+/// Windows 上 `open -R` 根本不存在，按钮毫无反应（第三轮第 11 条）。
+/// 命令名是稳定契约（前端 `reveal_app_in_finder` 仍按此调用），没改。
 #[tauri::command]
 pub fn reveal_app_in_finder() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("open")
-        .arg("-R")
-        .arg(&exe)
-        .spawn();
-    Ok(())
+    let exe = std::env::current_exe().map_err(|e| format!("定位应用路径失败：{e}"))?;
+    spawn_reveal_file(&exe)
+}
+
+/// 与 `wb_shift_core::modules::storage::reveal` 的同名三步保持一致
+/// （Windows `explorer /select,` / macOS `open -R` / Linux `xdg-open <父目录>`）。
+/// 那份实现在 core，且被 storage 白名单校验包裹，这里只需要“选中这个文件”，
+/// 因此按同一套命令重写一份；要改命令格式时两处一起改。
+fn spawn_reveal_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // explorer 对多数失败仍返回 0，只能要求进程启动成功。
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.to_string_lossy()))
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("打开资源管理器失败：{error}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("打开访达失败：{error}"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("打开文件管理器失败：{error}"))
+    }
 }
