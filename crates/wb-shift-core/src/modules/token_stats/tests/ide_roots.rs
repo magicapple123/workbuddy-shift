@@ -497,3 +497,74 @@ fn file_cache_stops_growing_at_its_caps() {
 // -----------------------------------------------------------------------
 // 时间窗裁剪：整份落在窗口之前的文件不读盘
 // -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// 第四轮 06：按客户端目录拆 source，`WorkBuddy/` 空壳不参与统计
+// -----------------------------------------------------------------------
+
+#[test]
+fn ide_client_source_only_counts_its_own_client_directory() {
+    let now = crate::modules::config::now_ms();
+    let root = std::env::temp_dir().join(format!(
+        "workbuddy-shift-token-stats-client-split-{}-{now}",
+        std::process::id()
+    ));
+    // 真实布局：Data/<uid>/<client>/<uid>/history/<bucket>/<conv>/index.json
+    let conversation = |client: &str, conv: &str| {
+        root.join("uid-a")
+            .join(client)
+            .join("uid-a")
+            .join("history")
+            .join("f6b91d61")
+            .join(conv)
+    };
+    let write = |client: &str, conv: &str, input: u64| {
+        let dir = conversation(client, conv);
+        fs::create_dir_all(&dir).expect("create conversation dir");
+        fs::write(
+            dir.join("index.json"),
+            json!({
+                "requests": [{
+                    "id": format!("req-{conv}"),
+                    "state": "complete",
+                    "startedAt": now - 1_000,
+                    "usage": {
+                        "inputTokens": input,
+                        "outputTokens": 0,
+                        "cacheTokens": 0,
+                        "cachedWriteTokens": 0
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write conversation");
+    };
+    write("VSCode", "conv-vscode", 100);
+    write("JetBrains", "conv-jetbrains", 200);
+    write("CodeBuddyIDE", "conv-ide", 300);
+    write("WorkBuddy", "conv-shell", 400);
+
+    let empty = HashMap::new();
+    let vscode = ide_client_source(root.clone(), "VSCode", "vscode-ext", None, &empty);
+    let jetbrains = ide_client_source(root.clone(), "JetBrains", "jetbrains", None, &empty);
+    let ide = ide_client_source(root.clone(), "CodeBuddyIDE", "codebuddy-ide", None, &empty);
+
+    assert_eq!(vscode["source"], "vscode-ext");
+    assert_eq!(vscode["summary"]["input"], 100);
+    assert_eq!(vscode["filesScanned"], 1);
+
+    assert_eq!(jetbrains["source"], "jetbrains");
+    assert_eq!(jetbrains["summary"]["input"], 200);
+    assert_eq!(jetbrains["filesScanned"], 1);
+
+    assert_eq!(ide["source"], "codebuddy-ide");
+    assert_eq!(ide["summary"]["input"], 300);
+
+    // `WorkBuddy/` 空壳（400）不出现在任何一个客户端 tab。
+    for source in [&vscode, &jetbrains, &ide] {
+        assert_ne!(source["summary"]["input"], 400);
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}

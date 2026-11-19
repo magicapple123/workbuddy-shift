@@ -302,6 +302,26 @@ pub(super) fn collect_ide_requests(
     }
 }
 
+/// 只在「某个客户端子目录」下收集会话索引（第四轮 06：Token 统计按客户端拆 tab）。
+///
+/// 真实布局是 `Data/<uid>/<client>/<uid>/history/...`，`client` 固定为
+/// `VSCode` / `JetBrains` / `CodeBuddyIDE` / `WorkBuddy`。早期实现整棵 `Data/**` 递归，
+/// 把三个客户端混在一个 tab 里（JetBrains 被当成 IDE 的一部分），也无法排除
+/// `WorkBuddy/` 那份由客户端内置扩展写的空壳。
+pub(super) fn ide_client_index_files(root: &Path, client: &str, output: &mut Vec<PathBuf>) {
+    let Ok(uids) = std::fs::read_dir(root) else {
+        return;
+    };
+    for uid in uids.flatten() {
+        let client_dir = uid.path().join(client);
+        if client_dir.is_dir() {
+            ide_index_files(&client_dir, output);
+        }
+    }
+}
+
+/// 全量版本：扫描整棵 `Data/**`（仅测试与旧调用路径使用；生产已按客户端拆分）。
+#[cfg(test)]
 pub(super) fn ide_source(
     root: PathBuf,
     name: &str,
@@ -310,6 +330,29 @@ pub(super) fn ide_source(
 ) -> Value {
     let mut paths = Vec::new();
     ide_index_files(&root, &mut paths);
+    ide_source_from_paths(root, name, paths, cutoff, project_by_session)
+}
+
+/// 按客户端目录收集后聚合：解析、去重与账号归因逻辑与全量版完全一致。
+pub(super) fn ide_client_source(
+    root: PathBuf,
+    client: &str,
+    name: &str,
+    cutoff: Option<i64>,
+    project_by_session: &HashMap<String, String>,
+) -> Value {
+    let mut paths = Vec::new();
+    ide_client_index_files(&root, client, &mut paths);
+    ide_source_from_paths(root, name, paths, cutoff, project_by_session)
+}
+
+fn ide_source_from_paths(
+    root: PathBuf,
+    name: &str,
+    paths: Vec<PathBuf>,
+    cutoff: Option<i64>,
+    project_by_session: &HashMap<String, String>,
+) -> Value {
     // 复用 `Target`：mtime 只取一次，既用于「副本按落地顺序处理」，也用于窗口裁剪。
     let mut targets: Vec<Target> = paths
         .into_iter()

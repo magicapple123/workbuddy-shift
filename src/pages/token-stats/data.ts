@@ -25,6 +25,8 @@ export function isSourceKey(value: unknown): value is SourceKey {
     value === "workbuddy" ||
     value === "workbuddy-ai" ||
     value === "codebuddy-cli" ||
+    value === "vscode-ext" ||
+    value === "jetbrains" ||
     value === "codebuddy-ide"
   );
 }

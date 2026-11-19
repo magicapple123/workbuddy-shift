@@ -33,6 +33,13 @@ import { accountVariant } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 import { SelectedAccountDetails } from "./account-details";
 import { AccountUsageShare } from "./account-usage-share";
+import { ClientFilterMenu } from "./client-filter-menu";
+import {
+  CLIENT_VIEW_LABELS,
+  clientViewOptions,
+  filterOfficialByClient,
+  type CreditClientKey,
+} from "./data";
 import {
   creditSourceBadge,
   localCoverageText,
@@ -66,6 +73,8 @@ export default function CreditStatsPage() {
   const [loading, setLoading] = useState(() => readCreditStatisticsCache() === null);
   const [error, setError] = useState<string | null>(null);
   const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
+  /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
+  const [clientView, setClientView] = useState<CreditClientKey>("all");
 
   // 渐进式刷新：本地数字 → 积分 / 官方用量并行；按钮显示「更新中 N/2 项」。
   const progressive = useProgressiveRefresh({
@@ -166,14 +175,32 @@ export default function CreditStatsPage() {
     return recomputeOfficialUsage(officialUsage, variantAccountIds);
   }, [stats, viewVariant, variantAccountIds]);
 
-  /** 导出：当前档位筛选，全量日期；官方明细标注每账号上限与是否截断。 */
+  // 客户端维度只能在明细上做（官方没有按客户端聚合）。
+  const clientOptions = useMemo(
+    () => clientViewOptions(stats?.officialUsage?.requests),
+    [stats],
+  );
+  useEffect(() => {
+    // 明细里没有该客户端（换账号、后端换了明细范围）→ 回到「全部」，不留一个空筛选项。
+    if (clientView === "all") return;
+    if (!clientOptions.some((option) => option.key === clientView)) setClientView("all");
+  }, [clientOptions, clientView]);
+  const clientDetail = useMemo(() => {
+    if (clientView === "all" || !filteredOfficial) return null;
+    return filterOfficialByClient(filteredOfficial, clientView, variantAccountIds);
+  }, [clientView, filteredOfficial, variantAccountIds]);
+
+  /** 当前口径的官方数据：选了具体客户端就是「据明细汇总」，否则沿用官方聚合。 */
+  const officialUsage = clientDetail?.official ?? filteredOfficial;
+
+  /** 导出：当前档位 + 当前客户端筛选，全量日期；官方明细标注每账号上限与是否截断。 */
   async function exportCsv() {
     if (!stats) {
       toast.error("还没有可导出的统计数据");
       return;
     }
     try {
-      const content = buildCreditStatsCsv(stats, filteredOfficial ?? undefined);
+      const content = buildCreditStatsCsv(stats, officialUsage ?? undefined);
       const outcome = await saveCsvFile(creditStatsFileName(viewVariant), content);
       if (outcome === "saved") {
         toast.success("已导出积分统计 CSV", {
@@ -185,7 +212,6 @@ export default function CreditStatsPage() {
     }
   }
 
-  const officialUsage = filteredOfficial;
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
   const variantEmpty =
     viewVariant !== "all" && variantAccountIds !== null && variantAccountIds.size === 0;
@@ -221,15 +247,20 @@ export default function CreditStatsPage() {
             当前数据更新于 {stats ? formatDateTime(official?.collectedAt ?? stats.generatedAt) : "—"}
           </p>
           <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
-            仅统计 WorkBuddy 账号的积分（国内版与国际版分开计算，不合并其它客户端）；
-            官方用量接口只提供近 30 天，逐请求明细每账号上限 1000 条（聚合不受此限制）。
+            积分按账号汇总（国内版与国际版分开计算）；「客户端」筛选在官方明细上做，
+            选中具体客户端时总览改「据明细汇总」。官方用量接口只提供近 30 天，
+            逐请求明细每账号上限 1000 条（聚合不受此限制）。
           </p>
           {stats ? (
             <p className="mt-0.5 max-w-2xl text-[11px] leading-5 text-muted-foreground">
-              {official
+            {clientDetail
+              ? `据明细汇总（${CLIENT_VIEW_LABELS[clientView]}）· ${clientDetail.records} 条 · ${
+                  clientDetail.truncated ? "部分截断（数字为下限）" : "未截断"
+                }`
+              : official
                 ? `官方口径：${officialRangeText} · 明细上限 ${official.detailLimitPerAccount} 条/账号`
                 : `本地观察口径：${localCoverageText(coverage)}`}
-            </p>
+          </p>
           ) : null}
 
           {progressive.running || progressive.timing.officialMs !== null ? (
@@ -264,6 +295,12 @@ export default function CreditStatsPage() {
               </button>
             ))}
           </div>
+          <ClientFilterMenu
+            options={clientOptions}
+            value={clientView}
+            onChange={setClientView}
+            counts={stats?.officialUsage?.requests.length ?? 0}
+          />
           <DemoAction>
             <Button
               className="shrink-0"
@@ -369,10 +406,15 @@ export default function CreditStatsPage() {
               <Card className="min-w-0 gap-0 overflow-hidden rounded-2xl bg-card/70 py-0 shadow-none" aria-label="积分总览">
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 px-4 py-2 text-[11px] leading-5 text-muted-foreground sm:px-5">
                   <span className="min-w-0">
-                    {creditSourceBadge(official)}：
-                    {official
-                      ? `${officialRangeText}（官方仅提供近 30 天）`
-                      : localCoverageText(coverage)}
+                    {clientDetail
+                      ? `据明细汇总 · ${clientDetail.records} 条 · ${
+                          clientDetail.truncated ? "部分截断" : "未截断"
+                        }（剩余积分为账号级）`
+                      : `${creditSourceBadge(official)}：${
+                          official
+                            ? `${officialRangeText}（官方仅提供近 30 天）`
+                            : localCoverageText(coverage)
+                        }`}
                   </span>
                   <span className="min-w-0">
                     {coverageHint ?? "明细每账号上限 1000 条，聚合与趋势不受限"}

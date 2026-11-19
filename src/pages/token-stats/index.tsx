@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
-import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
+import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
@@ -39,7 +39,14 @@ import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredToken
 import { RequestDetailDialog } from "./request-detail";
 import { TokenStatsLoadingSkeleton } from "./skeleton";
 
-const SOURCE_KEYS: SourceKey[] = ["workbuddy", "workbuddy-ai", "codebuddy-cli", "codebuddy-ide"];
+const SOURCE_KEYS: SourceKey[] = [
+  "workbuddy",
+  "workbuddy-ai",
+  "codebuddy-cli",
+  "vscode-ext",
+  "jetbrains",
+  "codebuddy-ide",
+];
 
 /** 每个来源记住上次选择的账号（第 7 条：筛选层级按来源独立）。 */
 function readAllSelections(): Record<SourceKey, AccountSelection> {
@@ -302,11 +309,27 @@ export default function TokenStatsPage() {
               </TabsTrigger>
               <TabsTrigger
                 className="max-w-full gap-2 whitespace-normal"
+                value="vscode-ext"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "vscode-ext"))}
+              >
+                <VscodeExtMark size={16} />
+                VS Code 插件
+              </TabsTrigger>
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
+                value="jetbrains"
+                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "jetbrains"))}
+              >
+                <JetbrainsMark size={16} />
+                JetBrains 插件
+              </TabsTrigger>
+              <TabsTrigger
+                className="max-w-full gap-2 whitespace-normal"
                 value="codebuddy-ide"
                 disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-ide"))}
               >
                 <CodeBuddyCnIdeMark size={16} />
-                CodeBuddy IDE / VS Code
+                CodeBuddy IDE
               </TabsTrigger>
             </TabsList>
           </Tabs>

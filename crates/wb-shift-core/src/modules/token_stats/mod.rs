@@ -229,7 +229,30 @@ fn collect_statistics(home: &Path, days: Option<i64>) -> Value {
             // 请求明细目前只对 CodeBuddy CLI 开放（见 spec 的 requests 契约）。
             // CLI 日志不按账号分目录、也没有账号字段 → 全部归「未归属」。
             source(roots.codebuddy_cli, "codebuddy-cli", cutoff, true),
-            ide_source(roots.codebuddy_ide, "codebuddy-ide", cutoff, &ide_projects),
+            // 第四轮 06：按客户端拆成三个 tab（同一套解析/去重/归因，只是扫描根收窄）。
+            // `WorkBuddy/` 是 WorkBuddy 客户端内置扩展写的空壳，**不扫**：日常用量已经在
+            // 国内版 JSONL 里，扫它会把同一份用量重复计一次。
+            ide_client_source(
+                roots.codebuddy_ide.clone(),
+                "VSCode",
+                "vscode-ext",
+                cutoff,
+                &ide_projects,
+            ),
+            ide_client_source(
+                roots.codebuddy_ide.clone(),
+                "JetBrains",
+                "jetbrains",
+                cutoff,
+                &ide_projects,
+            ),
+            ide_client_source(
+                roots.codebuddy_ide,
+                "CodeBuddyIDE",
+                "codebuddy-ide",
+                cutoff,
+                &ide_projects,
+            ),
         ],
     })
 }
