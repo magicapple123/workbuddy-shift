@@ -61,6 +61,11 @@ pub fn utc_iso() -> String {
 
 /// 原子写文件（临时文件 + rename），对照 Python atomic_write。
 pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    atomic_write_bytes(path, content.as_bytes())
+}
+
+/// 原子写二进制文件（xlsx 等）：与文本版共用临时文件 + rename 策略。
+pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

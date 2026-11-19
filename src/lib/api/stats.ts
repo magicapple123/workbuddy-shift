@@ -205,3 +205,17 @@ export function saveTextFile(path: string, content: string): Promise<{
 }> {
   return call("save_text_file", { path, content });
 }
+
+/**
+ * 保存二进制到指定路径（仅桌面：先弹保存对话框；只允许 .xlsx、≤16 MiB）。
+ *
+ * 命令是 desktop-only，WebUI 不会调用；内容以 base64 传输，避免 IPC 数组的额外开销。
+ */
+export function saveBytesFile(path: string, base64: string): Promise<{
+  ok: boolean;
+  path: string;
+  bytes: number;
+  savedAt: number;
+}> {
+  return call("save_bytes_file", { path, base64 });
+}

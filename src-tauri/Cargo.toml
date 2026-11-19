@@ -42,6 +42,7 @@ reqwest = { version = "0.13", default-features = false, features = ["system-prox
 wb-shift-core = { path = "../crates/wb-shift-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+base64.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tauri-plugin-notification = "2"

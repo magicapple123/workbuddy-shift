@@ -37,21 +37,41 @@ function downloadBlob(fileName: string, blob: Blob): void {
 }
 
 /**
- * 保存 xlsx：二进制在前端生成，两种宿主都走 Blob 下载（清单第 17 条决策）。
+ * 保存 xlsx：二进制在前端生成。
  *
- * 为什么不复用 `save_text_file`：那条命令只允许 `.csv`，且按 UTF-8 文本写，装不下
- * ZIP 二进制；新增一条二进制写入命令会让 WebUI 多开一条通道（该决策明确不做），
- * 所以这里统一走 Blob。
+ * - WebUI / 演示模式：浏览器 Blob 下载；
+ * - 桌面：先弹保存对话框，再调 desktop-only 的 `save_bytes_file` 原子写入。
+ *   （WebView2 里 Blob 下载不会落盘，2026-11-19 实机确认；因此桌面必须走命令。）
  */
 export async function saveXlsxFile(
   fileName: string,
   bytes: Uint8Array,
 ): Promise<"saved" | "cancelled"> {
-  // `bytes.buffer` 可能是 SharedArrayBuffer 视图，拷一份独立的 ArrayBuffer 交给 Blob。
-  const buffer = bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
-  downloadBlob(fileName, new Blob([buffer], { type: XLSX_MIME }));
+  if (isWebui() || api.isDemoMode()) {
+    // `bytes.buffer` 可能是 SharedArrayBuffer 视图，拷一份独立的 ArrayBuffer 交给 Blob。
+    const buffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    downloadBlob(fileName, new Blob([buffer], { type: XLSX_MIME }));
+    return "saved";
+  }
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const target = await save({
+    defaultPath: fileName,
+    filters: [{ name: "Excel", extensions: ["xlsx"] }],
+  });
+  if (!target) return "cancelled";
+  await api.saveBytesFile(target, toBase64(bytes));
   return "saved";
+}
+
+/** 分块转 base64，避免 `String.fromCharCode(...大数组)` 触发调用栈上限。 */
+function toBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }

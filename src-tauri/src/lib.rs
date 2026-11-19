@@ -334,6 +334,7 @@ pub fn run() {
             commands::storage_revalidate,
             commands::refresh_official_usage,
             commands::save_text_file,
+            commands::save_bytes_file,
             commands::get_settings_sync_status,
             commands::save_settings_sync_config,
             commands::preview_settings_sync,

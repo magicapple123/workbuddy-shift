@@ -221,3 +221,20 @@ pub async fn save_text_file(path: String, content: String) -> Result<serde_json:
     .await
     .map_err(|error| error.to_string())?
 }
+
+/// 桌面专用：把 base64 编码的二进制（xlsx）写到用户选定的路径。
+///
+/// 只允许 `.xlsx`、≤16 MiB；WebUI 不映射这条命令（浏览器用 Blob 下载），
+/// 所以在 `scripts/check-command-routes.mjs` 的 desktop-only 清单里登记。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_bytes_file(path: String, base64: String) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|error| format!("内容不是合法的 base64：{error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        wb_shift_core::modules::export_file::save_binary_file(&path, &bytes)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}

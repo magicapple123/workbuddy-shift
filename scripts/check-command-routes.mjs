@@ -109,6 +109,8 @@ const DESKTOP_ONLY = new Set([
   "get_companion_enabled",
   "set_companion_enabled",
   "open_companion_settings",
+  // xlsx 二进制保存：桌面弹保存框后写入；WebUI 用浏览器 Blob 下载，不映射路由。
+  "save_bytes_file",
 ]);
 const mapped = new Set(routes.map((r) => r.command));
 for (const name of registeredSet) {
