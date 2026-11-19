@@ -25,6 +25,7 @@ import {
 } from "@/lib/stats-cache";
 import { toast } from "sonner";
 import type {
+  CreditRange,
   CreditStatistics,
   WbVariant,
 } from "@/lib/types";
@@ -38,6 +39,8 @@ import {
   CLIENT_VIEW_LABELS,
   clientViewOptions,
   filterOfficialByClient,
+  ledgerClientViewOptions,
+  ledgerToOfficialUsage,
   type CreditClientKey,
 } from "./data";
 import {
@@ -59,6 +62,13 @@ function formatMs(value: number | null): string {
 /** 进入统计页时距上次采集超过此时长（ms）则自动重新采集一次 */
 const STATISTICS_AUTO_REFRESH_MS = 30 * 60 * 1000;
 
+/** 统计范围：官方窗口 30/90 天，或本地账本的「全部」。 */
+const CREDIT_RANGE_OPTIONS: { key: CreditRange; label: string }[] = [
+  { key: "30d", label: "近 30 天" },
+  { key: "90d", label: "近 90 天" },
+  { key: "all", label: "全部" },
+];
+
 
 export default function CreditStatsPage() {
   const {
@@ -75,6 +85,9 @@ export default function CreditStatsPage() {
   const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
   /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
   const [clientView, setClientView] = useState<CreditClientKey>("all");
+  /** 范围：30 天 / 90 天（官方窗口）/ 全部（本地账本）。 */
+  const [range, setRange] = useState<CreditRange>("30d");
+  const [rangeLoading, setRangeLoading] = useState(false);
 
   // 渐进式刷新：本地数字 → 积分 / 官方用量并行；按钮显示「更新中 N/2 项」。
   const progressive = useProgressiveRefresh({
@@ -86,6 +99,7 @@ export default function CreditStatsPage() {
       setError(null);
     },
     refreshCredits,
+    range,
     loadAccountIds: async () => {
       await fetchAll();
       return useAccountsStore.getState().accounts.map((account) => account.id);
@@ -127,6 +141,28 @@ export default function CreditStatsPage() {
     },
     [fetchAll, refreshCredits],
   );
+
+  /**
+   * 切范围：30 天走共享缓存；90 天 / 全部单独取一次。
+   * 「全部」不联网（后端读账本），所以断网也能切。
+   */
+  async function selectRange(next: CreditRange) {
+    if (next === range || rangeLoading) return;
+    setRange(next);
+    setRangeLoading(true);
+    try {
+      if (next === "30d") {
+        await load(false);
+      } else {
+        setStats(await api.getCreditStatistics(false, next));
+        setError(null);
+      }
+    } catch (cause) {
+      toast.error("切换统计范围失败", { description: api.asError(cause) });
+    } finally {
+      setRangeLoading(false);
+    }
+  }
 
   useEffect(() => {
     void (async () => {
@@ -177,8 +213,11 @@ export default function CreditStatsPage() {
 
   // 客户端维度只能在明细上做（官方没有按客户端聚合）。
   const clientOptions = useMemo(
-    () => clientViewOptions(stats?.officialUsage?.requests),
-    [stats],
+    () =>
+      range === "all"
+        ? ledgerClientViewOptions(stats?.ledger)
+        : clientViewOptions(stats?.officialUsage?.requests),
+    [range, stats],
   );
   useEffect(() => {
     // 明细里没有该客户端（换账号、后端换了明细范围）→ 回到「全部」，不留一个空筛选项。
@@ -190,8 +229,16 @@ export default function CreditStatsPage() {
     return filterOfficialByClient(filteredOfficial, clientView, variantAccountIds);
   }, [clientView, filteredOfficial, variantAccountIds]);
 
-  /** 当前口径的官方数据：选了具体客户端就是「据明细汇总」，否则沿用官方聚合。 */
-  const officialUsage = clientDetail?.official ?? filteredOfficial;
+  // 选「全部」走账本；账本不可用/为空时降级回官方 30 天并在页面上说明。
+  const ledgerOfficial = useMemo(
+    () => (range === "all" ? ledgerToOfficialUsage(stats?.ledger, clientView) : null),
+    [range, stats, clientView],
+  );
+  const ledgerFallback = range === "all" && !ledgerOfficial;
+  /** 当前口径的官方数据：全部=账本 / 具体客户端=据明细汇总 / 否则=官方聚合。 */
+  const officialUsage = ledgerFallback
+    ? filteredOfficial
+    : ledgerOfficial ?? clientDetail?.official ?? filteredOfficial;
 
   /** 导出：当前档位 + 当前客户端筛选，全量日期；官方明细标注每账号上限与是否截断。 */
   async function exportCsv() {
@@ -213,6 +260,20 @@ export default function CreditStatsPage() {
   }
 
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
+
+  /** 顶部口径说明：账本优先，其次明细汇总，最后官方/本地。 */
+  const ledgerCaliber =
+    range === "all"
+      ? ledgerOfficial
+        ? `本地账本：${stats?.ledger?.startAt ?? "—"} ~ ${stats?.ledger?.endAt ?? "—"} · ${
+            stats?.ledger?.rows ?? 0
+          } 条（自本工具首次抓取起累计）`
+        : "本地账本暂无数据，暂用官方近 30 天口径"
+      : null;
+  const rangeFallbackText =
+    stats?.rangeFallback === true
+      ? `官方接口只接受近 ${stats?.windowProbe?.maxDays ?? 30} 天窗口，已按近 30 天统计`
+      : null;
   const variantEmpty =
     viewVariant !== "all" && variantAccountIds !== null && variantAccountIds.size === 0;
 
@@ -253,13 +314,16 @@ export default function CreditStatsPage() {
           </p>
           {stats ? (
             <p className="mt-0.5 max-w-2xl text-[11px] leading-5 text-muted-foreground">
-            {clientDetail
-              ? `据明细汇总（${CLIENT_VIEW_LABELS[clientView]}）· ${clientDetail.records} 条 · ${
-                  clientDetail.truncated ? "部分截断（数字为下限）" : "未截断"
-                }`
-              : official
-                ? `官方口径：${officialRangeText} · 明细上限 ${official.detailLimitPerAccount} 条/账号`
-                : `本地观察口径：${localCoverageText(coverage)}`}
+            {ledgerCaliber ??
+              (clientDetail
+                ? `据明细汇总（${CLIENT_VIEW_LABELS[clientView]}）· ${clientDetail.records} 条 · ${
+                    clientDetail.truncated ? "部分截断（数字为下限）" : "未截断"
+                  }${rangeFallbackText ? ` · ${rangeFallbackText}` : ""}`
+                : official
+                  ? `官方口径：${officialRangeText} · 明细上限 ${official.detailLimitPerAccount} 条/账号${
+                      rangeFallbackText ? ` · ${rangeFallbackText}` : ""
+                    }`
+                  : `本地观察口径：${localCoverageText(coverage)}`)}
           </p>
           ) : null}
 
@@ -273,6 +337,45 @@ export default function CreditStatsPage() {
           ) : null}
         </div>
         <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
+          <div
+            className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
+            role="tablist"
+            aria-label="统计范围"
+          >
+            {CREDIT_RANGE_OPTIONS.map((option) => {
+              // 服务端只接受 31 天时禁止选 90 天；尚未探测（maxDays=null）先允许，后端会降级。
+              const disabled =
+                rangeLoading ||
+                (option.key === "90d" &&
+                  stats?.windowProbe?.maxDays != null &&
+                  (stats.windowProbe.maxDays ?? 0) < 90);
+              const title =
+                option.key === "90d" && disabled
+                  ? (stats?.windowProbe?.reason ??
+                    "官方接口只接受近 31 天窗口，无法统计 90 天")
+                  : option.key === "all"
+                    ? "本地账本：从本工具首次抓取官方明细起累计"
+                    : undefined;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={range === option.key}
+                  disabled={disabled}
+                  title={title}
+                  className={`cursor-pointer rounded-md px-2.5 py-1.5 text-xs transition-colors ${
+                    range === option.key
+                      ? "bg-background font-medium text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
+                  onClick={() => void selectRange(option.key)}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
           <div
             className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
             role="tablist"
@@ -406,15 +509,19 @@ export default function CreditStatsPage() {
               <Card className="min-w-0 gap-0 overflow-hidden rounded-2xl bg-card/70 py-0 shadow-none" aria-label="积分总览">
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 px-4 py-2 text-[11px] leading-5 text-muted-foreground sm:px-5">
                   <span className="min-w-0">
-                    {clientDetail
-                      ? `据明细汇总 · ${clientDetail.records} 条 · ${
-                          clientDetail.truncated ? "部分截断" : "未截断"
+                    {range === "all" && ledgerOfficial
+                      ? `本地账本 · ${stats?.ledger?.rows ?? 0} 条 · ${
+                          ledgerFallback ? "降级" : "累计"
                         }（剩余积分为账号级）`
-                      : `${creditSourceBadge(official)}：${
-                          official
-                            ? `${officialRangeText}（官方仅提供近 30 天）`
-                            : localCoverageText(coverage)
-                        }`}
+                      : clientDetail
+                        ? `据明细汇总 · ${clientDetail.records} 条 · ${
+                            clientDetail.truncated ? "部分截断" : "未截断"
+                          }（剩余积分为账号级）`
+                        : `${creditSourceBadge(official)}：${
+                            official
+                              ? `${officialRangeText}（官方仅提供近 30 天）`
+                              : localCoverageText(coverage)
+                          }`}
                   </span>
                   <span className="min-w-0">
                     {coverageHint ?? "明细每账号上限 1000 条，聚合与趋势不受限"}

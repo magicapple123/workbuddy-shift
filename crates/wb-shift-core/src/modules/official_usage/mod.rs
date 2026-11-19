@@ -23,6 +23,7 @@ use crate::modules::account::{account_display_name, get_str, variant_of};
 use crate::modules::config::{atomic_write, now_ms, official_usage_cache_file, store_dir};
 use crate::modules::credits::authenticated_post;
 use crate::modules::variant::WbVariant;
+use parse::local_date_at;
 
 pub const OFFICIAL_USAGE_URL: &str =
     "https://www.workbuddy.cn/billing/meter/get-user-request-usage";
@@ -261,27 +262,69 @@ pub async fn refresh_official_usage(accounts: &[Value]) -> Value {
 
 /// 统计页默认读缓存；`refresh = true` 时才重新请求官方用量接口。
 pub async fn official_usage_for_statistics(accounts: &[Value], at_ms: i64, refresh: bool) -> Value {
+    official_usage_for_statistics_with_window(accounts, at_ms, refresh, 30).await
+}
+
+/// 窗口可配置版本（第四轮 07）：缓存只在窗口一致时复用，避免把 90 天的旧结果
+/// 当成 30 天口径返回。
+pub async fn official_usage_for_statistics_with_window(
+    accounts: &[Value],
+    at_ms: i64,
+    refresh: bool,
+    window_days: i64,
+) -> Value {
+    let expected_start = (local_date_at(at_ms) - Duration::days(window_days.max(1)))
+        .format("%Y-%m-%d")
+        .to_string();
+    let cache_matches = |value: &Value| {
+        value.get("rangeStart").and_then(Value::as_str) == Some(expected_start.as_str())
+    };
     if !refresh {
         if let Some(cached) = remembered_official_usage() {
-            return cached;
+            if cache_matches(&cached) {
+                return cached;
+            }
         }
     }
     let _guard = official_usage_fetch_lock().lock().await;
     if !refresh {
         if let Some(cached) = remembered_official_usage() {
-            return cached;
+            if cache_matches(&cached) {
+                return cached;
+            }
         }
     }
-    let usage = collect_official_usage(accounts, at_ms).await;
+    let usage = collect_official_usage_with_window(accounts, at_ms, window_days).await;
     remember_official_usage(&usage);
     usage
+}
+
+/// 只读缓存（不联网）：选「全部」时页面用账本，官方部分只作为其它组件的兜底，
+/// 断网也必须能打开页面。
+pub fn cached_official_usage() -> Value {
+    remembered_official_usage().unwrap_or_else(|| {
+        json!({
+            "status": "unavailable",
+            "rangeStart": "",
+            "rangeEnd": "",
+            "summary": { "usageToday": 0.0, "usage7Days": 0.0, "usageThisMonth": 0.0 },
+            "daily": [],
+            "accounts": [],
+            "requests": [],
+            "models": [],
+            "detailLimitPerAccount": OFFICIAL_USAGE_DETAIL_LIMIT,
+            "errors": [],
+        })
+    })
 }
 
 mod aggregate;
 mod fetch;
 mod parse;
+mod probe;
 
-pub use fetch::collect_official_usage;
+pub use fetch::{collect_official_usage, collect_official_usage_with_window};
+pub use probe::{cached_window_probe, window_probe};
 
 #[cfg(test)]
 mod tests {

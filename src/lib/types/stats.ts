@@ -300,6 +300,56 @@ export interface CreditOfficialUsage {
   errors: CreditOfficialUsageError[];
 }
 
+/** 积分统计的范围选择（第四轮 07）。`all` 走本地账本，不依赖官方窗口。 */
+export type CreditRange = "30d" | "90d" | "all";
+
+/** 官方用量窗口探测结果：服务端到底接受多少天。 */
+export interface CreditWindowProbe {
+  /** 30 / 90；null = 尚未探测。 */
+  maxDays: number | null;
+  probedAt: number | null;
+  reason?: string | null;
+  cached?: boolean;
+}
+
+/** 账本的一个客户端分组（选「全部」+ 具体客户端时四卡/趋势/模型的唯一数据源）。 */
+export interface CreditLedgerClientGroup {
+  client: string;
+  rows: number;
+  total: number;
+  summary: CreditLedgerSummary;
+  daily: CreditStatsDailyPoint[];
+  models: CreditOfficialUsageModel[];
+}
+
+/** 本地账本的窗口汇总（字段与官方 summary 同构，便于共用四卡）。 */
+export interface CreditLedgerSummary {
+  usageToday: number;
+  usage7Days: number;
+  usageThisMonth: number;
+}
+
+/**
+ * 本地账本快照（`~/.workbuddy-shift/credit_ledger.db`）。
+ *
+ * `startAt` 是账本里最早一条记录的日期：它等于「本工具第一次抓官方窗口」的那天，
+ * 不是账号创建日。UI 必须如实标注，不能把「本地累计」说成「官方全量」。
+ */
+export interface CreditLedgerSnapshot {
+  status: "ok" | "empty" | "degraded";
+  error?: string;
+  rows: number;
+  total?: number;
+  startAt: string | null;
+  endAt: string | null;
+  summary: CreditLedgerSummary;
+  daily: CreditStatsDailyPoint[];
+  models: CreditOfficialUsageModel[];
+  clients: { client: string; requestCount: number; credit: number }[];
+  byClient?: CreditLedgerClientGroup[];
+  accounts: { accountId: string; accountName: string; requestCount: number; credit: number }[];
+}
+
 export interface CreditStatistics {
   /** 后端本次统计的总耗时（毫秒）；旧后端可能缺字段。 */
   elapsedMs?: number;
@@ -321,6 +371,17 @@ export interface CreditStatistics {
   events: CreditStatsEvent[];
   /** 官方接口不可用时仍使用上述本地观察字段；缺省兼容旧后端。 */
   officialUsage?: CreditOfficialUsage;
+  /** 第四轮 07：本次请求的范围与生效范围（90 天不支持时降级为 30d）。 */
+  range?: CreditRange;
+  effectiveRange?: CreditRange;
+  rangeFallback?: boolean;
+  windowProbe?: CreditWindowProbe;
+  /** 账本快照；旧后端缺省。 */
+  ledger?: CreditLedgerSnapshot;
+  ledgerStatus?: "ok" | "empty" | "degraded";
+  ledgerRows?: number;
+  ledgerStartAt?: string | null;
+  ledgerEndAt?: string | null;
 }
 
 /** 本地观察的覆盖区间与窗口覆盖判定（后端 `coverage` 字段）。 */

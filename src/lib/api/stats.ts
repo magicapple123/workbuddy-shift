@@ -42,8 +42,14 @@ export function getCreditExpiry(accountId: string): Promise<CreditExpiry> {
   return call("get_credit_expiry", { accountId });
 }
 
-export function getCreditStatistics(refresh = false): Promise<CreditStatistics> {
-  return call("get_credit_statistics", refresh ? { refresh: true } : undefined);
+export function getCreditStatistics(
+  refresh = false,
+  range?: CreditStatistics["range"],
+): Promise<CreditStatistics> {
+  const args: Record<string, unknown> = {};
+  if (refresh) args.refresh = true;
+  if (range && range !== "30d") args.range = range;
+  return call("get_credit_statistics", Object.keys(args).length > 0 ? args : undefined);
 }
 
 /**

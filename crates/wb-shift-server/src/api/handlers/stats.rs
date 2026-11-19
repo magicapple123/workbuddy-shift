@@ -19,7 +19,10 @@ pub(crate) async fn api_credits(Json(body): Json<Value>) -> Response {
 }
 
 pub(crate) async fn api_credit_statistics(RawQuery(query): RawQuery) -> Response {
-    json_ok(credit_usage::get_statistics(query_flag_enabled(query.as_deref(), "refresh")).await)
+    let raw = query.as_deref();
+    let refresh = query_flag_enabled(raw, "refresh");
+    let range = query_param(raw, "range");
+    json_ok(credit_usage::get_statistics(refresh, range.as_deref()).await)
 }
 
 /// POST /api/refresh-official-usage —— 只采集官方用量（单飞 + 内存/磁盘缓存）。

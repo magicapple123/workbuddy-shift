@@ -3,6 +3,8 @@
 
 import { dateDaysAgo, dateKey } from "@/lib/format";
 import type {
+  CreditLedgerClientGroup,
+  CreditLedgerSnapshot,
   CreditOfficialUsage,
   CreditOfficialUsageAccount,
   CreditOfficialUsageModel,
@@ -510,4 +512,75 @@ export function compareRequests(
     order = (left.requestId ?? "").localeCompare(right.requestId ?? "");
   }
   return direction === "desc" ? -order : order;
+}
+
+/**
+ * 账本 → 官方口径形状（第四轮 07）。
+ *
+ * 选「全部」时四卡、趋势、模型、账号分组全部改读账本；把它们映射成 `CreditOfficialUsage`
+ * 让上层组件不需要知道数据来自官方接口还是本地 SQLite。整页只有这一处做形状转换。
+ *
+ * `status` 保持 `degraded` 时不返回对象：页面必须退回官方 30 天口径并提示账本不可用，
+ * 绝不能拿空账本冒充「总计 0」。
+ */
+export function ledgerToOfficialUsage(
+  ledger: CreditLedgerSnapshot | undefined,
+  client: CreditClientKey,
+): CreditOfficialUsage | null {
+  if (!ledger || ledger.status !== "ok") return null;
+  const group: CreditLedgerClientGroup | undefined =
+    client === "all"
+      ? undefined
+      : (ledger.byClient ?? []).find((item) => clientKeyOf(item.client) === client);
+  if (client !== "all" && !group) return null;
+  const summary = group ? group.summary : ledger.summary;
+  const daily = group ? group.daily : ledger.daily;
+  const models = group ? group.models : ledger.models;
+  const accounts: CreditOfficialUsageAccount[] = ledger.accounts.map((account) => ({
+    accountId: account.accountId,
+    accountName: account.accountName || account.accountId,
+    ok: true,
+    requestCount: account.requestCount,
+    detailTruncated: false,
+    // 账本按账号只存了累计值，没有分窗口字段；置 null 让 UI 显示「—」而不是假 0。
+    usageToday: null,
+    usage7Days: null,
+    usageThisMonth: null,
+    models: [],
+    daily: [],
+  }));
+  return {
+    status: "complete",
+    rangeStart: ledger.startAt ?? "",
+    rangeEnd: ledger.endAt ?? "",
+    summary,
+    daily: daily.map((point) => ({ date: point.date, usage: point.usage, models: [] })),
+    accounts,
+    requests: [],
+    models,
+    detailLimitPerAccount: 0,
+    errors: [],
+  };
+}
+
+/** 账本口径下的「剩余积分」仍是账号级：返回 true 让页面补一句说明。 */
+export function ledgerRemainingIsAccountLevel(client: CreditClientKey): boolean {
+  return client !== "all";
+}
+
+/** 账本里的客户端选项（「全部」范围下用它，而不是官方明细）。 */
+export function ledgerClientViewOptions(
+  ledger: CreditLedgerSnapshot | undefined,
+): ClientViewOption[] {
+  if (!ledger) return [];
+  const counts = new Map<CreditClientKey, number>();
+  for (const item of ledger.clients ?? []) {
+    const key = clientKeyOf(item.client);
+    counts.set(key, (counts.get(key) ?? 0) + item.requestCount);
+  }
+  return CLIENT_ORDER.filter((key) => (counts.get(key) ?? 0) > 0).map((key) => ({
+    key,
+    label: CLIENT_VIEW_LABELS[key],
+    count: counts.get(key) ?? 0,
+  }));
 }

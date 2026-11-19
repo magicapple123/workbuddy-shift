@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import { dateDaysAgo, dateKey } from "@/lib/format";
-import type { CreditOfficialUsage, CreditOfficialUsageRequest } from "@/lib/types";
+import type {
+  CreditLedgerSnapshot,
+  CreditOfficialUsage,
+  CreditOfficialUsageRequest,
+} from "@/lib/types";
 
-import { clientKeyOf, clientViewOptions, filterOfficialByClient } from "./data";
+import {
+  clientKeyOf,
+  clientViewOptions,
+  filterOfficialByClient,
+  ledgerClientViewOptions,
+  ledgerToOfficialUsage,
+} from "./data";
 
 function request(
   id: string,
@@ -119,5 +129,66 @@ describe("filterOfficialByClient", () => {
     const usage = filterOfficialByClient(base, "vscode", new Set(["acc-1"]));
     expect(usage.records).toBe(1);
     expect(usage.official.summary.usageToday).toBe(3);
+  });
+});
+
+describe("ledgerToOfficialUsage", () => {
+  const ledger: CreditLedgerSnapshot = {
+    status: "ok",
+    rows: 12,
+    total: 30,
+    startAt: "2026-10-20",
+    endAt: "2026-11-19",
+    summary: { usageToday: 3, usage7Days: 9, usageThisMonth: 21 },
+    daily: [
+      { date: "2026-11-18", usage: 2 },
+      { date: "2026-11-19", usage: 3 },
+    ],
+    models: [{ model: "deepseek-v4-flash", requestCount: 12, credit: 30 }],
+    clients: [
+      { client: "WorkBuddy", requestCount: 8, credit: 20 },
+      { client: "JetBrainsPyCharm", requestCount: 4, credit: 10 },
+    ],
+    byClient: [
+      {
+        client: "JetBrainsPyCharm",
+        rows: 4,
+        total: 10,
+        summary: { usageToday: 1, usage7Days: 4, usageThisMonth: 10 },
+        daily: [{ date: "2026-11-19", usage: 1 }],
+        models: [{ model: "deepseek-v4-flash", requestCount: 4, credit: 10 }],
+      },
+    ],
+    accounts: [{ accountId: "acc-1", accountName: "林小凤", requestCount: 12, credit: 30 }],
+  };
+
+  it("全部：用账本根汇总，账号级剩余积分保持 null", () => {
+    const usage = ledgerToOfficialUsage(ledger, "all");
+    expect(usage?.status).toBe("complete");
+    expect(usage?.summary.usageThisMonth).toBe(21);
+    expect(usage?.rangeStart).toBe("2026-10-20");
+    expect(usage?.daily).toHaveLength(2);
+    expect(usage?.accounts[0].usageToday).toBeNull();
+  });
+
+  it("具体客户端：用 byClient 分组，找不到时返回 null（不能假装 0）", () => {
+    const jetbrains = ledgerToOfficialUsage(ledger, "jetbrains");
+    expect(jetbrains?.summary.usageThisMonth).toBe(10);
+    expect(jetbrains?.models[0].requestCount).toBe(4);
+    expect(ledgerToOfficialUsage(ledger, "vscode")).toBeNull();
+  });
+
+  it("账本客户端选项按固定顺序并累计条数", () => {
+    expect(ledgerClientViewOptions(ledger).map((item) => item.key)).toEqual([
+      "workbuddy",
+      "jetbrains",
+    ]);
+    expect(ledgerClientViewOptions(ledger)[1].count).toBe(4);
+  });
+
+  it("账本降级/为空时不返回对象，页面据此回退官方口径", () => {
+    expect(ledgerToOfficialUsage({ ...ledger, status: "degraded" }, "all")).toBeNull();
+    expect(ledgerToOfficialUsage({ ...ledger, status: "empty" }, "all")).toBeNull();
+    expect(ledgerToOfficialUsage(undefined, "all")).toBeNull();
   });
 });

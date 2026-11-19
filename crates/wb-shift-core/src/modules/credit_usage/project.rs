@@ -323,14 +323,67 @@ pub(super) fn build_statistics(
 ///
 /// `refresh = false` 时官方用量读本地缓存，不打用量接口；
 /// 只有统计页「刷新统计」传入 `refresh = true` 才会重新采集。
-pub async fn get_statistics(refresh: bool) -> Value {
+///
+/// `range`（第四轮 07）：`30d`（默认）/ `90d` / `all`。
+/// - 30d / 90d：走官方窗口抓取；90d 在服务端不支持时降级回 30d 并置 `rangeFallback`；
+/// - all：**不打官方接口**，用本地账本（`credit_ledger`）做全量口径，断网也能看。
+pub async fn get_statistics(refresh: bool, range: Option<&str>) -> Value {
     let started = now_ms();
     let at_ms = started;
     let accounts = load_accounts();
     let mut statistics =
         build_statistics(&load_snapshots(), &load_checkin_logs(), &accounts, at_ms);
-    statistics["officialUsage"] =
-        official_usage::official_usage_for_statistics(&accounts, at_ms, refresh).await;
+
+    let requested = match range.map(str::trim) {
+        Some("90d") => "90d",
+        Some("all") => "all",
+        _ => "30d",
+    };
+    // 探测结论有 24 小时缓存；refresh 时才会真的打一次 90 天窗口。
+    let probe = official_usage::window_probe(&accounts, refresh).await;
+    let max_days = probe
+        .get("maxDays")
+        .and_then(Value::as_i64)
+        .unwrap_or(30)
+        .max(30);
+    let effective = if requested == "90d" && max_days < 90 {
+        "30d"
+    } else {
+        requested
+    };
+    let official = if effective == "all" {
+        // 「全部」本身不依赖官方窗口；但用户点刷新时仍抓一次 30 天窗口来给账本续数据。
+        if refresh {
+            let _ = official_usage::official_usage_for_statistics_with_window(
+                &accounts, at_ms, true, 30,
+            )
+            .await;
+        }
+        official_usage::cached_official_usage()
+    } else {
+        official_usage::official_usage_for_statistics_with_window(
+            &accounts,
+            at_ms,
+            refresh,
+            if effective == "90d" { 90 } else { 30 },
+        )
+        .await
+    };
+    statistics["officialUsage"] = official;
+    statistics["range"] = serde_json::json!(requested);
+    statistics["effectiveRange"] = serde_json::json!(effective);
+    statistics["rangeFallback"] = serde_json::json!(requested != effective);
+    statistics["windowProbe"] = probe;
+    // 账本永远返回快照：「全部」用它，30/90 天只作为对照与导出说明。
+    let ledger = crate::modules::credit_ledger::snapshot(at_ms);
+    statistics["ledgerStatus"] = ledger
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("degraded"));
+    statistics["ledgerRows"] = ledger.get("rows").cloned().unwrap_or_else(|| serde_json::json!(0));
+    statistics["ledgerStartAt"] = ledger.get("startAt").cloned().unwrap_or(Value::Null);
+    statistics["ledgerEndAt"] = ledger.get("endAt").cloned().unwrap_or(Value::Null);
+    statistics["ledger"] = ledger;
     // 埋点：接口总耗时，前端用来展示「本地 / 积分 / 官方」三段真实用时。
     statistics["elapsedMs"] = serde_json::json!(now_ms() - started);
     statistics

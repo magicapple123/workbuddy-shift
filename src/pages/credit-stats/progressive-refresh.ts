@@ -48,6 +48,8 @@ interface Options {
   refreshCredits: (accountIds: string[]) => Promise<void>;
   /** 取最新账号 id（宿主负责先 `fetchAll`，保证 12 个账号都在）。 */
   loadAccountIds: () => Promise<string[]>;
+  /** 当前范围（30d/90d/all）：刷新后回读同一范围，避免把 30 天结果盖到「全部」上。 */
+  range?: CreditStatistics["range"];
 }
 
 /**
@@ -69,7 +71,7 @@ export async function runProgressiveRefresh(
   const ids = await deps.loadAccountIds();
 
   const localStart = performance.now();
-  const local = await api.getCreditStatistics(false);
+  const local = await api.getCreditStatistics(false, deps.range);
   deps.commit(local);
   hooks.onLocal(local, performance.now() - localStart);
   hooks.onPhase({ local: true });
@@ -81,7 +83,7 @@ export async function runProgressiveRefresh(
     }
     const start = performance.now();
     await deps.refreshCredits(ids);
-    const next = await api.getCreditStatistics(false);
+    const next = await api.getCreditStatistics(false, deps.range);
     deps.commit(next);
     hooks.onCredits(next, performance.now() - start);
     hooks.onPhase({ credits: true });
@@ -91,7 +93,7 @@ export async function runProgressiveRefresh(
     const start = performance.now();
     try {
       const result = await api.refreshOfficialUsage();
-      const base = await api.getCreditStatistics(false);
+      const base = await api.getCreditStatistics(false, deps.range);
       deps.commit({ ...base, officialUsage: result.officialUsage, elapsedMs: result.elapsedMs });
       hooks.onOfficial(result.officialUsage, result.elapsedMs, performance.now() - start);
     } catch (cause) {
@@ -100,7 +102,7 @@ export async function runProgressiveRefresh(
       api.logError("frontend_unhandled", "官方用量刷新失败", reason).catch(() => {});
       const failure = unavailableOfficialUsage(reason);
       try {
-        const base = await api.getCreditStatistics(false);
+        const base = await api.getCreditStatistics(false, deps.range);
         deps.commit({ ...base, officialUsage: failure });
       } catch {
         // 连本地统计都取不到时保持页面现状：横幅仍由 `officialUsage` 缺失时的默认分支兜住。
@@ -116,7 +118,7 @@ export async function runProgressiveRefresh(
 }
 
 export function useProgressiveRefresh(deps: Options) {
-  const { commit, refreshCredits, loadAccountIds } = deps;
+  const { commit, refreshCredits, loadAccountIds, range } = deps;
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState<RefreshPhase>(EMPTY_PHASE);
   const [timing, setTiming] = useState<RefreshTiming>(EMPTY_TIMING);
@@ -127,7 +129,7 @@ export function useProgressiveRefresh(deps: Options) {
     setTiming(EMPTY_TIMING);
     try {
       await runProgressiveRefresh(
-        { commit, refreshCredits, loadAccountIds },
+        { commit, refreshCredits, loadAccountIds, range: deps.range },
         {
           onLocal: (_stats, ms) =>
             setTiming((previous) => ({ ...previous, localMs: ms })),
@@ -141,7 +143,7 @@ export function useProgressiveRefresh(deps: Options) {
     } finally {
       setRunning(false);
     }
-  }, [commit, refreshCredits, loadAccountIds]);
+  }, [commit, refreshCredits, loadAccountIds, range]);
 
   const done = (phase.credits ? 1 : 0) + (phase.official ? 1 : 0);
 

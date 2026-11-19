@@ -4,12 +4,11 @@ use super::aggregate::*;
 use super::parse::*;
 use super::*;
 
-async fn fetch_account_usage(
+pub(super) async fn fetch_account_usage(
     account: &Value,
     range_start: NaiveDate,
     range_end: NaiveDate,
-) -> Result<AccountFetch, String> {
-    let url = official_usage_url_for(account);
+) -> Result<AccountFetch, String> {    let url = official_usage_url_for(account);
     let end_time = format!("{range_end} 23:59:59");
     let mut start_time = format!("{range_start} 00:00:00");
     let mut rounds = 0usize;
@@ -70,10 +69,23 @@ async fn fetch_account_usage(
     })
 }
 
-/// 查询全部当前账号并生成官方请求用量投影。
+/// 查询全部当前账号并生成官方请求用量投影（默认近 30 天窗口）。
 pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
+    collect_official_usage_with_window(accounts, at_ms, 30).await
+}
+
+/// 窗口可配置版本（第四轮 07：范围选择器 30 / 90 天）。
+///
+/// 服务端是否接受 >31 天的窗口由 [`super::probe::window_probe`] 探测；这里只负责
+/// 「按给定窗口抓」，不在内部假设上限。窗口越长，单账号翻页轮数越多（并发仍为 12）。
+pub async fn collect_official_usage_with_window(
+    accounts: &[Value],
+    at_ms: i64,
+    window_days: i64,
+) -> Value {
     let today = local_date_at(at_ms);
-    let range_start = today - Duration::days(30);
+    let window_days = window_days.max(1);
+    let range_start = today - Duration::days(window_days);
     let range_end = today;
     let range_start_text = range_start.format("%Y-%m-%d").to_string();
     let range_end_text = range_end.format("%Y-%m-%d").to_string();
@@ -90,6 +102,8 @@ pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
     let mut total_week = 0.0;
     let mut total_month = 0.0;
     let mut recent_requests: Vec<(i64, Value)> = Vec::new();
+    // 账本写全量行（不受 1000 条明细上限约束）：明细截断的账号也能把历史补全。
+    let mut ledger_rows: Vec<Value> = Vec::new();
     let mut model_totals: HashMap<String, (usize, f64)> = HashMap::new();
 
     // 先并发把各账号的明细取回来，再按账号原始顺序聚合：
@@ -161,6 +175,9 @@ pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
 
                 let mut sorted_rows = result.rows.clone();
                 sorted_rows.sort_by_key(|row| Reverse(row.request_ts));
+                for row in &sorted_rows {
+                    ledger_rows.push(request_value(&account_id, &account_name, row));
+                }
                 for row in sorted_rows.iter().take(OFFICIAL_USAGE_DETAIL_LIMIT) {
                     recent_requests.push((
                         row.request_ts,
@@ -247,11 +264,23 @@ pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
         "unavailable"
     };
 
+    // 账本写入失败不能影响页面：只把状态降级，官方口径继续可用。
+    let ledger_status = match crate::modules::credit_ledger::record_requests(&ledger_rows, at_ms) {
+        Ok(_) => "ok",
+        Err(error) => {
+            crate::modules::error_log::record("backend", "积分账本写入失败", &error);
+            "degraded"
+        }
+    };
+
     json!({
         "status": status,
         "rangeStart": range_start_text,
         "rangeEnd": range_end_text,
+        "windowDays": window_days,
         "collectedAt": at_ms,
+        "ledgerStatus": ledger_status,
+        "ledgerRows": ledger_rows.len(),
         "summary": {
             "usageToday": total_today,
             "usage7Days": total_week,

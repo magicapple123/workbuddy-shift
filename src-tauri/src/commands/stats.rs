@@ -14,9 +14,10 @@ pub async fn get_credit_expiry(account_id: String) -> Result<Value, String> {
 
 /// GET /api/credits/stats —— 本地快照与官方请求用量统计。
 /// `refresh = true` 时才重新请求官方用量；默认读缓存。
+/// `range`：`30d`（默认）/ `90d` / `all`（走本地账本）。
 #[tauri::command]
-pub async fn get_credit_statistics(refresh: Option<bool>) -> Value {
-    credit_usage::get_statistics(refresh.unwrap_or(false)).await
+pub async fn get_credit_statistics(refresh: Option<bool>, range: Option<String>) -> Value {
+    credit_usage::get_statistics(refresh.unwrap_or(false), range.as_deref()).await
 }
 
 /// POST /api/refresh-official-usage —— 只采集官方用量（单飞 + 内存/磁盘缓存）。
