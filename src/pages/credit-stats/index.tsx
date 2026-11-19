@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download } from "lucide-react";
+import { Download, FileSpreadsheet } from "lucide-react";
 import {
   CalendarDays,
   CalendarRange,
@@ -14,10 +14,11 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
+import { ExportMenu } from "@/components/export-menu";
 import { Card, CardContent } from "@/components/ui/card";
 import * as api from "@/lib/api";
 import { formatAmount, formatDateTime } from "@/lib/format";
-import { saveCsvFile } from "@/lib/export-download";
+import { saveCsvFile, saveXlsxFile } from "@/lib/export-download";
 import {
   invalidateCreditStatisticsCache,
   loadCreditStatistics,
@@ -52,6 +53,7 @@ import { StatsVariantView, VARIANT_VIEW_OPTIONS, isOfficialUsageAvailable, recom
 import { ModelBreakdown } from "./model-breakdown";
 import { useProgressiveRefresh } from "./progressive-refresh";
 import { buildCreditStatsCsv, creditStatsFileName } from "./export";
+import { buildCreditStatsXlsx, creditStatsXlsxFileName } from "./export-xlsx";
 import { StatMetric, TrendChart } from "./trend-chart";
 
 /** 毫秒展示：未完成显示「…」，避免把 0 当成「瞬间完成」。 */
@@ -259,6 +261,30 @@ export default function CreditStatsPage() {
     }
   }
 
+  /** 导出 Excel：与 CSV 同一份口径，多 sheet、数字可求和、每个 sheet 末行写说明。 */
+  async function exportXlsx() {
+    if (!stats) {
+      toast.error("还没有可导出的统计数据");
+      return;
+    }
+    try {
+      const bytes = buildCreditStatsXlsx(stats, officialUsage ?? undefined, {
+        range,
+        ledger: stats.ledger,
+        clientLabel: clientView === "all" ? undefined : CLIENT_VIEW_LABELS[clientView],
+        caliberNote: ledgerCaliber ?? undefined,
+      });
+      const outcome = await saveXlsxFile(creditStatsXlsxFileName(viewVariant), bytes);
+      if (outcome === "saved") {
+        toast.success("已导出积分统计 Excel", {
+          description: `${viewVariant} · ${(bytes.length / 1024).toFixed(0)} KB · 7 个 sheet`,
+        });
+      }
+    } catch (cause) {
+      toast.error("导出失败", { description: api.asError(cause) });
+    }
+  }
+
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
 
   /** 顶部口径说明：账本优先，其次明细汇总，最后官方/本地。 */
@@ -404,19 +430,26 @@ export default function CreditStatsPage() {
             onChange={setClientView}
             counts={stats?.officialUsage?.requests.length ?? 0}
           />
-          <DemoAction>
-            <Button
-              className="shrink-0"
-              variant="outline"
-              size="sm"
-              onClick={() => void exportCsv()}
-              disabled={!stats}
-              title={stats ? "导出当前档位筛选下的 CSV" : "没有可导出的数据"}
-            >
-              <Download />
-              导出 CSV
-            </Button>
-          </DemoAction>
+          <ExportMenu
+            disabled={!stats}
+            title={stats ? "导出当前范围 + 档位 + 客户端筛选" : "没有可导出的数据"}
+            items={[
+              {
+                key: "csv",
+                label: "CSV",
+                description: "6 段明细，UTF-8 BOM",
+                icon: <Download className="size-3.5" />,
+                onSelect: () => void exportCsv(),
+              },
+              {
+                key: "xlsx",
+                label: "Excel（xlsx）",
+                description: "7 个 sheet，数值可求和",
+                icon: <FileSpreadsheet className="size-3.5" />,
+                onSelect: () => void exportXlsx(),
+              },
+            ]}
+          />
           <DemoAction>
             <Button
               className="shrink-0"
