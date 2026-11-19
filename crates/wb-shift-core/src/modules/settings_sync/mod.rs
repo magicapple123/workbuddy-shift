@@ -11,15 +11,18 @@
 //! - 只同步目标已存在的 scope 目录；
 //! - 目标账号目录不存在（从未在本机登录）→ 跳过并说明，不创建目录；
 //! - cn / intl 数据根隔离，跨档直接拒绝；
-//! - 覆盖前把目标文件备份到 `backups/settings/<uid>/<timestamp>/`，备份失败即零写入。
+//! - 覆盖前把目标文件备份到 `backups/settings/<uid>/<timestamp>/`，备份失败即零写入；
+//! - 每次执行（自动 / 手动）都往 `settings_sync_state.json` 追加一条记录，最多留 20 条，
+//!   页面上的「上次结果」取最新一条 —— 自动同步也留痕（第三轮 P0-1）；
+//! - 备份可列举 / 还原（`list_backups` / `restore_backup`），还原前先把当前文件再备份一次。
 
 mod apply;
 mod merge;
 #[cfg(test)]
 mod tests;
 
-pub use apply::{apply, sync_on_switch};
-pub use merge::merge_preferences;
+pub use apply::{apply, list_backups, restore_backup, sync_on_switch};
+pub use merge::{merge_preferences, MergeOutcome};
 
 use crate::modules::account;
 use crate::modules::config::{atomic_write, now_ms, store_dir};
@@ -39,6 +42,8 @@ pub const THEME_SELECTION_KEY: &str = "appearance.themeSelection";
 
 const CONFIG_FILE: &str = "settings_sync_config.json";
 const STATE_FILE: &str = "settings_sync_state.json";
+/// 状态文件里保留的同步记录条数上限。
+pub const STATE_HISTORY_LIMIT: usize = 20;
 
 /// 一次同步的上下文：账号库、工具存储根与两个客户端数据根（单测可注入）。
 #[derive(Clone, Debug)]
@@ -195,16 +200,41 @@ fn read_prefs(path: &Path) -> Option<Map<String, Value>> {
 }
 
 fn read_state(store_root: &Path) -> Value {
-    std::fs::read_to_string(store_root.join(STATE_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .unwrap_or(Value::Null)
+    read_history(store_root).into_iter().next().unwrap_or(Value::Null)
 }
 
-fn write_state(store_root: &Path, value: &Value) {
-    if let Ok(text) = serde_json::to_string_pretty(value) {
+/// 同步记录历史（最新在前）。兼容旧格式：早期文件只有一条结果对象。
+fn read_history(store_root: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(store_root.join(STATE_FILE)) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    if let Some(items) = value.get("history").and_then(Value::as_array) {
+        return items.clone();
+    }
+    // 旧格式：`apply()` 直接写的单条结果（含 `at` 字段）。
+    if value.get("at").is_some() {
+        return vec![value];
+    }
+    Vec::new()
+}
+
+/// 追加一条同步记录（最新在前），只保留最近 [`STATE_HISTORY_LIMIT`] 条。
+pub fn push_state(store_root: &Path, entry: &Value) {
+    let mut entries = read_history(store_root);
+    entries.insert(0, entry.clone());
+    entries.truncate(STATE_HISTORY_LIMIT);
+    let payload = json!({ "version": 2, "history": entries });
+    if let Ok(text) = serde_json::to_string_pretty(&payload) {
         let _ = atomic_write(&store_root.join(STATE_FILE), &text);
     }
+}
+
+/// 备份根目录（`backups/settings`）。
+fn backup_root(store_root: &Path) -> PathBuf {
+    store_root.join("backups").join("settings")
 }
 
 /// 目标账号：显式 source 为 `None` 时取当前登录账号；目标为同档位其余账号。
@@ -253,6 +283,9 @@ fn resolve_accounts<'a>(
 }
 
 /// 预览：只读，返回每个目标账号会改哪些键、跳过哪些键。
+///
+/// 每个目标的 `status`：`changed`（有真实变更）/ `unchanged`（含「只剩 revision
+/// 归属改写」的 cosmetic 情形）/ `skipped`（目录不存在等）。
 pub fn preview(ctx: &SettingsSyncContext, source: Option<&str>) -> Result<Value, String> {
     let (source_account, targets, variant) = resolve_accounts(ctx, source)?;
     let source_uid = account_uid(&source_account);
@@ -271,9 +304,11 @@ pub fn preview(ctx: &SettingsSyncContext, source: Option<&str>) -> Result<Value,
             plans.push(json!({
                 "uid": target_uid,
                 "label": account_label(target),
-                "skipped": true,
+                "status": "skipped",
                 "reason": "目标账号从未在本机登录（目录不存在）",
                 "changes": [],
+                "cosmetic": [],
+                "themeRewrite": false,
             }));
             continue;
         }
@@ -284,8 +319,10 @@ pub fn preview(ctx: &SettingsSyncContext, source: Option<&str>) -> Result<Value,
         plans.push(json!({
             "uid": target_uid,
             "label": account_label(target),
-            "skipped": false,
+            "status": if outcome.has_real_changes() { "changed" } else { "unchanged" },
             "changes": outcome.changed,
+            "cosmetic": outcome.cosmetic,
+            "themeRewrite": outcome.theme_rewrite,
             "skippedKeys": outcome.skipped,
             "scopes": scopes,
         }));
@@ -295,6 +332,7 @@ pub fn preview(ctx: &SettingsSyncContext, source: Option<&str>) -> Result<Value,
         "variant": variant.as_str(),
         "source": { "uid": source_uid, "label": account_label(&source_account), "directory": source_dir.to_string_lossy() },
         "targets": plans,
+        "backupRoot": backup_root(&ctx.store_root).to_string_lossy(),
         "dryRun": true,
     }))
 }

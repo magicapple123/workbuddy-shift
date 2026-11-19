@@ -1,4 +1,4 @@
-//! WorkBuddy 设置跨账号同步：状态 / 配置 / 预览 / 执行。
+//! WorkBuddy 设置跨账号同步：状态 / 配置 / 预览 / 执行 / 备份列举 / 备份还原。
 //!
 //! 只做参数解析；合并口径、备份与零写入保证在
 //! `wb_shift_core::modules::settings_sync`。
@@ -66,6 +66,26 @@ pub async fn sync_settings(
             source_account_id.as_deref(),
             dry_run,
         )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// GET /api/settings-sync/backups —— 列举某账号的设置备份（时间戳倒序）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_settings_sync_backups(uid: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_sync::list_backups(&SettingsSyncContext::production(), &uid)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// POST /api/settings-sync/restore —— 还原某次备份（还原前自动再备份当前文件）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_settings_sync_backup(uid: String, stamp: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        settings_sync::restore_backup(&SettingsSyncContext::production(), &uid, &stamp)
     })
     .await
     .map_err(|error| error.to_string())?

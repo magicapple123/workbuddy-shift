@@ -204,6 +204,14 @@ pub fn router(state: SharedState) -> Router {
             post(api_preview_settings_sync),
         )
         .route("/api/settings-sync/apply", post(api_sync_settings))
+        .route(
+            "/api/settings-sync/backups",
+            get(api_list_settings_sync_backups),
+        )
+        .route(
+            "/api/settings-sync/restore",
+            post(api_restore_settings_sync_backup),
+        )
         .route("/api/refresh-token", post(api_refresh_token))
         .route("/api/update/check", get(api_update_check))
         .route(

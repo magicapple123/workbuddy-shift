@@ -339,6 +339,8 @@ pub fn run() {
             commands::save_settings_sync_config,
             commands::preview_settings_sync,
             commands::sync_settings,
+            commands::list_settings_sync_backups,
+            commands::restore_settings_sync_backup,
             commands::get_auto_rotate_config,
             commands::save_auto_rotate_config,
             commands::rotate_status,

@@ -1,9 +1,11 @@
-//! settings-sync 域的 HTTP handler：状态 / 配置 / 预览 / 执行。
+//! settings-sync 域的 HTTP handler：状态 / 配置 / 预览 / 执行 / 备份列举 / 备份还原。
 
 use axum::extract::rejection::JsonRejection;
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Json;
+use std::collections::HashMap;
 
 use crate::api::*;
 use wb_shift_core::modules::settings_sync::{self, SettingsSyncContext, SyncConfig};
@@ -84,6 +86,48 @@ pub(crate) async fn api_sync_settings(
             &SettingsSyncContext::production(),
             request.source_account_id.as_deref(),
             dry_run,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(value)) => json_ok(value),
+        Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// GET /api/settings-sync/backups?uid=... —— 列举某账号的设置备份（时间戳倒序）。
+pub(crate) async fn api_list_settings_sync_backups(
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(uid) = query.get("uid").cloned() else {
+        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let result =
+        tokio::task::spawn_blocking(move || {
+            settings_sync::list_backups(&SettingsSyncContext::production(), &uid)
+        })
+        .await;
+    match result {
+        Ok(Ok(value)) => json_ok(value),
+        Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// POST /api/settings-sync/restore —— 还原某次备份（还原前自动再备份当前文件）。
+pub(crate) async fn api_restore_settings_sync_backup(
+    payload: Result<Json<SettingsSyncRestoreRequest>, JsonRejection>,
+) -> Response {
+    let request = match parse_body(payload) {
+        Ok(request) => request,
+        Err(rejection) => return invalid_body(rejection),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        settings_sync::restore_backup(
+            &SettingsSyncContext::production(),
+            &request.uid,
+            &request.stamp,
         )
     })
     .await;

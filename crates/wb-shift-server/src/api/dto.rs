@@ -416,6 +416,14 @@ pub(crate) struct SettingsSyncApplyRequest {
     pub(crate) dry_run: Option<bool>,
 }
 
+/// `POST /api/settings-sync/restore`：uid 与备份时间戳都走 core 的白名单校验。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct SettingsSyncRestoreRequest {
+    pub(crate) uid: String,
+    pub(crate) stamp: String,
+}
+
 /// `POST /api/refresh-official-usage`：无参数，占位 DTO 以满足「POST 必须有明确类型」。
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

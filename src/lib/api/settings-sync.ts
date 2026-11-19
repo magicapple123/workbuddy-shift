@@ -1,6 +1,8 @@
 import type {
+  SettingsSyncBackupList,
   SettingsSyncLastResult,
   SettingsSyncPlan,
+  SettingsSyncRestoreResult,
   SettingsSyncStatus,
 } from "../types";
 import { call } from "./core";
@@ -35,4 +37,17 @@ export function syncSettings(
     ...(sourceAccountId ? { sourceAccountId } : {}),
     dryRun,
   });
+}
+
+/** 列举某账号的设置备份（时间戳倒序）。 */
+export function listSettingsSyncBackups(uid: string): Promise<SettingsSyncBackupList> {
+  return call("list_settings_sync_backups", { uid });
+}
+
+/** 还原某次备份；服务端会先把当前文件再备份一份。 */
+export function restoreSettingsSyncBackup(
+  uid: string,
+  stamp: string,
+): Promise<SettingsSyncRestoreResult> {
+  return call("restore_settings_sync_backup", { uid, stamp });
 }

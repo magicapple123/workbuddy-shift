@@ -157,6 +157,8 @@ const ROUTES: Record<string, Route> = {
   save_settings_sync_config: { method: "POST", path: "/api/settings-sync/config" },
   preview_settings_sync: { method: "POST", path: "/api/settings-sync/preview" },
   sync_settings: { method: "POST", path: "/api/settings-sync/apply" },
+  list_settings_sync_backups: { method: "GET", path: "/api/settings-sync/backups" },
+  restore_settings_sync_backup: { method: "POST", path: "/api/settings-sync/restore" },
 };
 
 /**
