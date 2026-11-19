@@ -153,11 +153,11 @@ pub fn open_permission_settings(target: Option<String>) -> Result<(), String> {
                 "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
             }
         };
-        return std::process::Command::new("open")
+        std::process::Command::new("open")
             .arg(url)
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("打开系统设置失败：{error}"));
+            .map_err(|error| format!("打开系统设置失败：{error}"))
     }
     #[cfg(not(target_os = "macos"))]
     {
