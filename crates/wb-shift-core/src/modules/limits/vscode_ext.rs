@@ -67,9 +67,17 @@ fn is_strong_signal(line: &str) -> bool {
     if !is_429 {
         return false;
     }
-    ["frequency", "exceed", "quota", "limit", "超出", "限流", "额度"]
-        .iter()
-        .any(|marker| line.to_ascii_lowercase().contains(marker))
+    [
+        "frequency",
+        "exceed",
+        "quota",
+        "limit",
+        "超出",
+        "限流",
+        "额度",
+    ]
+    .iter()
+    .any(|marker| line.to_ascii_lowercase().contains(marker))
 }
 
 /// 脱敏：邮件、32 位以上十六进制 id、Bearer token。
