@@ -43,6 +43,11 @@ pub(super) fn prune_unsupported_reason(client: SessionClient) -> String {
              请先打开 CodeBuddy IDE 并登录一次后重试。"
                 .to_string()
         }
+        SessionClient::Jetbrains => {
+            "未找到 JetBrains CodeBuddy 插件的会话数据目录，无法判定会话是否仍然存在，已取消清理。\
+             请先打开 IDEA / PyCharm 并登录该插件后重试。"
+                .to_string()
+        }
     }
 }
 
@@ -52,6 +57,7 @@ fn client_label(client: SessionClient) -> &'static str {
         SessionClient::Workbuddy => "WorkBuddy",
         SessionClient::VscodeExt => "VS Code 插件",
         SessionClient::CodebuddyIde => "CodeBuddy IDE",
+        SessionClient::Jetbrains => "JetBrains 插件",
     }
 }
 
@@ -179,7 +185,7 @@ pub(super) fn scan_groups<'a>(
                 }
             }
         }
-        SessionClient::VscodeExt | SessionClient::CodebuddyIde => {
+        SessionClient::VscodeExt | SessionClient::CodebuddyIde | SessionClient::Jetbrains => {
             match index_liveness(client, index_root) {
                 // 数据根 / 索引规格解析不到：没有任何判定依据。读路径 fail-open 全展示，
                 // 写路径拒绝并说明是哪个客户端。

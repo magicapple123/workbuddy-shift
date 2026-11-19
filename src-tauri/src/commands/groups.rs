@@ -187,6 +187,15 @@ pub fn vscode_restart_precheck(target_account_ids: Vec<String>) -> Value {
     session_groups::vscode_restart_precheck(&target_account_ids)
 }
 
+/// 预检：是否需要关闭 JetBrains IDE 才能安全执行写操作。
+///
+/// 与 VS Code 版同形（前端共用一套确认框）；JetBrains 的判定与目标账号无关——只要还有
+/// 装了插件且在运行的实例就得先关闭（IDEA / PyCharm 共用同一份数据目录）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn jetbrains_restart_precheck(target_account_ids: Vec<String>) -> Value {
+    session_groups::jetbrains_restart_precheck(&target_account_ids)
+}
+
 /// 取消关联：从会话组移除一个成员，只解除管理关系，不删除账号内的会话内容。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn unlink_session_group_member(

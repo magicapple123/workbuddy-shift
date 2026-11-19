@@ -53,10 +53,16 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   const sourceAccount = workbuddyAccounts.find((account) => account.id === sourceAccountId) ?? null;
   const targetAccount = workbuddyAccounts.find((account) => account.id === targetAccountId) ?? null;
   const targetOptions = workbuddyAccounts.filter((account) => account.id !== sourceAccountId);
-  const supported = client === "workbuddy" || client === "vscodeExt";
+  const supported = client === "workbuddy" || client === "vscodeExt" || client === "jetbrains";
   const unsupportedTitle = "当前客户端暂不支持新增关联会话";
+  /** 宿主名（确认框 / 成功提示里要指名是哪个编辑器）。 */
+  const editorLabel = client === "jetbrains" ? "JetBrains IDE" : "VS Code";
   /** 弹窗文案用：来源账号的客户端称呼。 */
-  const clientAccountLabel = client === "workbuddy" ? "WorkBuddy 账号" : "CodeBuddy 插件账号";
+  const clientAccountLabel = client === "workbuddy"
+    ? "WorkBuddy 账号"
+    : client === "jetbrains"
+      ? "JetBrains 插件账号"
+      : "CodeBuddy 插件账号";
 
   async function loadSessions(account: AccountMeta) {
     const id = ++requestId.current;
@@ -125,9 +131,12 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   function toggleExpanded(key: string) {
     setExpanded((prev) => toggleSetKey(prev, key));
   }
-  /** 预检：目标账号含当前登录账号才需要「关闭并重开」（失败按不需要处理，后端仍有实时判定兜底）。 */
+  /** 预检：按客户端各自的判定决定是否要「关闭并重开」宿主（失败按不需要处理，后端仍有实时判定兜底）。 */
   async function pluginNeedsRestart(): Promise<boolean> {
     try {
+      if (client === "jetbrains") {
+        return (await api.jetbrainsRestartPrecheck([targetAccountId])).required === true;
+      }
       return (await api.vscodeRestartPrecheck([targetAccountId])).required === true;
     } catch {
       return false;
@@ -135,8 +144,8 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   }
   async function copyAndLink() {
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
-    if (client === "vscodeExt") {
-      // 运行中的写入会被 VS Code 覆盖：先走页面统一的确认框授权「关闭并重开」。
+    if (client === "vscodeExt" || client === "jetbrains") {
+      // 运行中的写入会被宿主覆盖：先走页面统一的确认框授权「关闭并重开」。
       if (await pluginNeedsRestart()) {
         requestRestartConfirm("关闭并复制", () => copyAndLinkPlugin(true));
         return;
@@ -152,7 +161,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
     setBusy(true);
     try {
       const report = await api.copyLinkedSessions({
-        client: "vscodeExt",
+        client,
         sourceAccountId: sourceAccount.id,
         targetAccountId,
         sessionIds: [...selected],
@@ -163,7 +172,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
       const skipped = Array.isArray(report.skipped) ? report.skipped : [];
       const copiedCount = (report.report as { copied?: unknown[] } | undefined)?.copied?.length ?? 0;
       if (status === "linked") {
-        toast.success(`已复制 ${copiedCount} 个会话到「${targetName}」并建立关联`, report.restartedEditor ? { description: "已重新打开 VS Code" } : undefined);
+        toast.success(`已复制 ${copiedCount} 个会话到「${targetName}」并建立关联`, report.restartedEditor ? { description: `已重新打开 ${editorLabel}` } : undefined);
       } else if (status === "copiedUnlinked") {
         toast.warning("会话已复制，但没有建立关联", { description: JSON.stringify(report.linkErrors ?? []) });
       } else {
@@ -271,7 +280,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
               : sessionsError
                 ? <div role="alert" className={`flex flex-col items-center justify-center gap-2 px-3 text-center ${LINKED_TREE_MIN_H}`}><p className="text-sm text-danger">{sessionsError}</p><Button variant="outline" size="sm" onClick={() => { if (sourceAccount) void loadSessions(sourceAccount); }}>重试</Button></div>
                 : sessions.length === 0
-                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>{client === "vscodeExt" && dataRoot === null ? "未找到插件数据目录：请先打开 VS Code 并登录 CodeBuddy 插件。" : "该账号没有可复制的会话。"}</p>
+                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>{(client === "vscodeExt" || client === "jetbrains") && dataRoot === null ? (client === "jetbrains" ? "未找到插件数据目录：请先打开 IDEA / PyCharm 并登录 CodeBuddy 插件。" : "未找到插件数据目录：请先打开 VS Code 并登录 CodeBuddy 插件。") : "该账号没有可复制的会话。"}</p>
                   : <SessionTreeList
                     sessions={sessions}
                     selected={selected}

@@ -152,6 +152,53 @@ export interface JetbrainsTargetStatus {
   secretPath: string;
 }
 
+/** 运行中实例的配置目录映射来源；`unmapped` = 映射失败，切换会被拒绝。 */
+export type JetbrainsMappingSource = "product-info" | "fallback" | "unmapped";
+
+/** 一个运行中的 JetBrains IDE 实例的映射诊断（不含任何 secret）。 */
+export interface JetbrainsRunningProcess {
+  pid: number;
+  /** 产品名（product-info 的 name 或 exe 名）。 */
+  product: string | null;
+  version: string | null;
+  /** 映射到的配置目录名；null = 映射失败。 */
+  configDir: string | null;
+  mappingSource: JetbrainsMappingSource;
+  /** 降级 / 失败原因。 */
+  mappingNote: string | null;
+  launchTarget: string | null;
+}
+
+/** 配置根下一个子目录的扫描结论（用于区分「没装插件」与「没识别到目录」）。 */
+export interface JetbrainsScannedDir {
+  name: string;
+  /** 是否通过配置目录名判定（false 的目录不会出现在切换列表）。 */
+  accepted: boolean;
+  pluginDirs: string[];
+  pluginInstalled: boolean;
+  hasSecretFile: boolean;
+}
+
+/** 「未检测到 IDE」时折叠展示的诊断信息。 */
+export interface JetbrainsDiagnostics {
+  configRoot: string | null;
+  configRootExists: boolean;
+  scannedDirs: JetbrainsScannedDir[];
+  acceptedDirs: string[];
+  pluginInstalledDirs: string[];
+  running: JetbrainsRunningProcess[];
+  unmappedRunningCount: number;
+}
+
+/** 运行中但映射不到配置目录的实例（切换前必须让用户先退出）。 */
+export interface JetbrainsUnmappedProcess {
+  pid: number;
+  product: string | null;
+  version: string | null;
+  path: string | null;
+  reason: string | null;
+}
+
 export interface JetbrainsStatus {
   /** 是否存在任一受支持的 JetBrains 配置目录。 */
   installed: boolean;
@@ -167,6 +214,10 @@ export interface JetbrainsStatus {
   activeAccountName: string | null;
   detectedFrom?: string;
   statePath?: string;
+  /** 运行中但映射不到配置目录的实例；非空时后端拒绝写入。 */
+  unmappedRunning?: JetbrainsUnmappedProcess[];
+  unmappedRunningHint?: string | null;
+  diagnostics?: JetbrainsDiagnostics | null;
 }
 
 export interface JetbrainsSwitchResult {

@@ -226,12 +226,34 @@ export function vscodeRestartPrecheck(targetAccountIds: string[]): Promise<{ req
   return call("vscode_restart_precheck", { targetAccountIds });
 }
 
-/** 打开系统设置授权面板（桌面端专用；webui 模式由服务进程权限决定，无操作）。 */
+/**
+ * 预检：当前是否需要关闭 JetBrains IDE（IDEA / PyCharm）。
+ *
+ * 判定**与目标账号无关**：只要还有装了插件且在运行的实例就得先关闭（多个产品共用同一份
+ * 插件数据目录，只关一个仍会被另一个覆盖）。`ides` 是确认框里要列出的实例名。
+ */
+export function jetbrainsRestartPrecheck(
+  targetAccountIds: string[],
+): Promise<{ required: boolean; running: boolean; ides?: string[] }> {
+  return call("jetbrains_restart_precheck", { targetAccountIds });
+}
+
+/**
+ * 打开系统设置授权面板（**仅 macOS**：「完全磁盘访问 / App 管理」）。
+ *
+ * Windows / Linux 没有对应开关，后端返回明确错误；WebUI 没有系统面板，
+ * 这里同样 reject 而不是静默 resolve —— 静默成功正是第三轮第 11 条「点了没反应」
+ * 的一半原因。调用方必须 try/catch 并给出可见提示。
+ */
 export function openPermissionSettings(
   target?: "app_management" | "all_files",
 ): Promise<void> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
-  if (isWebui()) return Promise.resolve();
+  if (isWebui()) {
+    return Promise.reject(
+      new Error("WebUI 模式没有「完全磁盘访问 / App 管理」系统面板：写入权限由服务进程决定"),
+    );
+  }
   return call("open_permission_settings", { target: target ?? "app_management" });
 }
 
@@ -254,10 +276,19 @@ export function checkAuthPermission(variant?: WbVariant): Promise<{
   return call("check_auth_permission", variantArgs(variant));
 }
 
-/** 在 Finder 中显示当前 App（桌面端专用；webui 无操作）。 */
+/**
+ * 在文件管理器中选中并定位本 App 的可执行文件。
+ *
+ * macOS 的「完全磁盘访问」要靠拖拽 .app 授权，所以那里用它；Windows / Linux
+ * 没有这个授权动作，诊断目标是**认证文件**能否被写，因此那些平台改用
+ * `revealPathInFileManager(authFile)` 定位认证文件。后端三个平台都已实现，
+ * 失败会 reject（不再 `let _` 吞掉）。
+ */
 export function revealAppInFinder(): Promise<void> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
-  if (isWebui()) return Promise.resolve();
+  if (isWebui()) {
+    return Promise.reject(new Error("WebUI 模式无法在系统文件管理器中定位文件"));
+  }
   return call("reveal_app_in_finder");
 }
 

@@ -306,7 +306,7 @@ pub(super) fn group_is_in_scope(
 ) -> bool {
     match client {
         SessionClient::CodebuddyIde => Some(group.variant) == scope,
-        SessionClient::Workbuddy | SessionClient::VscodeExt => true,
+        SessionClient::Workbuddy | SessionClient::VscodeExt | SessionClient::Jetbrains => true,
     }
 }
 
@@ -353,7 +353,8 @@ pub(super) fn group_payload(
                 member_snapshot(client, &root, spec, group, member, cache);
             let mut member = member.clone();
             // Correct legacy plugin labels from the account library; region never selects its data root.
-            if client == SessionClient::VscodeExt {
+            // 插件型客户端（VS Code / JetBrains）的存储与地区无关，档位一律取账号库。
+            if client.is_editor_plugin() {
                 if let Some(account) = account.as_ref() {
                     member.variant = Some(account::variant_of(account));
                 }
@@ -537,7 +538,7 @@ pub(super) fn member_snapshot(
                 content,
             )
         }
-        SessionClient::CodebuddyIde | SessionClient::VscodeExt => {
+        SessionClient::CodebuddyIde | SessionClient::VscodeExt | SessionClient::Jetbrains => {
             let variant = session_link::member_variant(group, member);
             let rows = cache
                 .entry((variant.as_str().to_string(), member.uid.clone()))

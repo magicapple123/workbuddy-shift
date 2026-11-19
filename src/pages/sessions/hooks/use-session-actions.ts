@@ -13,6 +13,7 @@ import type {
 import { variantLabel } from "@/lib/variant";
 
 import { attemptPrune, pruneFailureDescription, runPrune } from "../prune";
+import { restartPrecheckClient } from "../restart";
 import type { SessionDetailController } from "./use-session-detail";
 
 export interface SessionActionsController {
@@ -71,16 +72,23 @@ export function useSessionActions({
   const [actionBusy, setActionBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionGroupSummary | null>(null);
   const [pruneTarget, setPruneTarget] = useState<SessionGroupPruneReport | null>(null);
-  /** 插件侧「VS Code 运行中」的确认框：确认后执行 run（带 restart），取消则丢弃。 */
+  /** 插件侧「宿主运行中」的确认框：确认后执行 run（带 restart），取消则丢弃。 */
   const [restartPrompt, setRestartPrompt] = useState<{ actionLabel: string; run: () => Promise<void> } | null>(null);
 
   /**
-   * 预检：本次写入目标是否包含当前登录账号（只有涉及才需要「关闭并重开」确认框）。
+   * 预检：本次写入是否需要「关闭并重开」宿主。
+   *
+   * 两个插件型客户端各有自己的判定入口（不能共用一条）：VS Code 只在「目标账号含当前登录账号」
+   * 时需要关闭；JetBrains 只要还有装了插件且在运行的实例就必须关闭（IDEA / PyCharm 共用数据目录）。
    * 探测失败按「不需要」处理：后端在各写入口仍有实时判定兜底，不会误关编辑器。
    */
   async function needsEditorRestart(targetAccountIds: string[]): Promise<boolean> {
-    if (client !== "vscodeExt") return false;
+    const kind = restartPrecheckClient(client);
+    if (!kind) return false;
     try {
+      if (kind === "jetbrains") {
+        return (await api.jetbrainsRestartPrecheck(targetAccountIds)).required === true;
+      }
       return (await api.vscodeRestartPrecheck(targetAccountIds)).required === true;
     } catch {
       return false;
@@ -112,12 +120,12 @@ export function useSessionActions({
     detail.setUnifyPlan(null);
     setActionBusy(true);
     try {
-      if ((client === "workbuddy" || client === "vscodeExt") && actions.length > 0) {
-        // 插件侧：只有写入目标含当前登录账号才需要关闭/重开（统一确认框已提前告知）。
+      if ((client === "workbuddy" || client === "vscodeExt" || client === "jetbrains") && actions.length > 0) {
+        // 插件侧：按客户端各自的预检决定是否需要关闭/重开（统一确认框已提前告知）。
         const targetAccountIds = actions
           .map(({ target }) => currentDetail.members.find((member) => member.memberId === target.memberId)?.accountId)
           .filter((id): id is string => Boolean(id));
-        const restart = client === "vscodeExt" && (await needsEditorRestart(targetAccountIds));
+        const restart = client !== "workbuddy" && (await needsEditorRestart(targetAccountIds));
         const report = await api.syncSessionGroupUnify({
           client, groupId: plan.groupId, sourceMemberId: plan.sourceMemberId,
           targets: actions.map(({ target, preview, mode }) => ({ targetMemberId: target.memberId, previewToken: preview.previewToken!, mode })),

@@ -201,7 +201,7 @@ export interface SessionSyncReport {
 // Client-scoped session group directory
 // ---------------------------------------------------------------------------
 
-export type SessionGroupClient = "workbuddy" | "codebuddyIde" | "vscodeExt";
+export type SessionGroupClient = "workbuddy" | "codebuddyIde" | "vscodeExt" | "jetbrains";
 
 export type SessionGroupStatus = "latest" | "behind" | "diverge" | "missing" | "unknown";
 

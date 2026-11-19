@@ -14,8 +14,11 @@
 //! 装有插件的 IDE（多产品共用同一份账号）。
 //!
 //! 与 VS Code 端同一时序（运行中写入会被 IDE 内存态覆盖）：优雅退出 → 写 XML →
-//! 重新打开。IDE 进程与配置目录的对应关系用安装目录 `product-info.json` 的
-//! `dataDirectoryName` 精确解析，映射不上的进程一律不动（不关闭、不重开）。
+//! 重新打开。IDE 进程与配置目录的对应关系优先用安装目录 `product-info.json` 的
+//! `dataDirectoryName` 精确解析，读不到时按 exe 名与安装目录名兜底推断
+//! （`mappingSource: "fallback"`）。**仍映射失败却仍在运行的实例会让整次切换被拒绝**
+//! （见 [`switch::switch_account`]）——写入后只给警告等于让用户「切了没变」，且会
+//! 静默覆盖失败现场。
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -34,8 +37,11 @@ use crate::modules::vscode_ext::build_ext_session_json;
 const STATE_FILE: &str = "jetbrains.json";
 /// CodeBuddy 插件写入 `SecretStorage` 的会话密钥（与 VS Code 扩展同 key）。
 const SECRET_KEY: &str = "Tencent-Cloud.coding-copilot.new.accessToken";
-/// 插件在 `<配置目录>/plugins/` 下的安装目录名前缀（marketplace zip 顶层目录）。
-const PLUGIN_DIR_PREFIX: &str = "coding-copilot";
+/// 插件在 `<配置目录>/plugins/` 下的安装目录名标记（marketplace id 或带前后缀的版本目录）。
+///
+/// 匹配方式为**包含**（大小写不敏感），不是前缀：2026.3 起插件目录可能被命名为
+/// `Tencent-Cloud.coding-copilot` 这类 marketplace id，前缀判定会误判「未安装」。
+const PLUGIN_DIR_MARKER: &str = "coding-copilot";
 /// secret 存储文件相对配置目录的路径。
 const SECRET_RELATIVE: &str = "options/secret-storage.xml";
 
@@ -258,6 +264,43 @@ fn write_secret_for(config_dir: &Path, value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// 回滚：把某个配置目录的会话 secret 恢复到写入前的状态。
+///
+/// `previous = Some(value)` → 写回原值（upsert，保留其它 Entry）；
+/// `previous = None` → 写入前该目录没有登录态，删掉我们写进去的 key。
+fn restore_secret_for(config_dir: &Path, previous: Option<&str>) -> Result<(), String> {
+    match previous {
+        Some(value) => write_secret_for(config_dir, value).map(|_| ()),
+        None => remove_secret_for(config_dir),
+    }
+}
+
+/// 删除会话 secret，保留同一文件里的其它 Entry。
+///
+/// 删完只剩空表时连文件一起删：那个文件是我们刚创建的空壳，留着会让插件
+/// 读到「有 secret-storage.xml 但没有登录项」的中间态。
+fn remove_secret_for(config_dir: &Path) -> Result<(), String> {
+    let path = secret_path_for(config_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    let mut entries = parse_secret_entries(&content);
+    let before = entries.len();
+    entries.retain(|(key, _)| key != SECRET_KEY);
+    if entries.len() == before {
+        // 本来就没有我们的 key：回滚无事可做。
+        return Ok(());
+    }
+    if entries.is_empty() {
+        return std::fs::remove_file(&path)
+            .map_err(|e| format!("回滚失败（删除 {}）: {e}", path.display()));
+    }
+    atomic_write(&path, &serialize_secret_entries(&entries))
+        .map_err(|e| format!("回滚失败（写入 {}）: {e}", path.display()))
+}
+
 /// Windows 侧的 JetBrains IDE 优雅关闭（user32 消息流程）。
 ///
 /// 不走 `windows` crate 的 feature，直接 `extern "system"` 声明所需的最小 API 面，
@@ -402,11 +445,15 @@ mod win_close {
 }
 
 mod detect;
+mod diagnose;
 mod status;
 mod switch;
 
 pub use detect::{detect_current_account, jetbrains_config_root};
-pub use status::status;
+pub use status::{
+    close_running_plugin_ides, jetbrains_restart_precheck, relaunch_closed_ides,
+    running_plugin_ide_labels, status, ClosedIdes,
+};
 pub use switch::switch_account;
 
 #[cfg(test)]
@@ -415,6 +462,7 @@ mod tests {
 
     #[allow(unused_imports)]
     use super::detect::*;
+    use super::diagnose::*;
     #[allow(unused_imports)]
     use super::status::*;
     #[allow(unused_imports)]

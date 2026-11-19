@@ -44,7 +44,10 @@ export interface GroupDetailPanelProps {
 }
 
 const clientNames: Record<SessionGroupClient, string> = {
-  workbuddy: "WorkBuddy", codebuddyIde: "CodeBuddy IDE", vscodeExt: "CodeBuddy 插件",
+  workbuddy: "WorkBuddy",
+  codebuddyIde: "CodeBuddy IDE",
+  vscodeExt: "CodeBuddy 插件",
+  jetbrains: "JetBrains 插件",
 };
 
 type GraphLine = { path: string; tone: "default" | "common" | `branch-${number}`; points: { x: number; y: number }[] };
@@ -139,8 +142,9 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
     const current = props.currentAccounts.find((item) => item.variant === variant);
     return member?.variant === variant && (!current?.uid || current.uid === member.uid || current.uid === member.accountId);
   }));
-  /** 插件侧：VS Code 是否正在运行（详情加载时的状态；执行前后端会再次核对实际状态）。 */
-  const editorRunning = props.client === "vscodeExt" && props.currentAccounts.some((current) => current.running === true);
+  /** 插件侧：宿主（VS Code / JetBrains）是否正在运行（详情加载时的状态；执行前后端会再次核对实际状态）。 */
+  const editorRunning = (props.client === "vscodeExt" || props.client === "jetbrains")
+    && props.currentAccounts.some((current) => current.running === true);
   /** 统一确认框的运行提示：WorkBuddy 按档位、插件按编辑器分别措辞；其他客户端不显示。 */
   const restartNotice = props.client === "workbuddy"
     ? {
@@ -148,13 +152,19 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         description: `${restartVariants.length ? `确认后将先关闭目标账号所在的${restartVariants.map(variantLabel).join("、")}，同步结束再自动打开。` : "若目标账号所在的客户端正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。若写入待恢复，将暂停重新打开并提示处理。`,
         willRestart: restartVariants.length > 0,
       }
-    : props.client === "vscodeExt"
+    : props.client === "jetbrains"
       ? {
-          title: editorRunning ? "当前运行：VS Code" : "执行前会检查 VS Code 运行状态",
-          description: `${editorRunning ? "若写入目标包含当前登录账号，确认后将先关闭 VS Code，同步结束再自动打开。" : "若写入目标包含当前登录账号且 VS Code 正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
+          title: editorRunning ? "当前运行：JetBrains IDE" : "执行前会检查 JetBrains IDE 运行状态",
+          description: `${editorRunning ? "JetBrains 的写入会被运行中的 IDE 覆盖：确认后将关闭所有装了插件且在运行的 IDEA / PyCharm，同步结束再逐个自动打开。" : "若 IDEA / PyCharm 正在运行，确认后将先关闭并在同步结束后自动重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
           willRestart: editorRunning,
         }
-      : null;
+      : props.client === "vscodeExt"
+        ? {
+            title: editorRunning ? "当前运行：VS Code" : "执行前会检查 VS Code 运行状态",
+            description: `${editorRunning ? "若写入目标包含当前登录账号，确认后将先关闭 VS Code，同步结束再自动打开。" : "若写入目标包含当前登录账号且 VS Code 正在运行，确认后将自动关闭并在同步结束后重新打开。"}请先保存未完成的输入；执行时会再次核对实际运行状态。`,
+            willRestart: editorRunning,
+          }
+        : null;
   const summary = equal
     ? `${active.length} 个账号内容一致`
     : canBatch ? `有 ${behind.length} 个账号待同步`

@@ -298,6 +298,7 @@ pub fn run() {
             commands::add_session_group_member,
             commands::copy_linked_sessions,
             commands::vscode_restart_precheck,
+            commands::jetbrains_restart_precheck,
             commands::unlink_session_group_member,
             commands::delete_session_group,
             commands::prune_session_groups,

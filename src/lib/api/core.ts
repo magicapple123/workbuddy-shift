@@ -108,6 +108,7 @@ const ROUTES: Record<string, Route> = {
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
   copy_linked_sessions: { method: "POST", path: "/api/session-groups/copy-linked" },
   vscode_restart_precheck: { method: "POST", path: "/api/vscode-ext/restart-precheck" },
+  jetbrains_restart_precheck: { method: "POST", path: "/api/jetbrains/restart-precheck" },
   unlink_session_group_member: { method: "POST", path: "/api/session-groups/unlink" },
   delete_session_group: { method: "POST", path: "/api/session-groups/delete" },
   prune_session_groups: { method: "POST", path: "/api/session-groups/prune-dead" },

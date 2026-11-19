@@ -14,6 +14,7 @@ export const CLIENTS: { id: SessionGroupClient; title: string; description: stri
   { id: "workbuddy", title: "WorkBuddy", description: "含国内版与国际版会话" },
   { id: "vscodeExt", title: "CodeBuddy 插件", description: "VS Code 扩展会话" },
   { id: "codebuddyIde", title: "CodeBuddy IDE", description: "国内版 / 国际版独立分组" },
+  { id: "jetbrains", title: "JetBrains 插件", description: "IDEA / PyCharm 共用" },
 ];
 
 type GroupListSnapshot = {

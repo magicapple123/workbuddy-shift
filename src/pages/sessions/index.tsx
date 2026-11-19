@@ -29,6 +29,7 @@ import { useSessionActions } from "./hooks/use-session-actions";
 import { useSessionDetail } from "./hooks/use-session-detail";
 import { useSessionGroups } from "./hooks/use-session-groups";
 import { canPruneGroups, pruneConfirmDescription, showPruneEntry } from "./prune";
+import { restartDialogCopy } from "./restart";
 
 export default function SessionsPage() {
   const { accounts, fetchAll } = useAccountsStore();
@@ -108,8 +109,9 @@ export default function SessionsPage() {
       addOpen={addOpen} setAddOpen={setAddOpen} fullPage={false}
     />
   );
-  const statusOptions = [
-    ["all", "全部"], ["behind", "待同步"], ["diverge", "有分歧"], ["latest", "内容一致"],
+  /** 运行中确认框文案：按客户端分派（JetBrains 会关闭 IDEA / PyCharm 并逐个重开）。 */
+  const restartCopy = restartDialogCopy(client);
+  const statusOptions = [    ["all", "全部"], ["behind", "待同步"], ["diverge", "有分歧"], ["latest", "内容一致"],
     ["missing", "内容缺失"], ["unknown", "无法确认"],
   ];
   const pages = Array.from({ length: list.pageCount }, (_, index) => index + 1)
@@ -134,7 +136,7 @@ export default function SessionsPage() {
             <TabsList aria-label="会话客户端" className="grid h-auto w-full grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2 bg-transparent p-0">
               {CLIENTS.map((item) => <TabsTrigger key={item.id} value={item.id} className="relative h-auto min-w-0 justify-start gap-3 rounded-lg border border-border bg-background px-3 py-4 text-left hover:border-brand/50 data-[state=active]:border-brand data-[state=active]:bg-brand/5 data-[state=active]:shadow-sm">
                 <ClientMark client={item.id} />
-                <span className="min-w-0"><span className="block truncate text-sm font-semibold text-foreground">{item.title}</span><span className="mt-1 block truncate text-xs font-normal text-muted-foreground">{item.id === "workbuddy" ? "国内版 · 国际版" : item.id === "codebuddyIde" ? "国内版 / 国际版" : "VS Code"}</span></span>
+                <span className="min-w-0"><span className="block truncate text-sm font-semibold text-foreground">{item.title}</span><span className="mt-1 block truncate text-xs font-normal text-muted-foreground">{item.id === "workbuddy" ? "国内版 · 国际版" : item.id === "codebuddyIde" ? "国内版 / 国际版" : item.id === "jetbrains" ? "IDEA / PyCharm" : "VS Code"}</span></span>
                 {client === item.id && <CheckCircle2 className="absolute right-2 top-2 size-3.5 text-brand" />}
               </TabsTrigger>)}
             </TabsList>
@@ -170,16 +172,14 @@ export default function SessionsPage() {
           <DialogAutoHeight>{detailPanel}</DialogAutoHeight>
         </DialogContent>
       </Dialog>
-      {/* 插件侧写操作的运行中确认框：写入会被运行中的 VS Code 覆盖，需要先关闭并在结束后重开。 */}
+      {/* 插件侧写操作的运行中确认框：写入会被运行中的宿主覆盖，需要先关闭并在结束后重开。 */}
       <AlertDialog open={!!actions.restartPrompt} onOpenChange={(open) => { if (!open && !actions.actionBusy) actions.setRestartPrompt(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>同步前需要重启 VS Code</AlertDialogTitle>
-            <AlertDialogDescription>
-              检测到 VS Code 正在运行：运行中的写入会被编辑器覆盖。确认后将先关闭 VS Code（未保存内容由 VS Code 自身提示保护，最多等待 60 秒），完成后再自动重新打开。
-            </AlertDialogDescription>
+            <AlertDialogTitle>{restartCopy?.title ?? "同步前需要重启宿主"}</AlertDialogTitle>
+            <AlertDialogDescription>{restartCopy?.description ?? ""}</AlertDialogDescription>
           </AlertDialogHeader>
-          {actions.actionBusy && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在关闭 VS Code 并处理，请勿关闭本窗口…</p>}
+          {actions.actionBusy && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{restartCopy?.busyText ?? "正在处理，请勿关闭本窗口…"}</p>}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={actions.actionBusy}>取消</AlertDialogCancel>
             <DemoAction><Button disabled={actions.actionBusy} onClick={() => void actions.confirmRestart()}>{actions.actionBusy ? "处理中…" : actions.restartPrompt?.actionLabel ?? "关闭并继续"}</Button></DemoAction>

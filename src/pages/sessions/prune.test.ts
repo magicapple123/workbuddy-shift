@@ -23,10 +23,12 @@ import type { SessionGroupPruneReport } from "@/lib/types";
  */
 
 describe("supportsPrune", () => {
-  it("三个客户端都支持批量清理（判定依据由后端按客户端分派）", () => {
+  it("四个客户端都支持批量清理（判定依据由后端按客户端分派）", () => {
     expect(supportsPrune("workbuddy")).toBe(true);
     expect(supportsPrune("vscodeExt")).toBe(true);
     expect(supportsPrune("codebuddyIde")).toBe(true);
+    // JetBrains 插件与 VS Code 插件同构：会话行在工作区索引里，后端按 spec 判定。
+    expect(supportsPrune("jetbrains")).toBe(true);
   });
 });
 

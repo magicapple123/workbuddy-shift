@@ -321,6 +321,16 @@ pub(crate) struct VscodeRestartPrecheckRequest {
     pub(crate) target_account_ids: Vec<String>,
 }
 
+/// `POST /api/jetbrains/restart-precheck`。
+///
+/// 字段与 [`VscodeRestartPrecheckRequest`] 同形（前端共用一套判定）；JetBrains 侧的判定
+/// 与目标账号无关（IDE 内存里只有一个账号，且多个产品共用同一份数据目录）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct JetbrainsRestartPrecheckRequest {
+    pub(crate) target_account_ids: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // 存储管理（T3）
 // ---------------------------------------------------------------------------
@@ -360,11 +370,15 @@ pub(crate) struct StorageTrashPurgeRequest {
 }
 
 /// `POST /api/storage/reveal`。
+///
+/// `scope` 是第三轮第 5 条新增的可选字段（`storage` 缺省 / `cwd`），与 Tauri command
+/// 的同名参数一一对应；缺省时行为与改造前一致。
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct StorageRevealRequest {
     pub(crate) path: String,
     pub(crate) mode: Option<String>,
+    pub(crate) scope: Option<String>,
 }
 
 /// `POST /api/storage/revalidate`（`targets` 是 `kind:id` 字符串数组）。

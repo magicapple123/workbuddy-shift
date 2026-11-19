@@ -79,6 +79,16 @@ pub const CODEBUDDY_IDE_STORE: SessionStoreSpec = SessionStoreSpec {
     backup_kind: "codebuddy-ide-sessions",
 };
 
+/// JetBrains IDE 内 CodeBuddy 插件的数据仓（IDEA / PyCharm 共用同一份）。
+///
+/// 与 VS Code 插件**逐字同构**，只有客户端段目录名不同（`JetBrains`）；因此索引读取、
+/// 内容摘要、复制、登记、预览、增量同步全部走同一套 spec 参数化内核，不需要第二份实现。
+pub const JETBRAINS_STORE: SessionStoreSpec = SessionStoreSpec {
+    app_dir: "CodeBuddyExtension",
+    client_dir: "JetBrains",
+    backup_kind: "jetbrains-sessions",
+};
+
 /// 待复制的会话引用（工作区 hash + 会话 id）。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]

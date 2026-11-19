@@ -32,12 +32,7 @@ pub fn sync_pair(
     }
     let selection = parse_selection(group_id, preview_token, mode)?;
     // 校验（resolve / 凭据 / 模式）全部通过后再关编辑器：为注定失败的请求打断用户是无谓的。
-    let guard = prepare_editor_window(
-        client,
-        restart,
-        VSCODE_SYNC_RUNNING_HINT,
-        &[context.target.uid.as_str()],
-    )?;
+    let guard = prepare_editor_window(client, restart, false, &[context.target.uid.as_str()])?;
     let result = run_pair_sync(client, scope, &context, &[selection], guard.is_some());
     settle_editor_window(guard, result)
 }
@@ -174,6 +169,18 @@ pub(super) fn preview_resolved_pair(
                 &pair.target_account,
             )?
         }
+        SessionClient::Jetbrains => {
+            let root = client
+                .data_root()
+                .ok_or_else(|| "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string())?;
+            vscode_session_sync::links_preview_in(
+                JETBRAINS_STORE,
+                &root,
+                &paths,
+                &pair.source.uid,
+                &pair.target_account,
+            )?
+        }
     };
     let preview = report
         .get("groups")
@@ -234,6 +241,16 @@ pub(super) fn plan_editor_restart(
     Ok(true)
 }
 
+/// 插件型客户端的「运行中」文案：按客户端与动作取词（用户可见文案的单一来源）。
+pub(super) fn editor_running_hint(client: SessionClient, adding_member: bool) -> &'static str {
+    match (client, adding_member) {
+        (SessionClient::Jetbrains, false) => JETBRAINS_SYNC_RUNNING_HINT,
+        (SessionClient::Jetbrains, true) => JETBRAINS_ADD_MEMBER_RUNNING_HINT,
+        (_, false) => VSCODE_SYNC_RUNNING_HINT,
+        (_, true) => VSCODE_ADD_MEMBER_RUNNING_HINT,
+    }
+}
+
 /// 预检：当前是否需要关闭 VS Code 才能安全执行写操作（运行中 且 目标账号含当前登录账号）。
 ///
 /// 供前端决定「是否先弹确认框」；判定与写入口共用 [`plan_editor_restart`]，最终把关仍在各写入口。
@@ -256,6 +273,14 @@ pub fn vscode_restart_precheck(target_account_ids: &[String]) -> Value {
     let required = plan_editor_restart(running, current_uid.as_deref(), &target_refs, true, "")
         .unwrap_or(false);
     json!({ "required": required, "running": running })
+}
+
+/// 预检：当前是否需要关闭 JetBrains IDE 才能安全执行写操作。
+///
+/// **与目标账号无关**：IDEA 与 PyCharm 共用同一份 `Data/<uid>/JetBrains`，只要还有装了插件
+/// 且在运行的实例，写入就可能被它的内存态覆盖。参数只为与 [`vscode_restart_precheck`] 同形。
+pub fn jetbrains_restart_precheck(_target_account_ids: &[String]) -> Value {
+    jetbrains::jetbrains_restart_precheck()
 }
 
 /// 插件侧写操作的编辑器生命周期窗口（仅 `SessionClient::VscodeExt` 使用）。
@@ -322,32 +347,83 @@ impl VscodeEditorGuard {
     }
 }
 
+/// 编辑器生命周期守卫：按客户端分派到 VS Code / JetBrains 两套实现。
+///
+/// 两者的语义完全一致（只重开自己关掉的、失败也尽力开回），差异只在「怎么关」——因此
+/// 调用方只认这个枚举，收尾逻辑共用 [`settle_guard`]。
+pub(super) enum EditorGuard {
+    Vscode(VscodeEditorGuard),
+    Jetbrains(JetbrainsIdeGuard),
+}
+
+impl EditorGuard {
+    /// 报告 / 提示里的宿主名（重开失败的文案要指名是哪个宿主）。
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            Self::Vscode(_) => "VS Code",
+            Self::Jetbrains(_) => "JetBrains IDE",
+        }
+    }
+
+    /// 本次窗口是否真的关闭了宿主（报告字段只认「我们关的 + 重开成功」）。
+    pub(super) fn closed_by_us(&self) -> bool {
+        match self {
+            Self::Vscode(guard) => guard.closed_by_us(),
+            Self::Jetbrains(guard) => guard.closed_by_us(),
+        }
+    }
+
+    /// 成功收尾：重开（仅本次由我们关闭时）。`Err` = 重开失败，操作本身已成功。
+    pub(super) fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Vscode(guard) => guard.finish(),
+            Self::Jetbrains(guard) => guard.finish(),
+        }
+    }
+
+    /// 失败收尾：best-effort 重开，并把重开失败信息追加到原错误之后（不吞原错误）。
+    pub(super) fn fail(self, error: String) -> String {
+        match self {
+            Self::Vscode(guard) => guard.fail(error),
+            Self::Jetbrains(guard) => guard.fail(error),
+        }
+    }
+}
+
 /// 非插件侧不涉及编辑器生命周期（`Ok(None)`）；插件侧按 `restart` 打开窗口。
+///
+/// `adding_member` 只用于选文案（同步 / 添加关联账号的既有措辞不同）。
 pub(super) fn prepare_editor_window(
     client: SessionClient,
     restart: bool,
-    manual_hint: &str,
+    adding_member: bool,
     target_uids: &[&str],
-) -> Result<Option<VscodeEditorGuard>, String> {
+) -> Result<Option<EditorGuard>, String> {
+    let hint = editor_running_hint(client, adding_member);
     match client {
-        SessionClient::VscodeExt => {
-            VscodeEditorGuard::prepare(restart, manual_hint, target_uids).map(Some)
+        SessionClient::VscodeExt => VscodeEditorGuard::prepare(restart, hint, target_uids)
+            .map(|guard| Some(EditorGuard::Vscode(guard))),
+        SessionClient::Jetbrains => {
+            // JetBrains 的判定与目标账号无关：IDE 内存里只有一个账号，且多个产品共用数据目录。
+            let _ = target_uids;
+            JetbrainsIdeGuard::prepare(restart, hint).map(|guard| Some(EditorGuard::Jetbrains(guard)))
         }
         SessionClient::Workbuddy | SessionClient::CodebuddyIde => Ok(None),
     }
 }
 
-/// 插件侧写操作的统一收尾：重开编辑器并把结果并入报告。
+/// 插件侧写操作的统一收尾：重开宿主并把结果并入报告。
 ///
 /// - 重开成功且本次确实关过 → 报告补 `restartedEditor: true`；
 /// - 重开失败不进整体 `Err`（操作本身已成功）：能进 `errors[]` 就进，否则挂 `editorError`。
 pub(super) fn settle_editor_window(
-    guard: Option<VscodeEditorGuard>,
+    guard: Option<EditorGuard>,
     result: Result<Value, String>,
 ) -> Result<Value, String> {
     let Some(guard) = guard else {
         return result;
     };
+    let label = guard.label();
     match result {
         Ok(mut report) => {
             let closed_by_us = guard.closed_by_us();
@@ -358,7 +434,7 @@ pub(super) fn settle_editor_window(
                     }
                 }
                 Err(error) => {
-                    let message = format!("会话已处理，但 VS Code 重新打开失败：{error}");
+                    let message = format!("会话已处理，但 {label} 重新打开失败：{error}");
                     match report.get_mut("errors").and_then(Value::as_array_mut) {
                         Some(errors) => errors.push(json!({ "error": message })),
                         None => report["editorError"] = json!(message),
@@ -413,6 +489,24 @@ pub(super) fn run_pair_sync(
                 .ok_or_else(|| "未找到 VS Code 插件会话数据目录".to_string())?;
             vscode_session_sync::sync_selected_in(
                 VSCODE_STORE,
+                &root,
+                &paths,
+                &pair.source.uid,
+                &pair.target_account,
+                selections,
+            )?
+        }
+        SessionClient::Jetbrains => {
+            let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
+            // `editor_prepared` 语义与 VS Code 侧相同：窗口内已关闭，或本来没运行。
+            if !editor_prepared && !jetbrains::running_plugin_ide_labels().is_empty() {
+                return Err(JETBRAINS_SYNC_RUNNING_HINT.to_string());
+            }
+            let root = client
+                .data_root()
+                .ok_or_else(|| "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string())?;
+            vscode_session_sync::sync_selected_in(
+                JETBRAINS_STORE,
                 &root,
                 &paths,
                 &pair.source.uid,
@@ -490,6 +584,7 @@ pub(super) fn validate_target_compatibility(
             Ok(())
         }
         // The plugin uses one account-scoped store across account regions.
-        SessionClient::VscodeExt => Ok(()),
+        // JetBrains 与 VS Code 插件同一口径：存储与地区无关，不做档位兼容校验。
+        SessionClient::VscodeExt | SessionClient::Jetbrains => Ok(()),
     }
 }

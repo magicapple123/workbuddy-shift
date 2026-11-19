@@ -27,10 +27,13 @@ pub fn sync_unify_batch(
             sync_unify_batch_workbuddy(scope, group_id, source_member_id, targets)
         }
         SessionClient::VscodeExt => {
-            sync_unify_batch_vscode(scope, group_id, source_member_id, targets, restart)
+            sync_unify_batch_editor(client, scope, group_id, source_member_id, targets, restart)
+        }
+        SessionClient::Jetbrains => {
+            sync_unify_batch_editor(client, scope, group_id, source_member_id, targets, restart)
         }
         SessionClient::CodebuddyIde => {
-            Err("仅 WorkBuddy 与 CodeBuddy 插件会话支持整组统一".to_string())
+            Err("仅 WorkBuddy 与插件类会话（VS Code / JetBrains）支持整组统一".to_string())
         }
     }
 }
@@ -162,22 +165,25 @@ pub(super) fn sync_unify_batch_workbuddy(
     Ok(combined)
 }
 
-/// VS Code 插件：全部校验通过后打开编辑器生命周期窗口（`restart=true` 时关闭），
-/// 窗口内跑完全部目标再收尾重开；插件侧没有 WorkBuddy 的 `needsRecovery` 语义。
-pub(super) fn sync_unify_batch_vscode(
+/// 编辑器插件（VS Code / JetBrains）：全部校验通过后打开宿主生命周期窗口（`restart=true`
+/// 时关闭），窗口内跑完全部目标再收尾重开；插件侧没有 WorkBuddy 的 `needsRecovery` 语义。
+///
+/// 两个宿主的差异全部收敛在 [`prepare_editor_window`] 里（怎么关、关什么），这里只负责
+/// 批次编排，因此不需要第二份实现。
+pub(super) fn sync_unify_batch_editor(
+    client: SessionClient,
     scope: Option<WbVariant>,
     group_id: &str,
     source_member_id: &str,
     targets: &[GroupUnifyTarget],
     restart: bool,
 ) -> Result<Value, String> {
-    let client = SessionClient::VscodeExt;
     let prepared = prepare_unify_targets(client, scope, group_id, source_member_id, targets)?;
     let target_uids: Vec<&str> = prepared
         .iter()
         .map(|(pair, _)| pair.target.uid.as_str())
         .collect();
-    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT, &target_uids)?;
+    let guard = prepare_editor_window(client, restart, false, &target_uids)?;
     let editor_prepared = guard.is_some();
     let mut combined = json!({ "client": client.as_str(), "groupId": group_id, "synced": [], "skipped": [], "errors": [], "needsRecovery": false, "temporaryFiles": [] });
     for (pair, selection) in prepared {
@@ -256,7 +262,7 @@ pub fn sync_safe_batch(
         .iter()
         .map(|(pair, _)| pair.target.uid.as_str())
         .collect();
-    let guard = prepare_editor_window(client, restart, VSCODE_SYNC_RUNNING_HINT, &target_uids)?;
+    let guard = prepare_editor_window(client, restart, false, &target_uids)?;
     let editor_prepared = guard.is_some();
     let result = (|| -> Result<Value, String> {
         for (pair, selection) in prepared {

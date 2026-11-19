@@ -23,6 +23,280 @@
         }
     }
 
+    /// 第 16 条 16.2 的判定表必须逐条钉住：放宽发行通道后缀，但仍拒绝迁移残留。
+    ///
+    /// 2026.3 的 EAP 用户会得到 `IntelliJIdea2026.3-eap`，旧判定把整类用户过滤成
+    /// 「没有可切换的 IDE」——这是 issue #221 最可能的成因之一。
+    #[test]
+    fn config_dir_name_accepts_release_channels_but_rejects_backups() {
+        for (name, expected) in [
+            ("IntelliJIdea2026.3", true),
+            ("IntelliJIdea2026.3.1", true),
+            ("IdeaIC2026.3", true),
+            ("IntelliJIdea2026.3-eap", true),
+            ("IntelliJIdea2026.3-EAP", true),
+            ("PyCharm2026.3-nightly", true),
+            ("PyCharm2026.3-beta", true),
+            ("PyCharmCE2026.3-rc", true),
+            ("IdeaIC2026.3-snapshot", true),
+            ("IntelliJIdea2026.3-eap2", false),
+            ("PyCharm2026.2-backup", false),
+            ("PyCharm2026.2-bak", false),
+            ("PyCharm2026.2.bak", false),
+            ("IntelliJIdea2026.3-eap.1", false),
+            ("PyCharm2026.2-", false),
+        ] {
+            assert_eq!(
+                is_supported_config_dir_name(name),
+                expected,
+                "{name} 的判定应为 {expected}"
+            );
+        }
+    }
+
+    /// 插件目录名按「包含 coding-copilot（大小写不敏感）」匹配，不是前缀匹配。
+    #[test]
+    fn plugin_dir_matches_marketplace_id_naming() {
+        let dir =
+            std::env::temp_dir().join(format!("workbuddy-shift-jb-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("plugins/other-plugin")).unwrap();
+        // 未安装插件：只有无关目录。
+        assert!(plugin_dir(&dir).is_none());
+        std::fs::create_dir_all(dir.join("plugins/Tencent-Cloud.coding-copilot")).unwrap();
+        let found = plugin_dir(&dir).expect("marketplace id 命名必须判为已安装");
+        assert_eq!(
+            found.file_name().map(|n| n.to_string_lossy().into_owned()),
+            Some("Tencent-Cloud.coding-copilot".to_string())
+        );
+        // 多个命中时按名排序取首个，保证诊断输出稳定。
+        std::fs::create_dir_all(dir.join("plugins/coding-copilot-jetbrains")).unwrap();
+        let names: Vec<String> = plugin_dirs(&dir)
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Tencent-Cloud.coding-copilot".to_string(),
+                "coding-copilot-jetbrains".to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1 兜底：`product-info.json` 缺失 → 按 exe 名 + 安装目录名推断，并标 fallback。
+    #[test]
+    fn product_info_missing_falls_back_to_exe_and_dir_name() {
+        let root = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-fallback-{}/IntelliJ IDEA 2026.3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let exe = root.join("bin/idea64.exe");
+        std::fs::write(&exe, "").unwrap();
+
+        let mapping = resolve_config_dir(&root, Some(&exe));
+        assert_eq!(mapping.name.as_deref(), Some("IntelliJIdea2026.3"));
+        assert_eq!(mapping.source, Some(MappingSource::Fallback));
+        assert!(mapping.note.is_some(), "兜底必须留下原因供诊断展示");
+
+        // 社区版按安装目录名判到 IdeaIC。
+        let ce_root = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-fallback-ce-{}/IntelliJ IDEA Community Edition 2026.3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ce_root);
+        std::fs::create_dir_all(ce_root.join("bin")).unwrap();
+        let ce_exe = ce_root.join("bin/idea64.exe");
+        std::fs::write(&ce_exe, "").unwrap();
+        assert_eq!(
+            resolve_config_dir(&ce_root, Some(&ce_exe)).name.as_deref(),
+            Some("IdeaIC2026.3")
+        );
+
+        // PyCharm 同规则。
+        let py_root = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-fallback-py-{}/PyCharm 2026.3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&py_root);
+        std::fs::create_dir_all(py_root.join("bin")).unwrap();
+        let py_exe = py_root.join("bin/pycharm64.exe");
+        std::fs::write(&py_exe, "").unwrap();
+        assert_eq!(
+            resolve_config_dir(&py_root, Some(&py_exe)).name.as_deref(),
+            Some("PyCharm2026.3")
+        );
+
+        // 安装目录名里没有版本号 → 兜底也失败 → Unmapped（切换会被拒绝）。
+        let unknown = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-fallback-unknown-{}/IntelliJ IDEA",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&unknown);
+        std::fs::create_dir_all(unknown.join("bin")).unwrap();
+        let unknown_exe = unknown.join("bin/idea64.exe");
+        std::fs::write(&unknown_exe, "").unwrap();
+        let mapping = resolve_config_dir(&unknown, Some(&unknown_exe));
+        assert!(mapping.name.is_none());
+        assert_eq!(mapping.source, Some(MappingSource::Unmapped));
+        assert!(mapping.note.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&ce_root);
+        let _ = std::fs::remove_dir_all(&py_root);
+        let _ = std::fs::remove_dir_all(&unknown);
+    }
+
+    /// `product-info.json` 损坏 → 兜底；`dataDirectoryName` 不合规 → 守卫拒绝该结果。
+    #[test]
+    fn product_info_corrupt_or_untrusted_falls_back() {
+        let root = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-corrupt-{}/PyCharm 2026.3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let exe = root.join("bin/pycharm64.exe");
+        std::fs::write(&exe, "").unwrap();
+
+        // 损坏的 JSON
+        std::fs::write(root.join("product-info.json"), "{not json").unwrap();
+        let info = read_product_info(&root);
+        assert!(info.data_dir_name.is_none());
+        assert!(info
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("解析失败")));
+        let mapping = resolve_config_dir(&root, Some(&exe));
+        assert_eq!(mapping.name.as_deref(), Some("PyCharm2026.3"));
+        assert_eq!(mapping.source, Some(MappingSource::Fallback));
+
+        // 缺失 dataDirectoryName
+        std::fs::write(root.join("product-info.json"), r#"{"name":"PyCharm"}"#).unwrap();
+        assert!(read_product_info(&root)
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("dataDirectoryName")));
+
+        // 守卫：dataDirectoryName 指向迁移残留目录 → 不采信 product-info，退回兜底。
+        std::fs::write(
+            root.join("product-info.json"),
+            r#"{"name":"PyCharm","version":"2026.2","dataDirectoryName":"PyCharm2026.2-backup"}"#,
+        )
+        .unwrap();
+        let info = read_product_info(&root);
+        assert!(info.data_dir_name.is_none(), "不支持的目录名不得作为写入目标");
+        assert!(info
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("不在受支持产品范围内")));
+
+        // 合规样本仍走 product-info 精确分支。
+        std::fs::write(
+            root.join("product-info.json"),
+            r#"{"name":"PyCharm","version":"2026.3","dataDirectoryName":"PyCharm2026.3"}"#,
+        )
+        .unwrap();
+        let mapping = resolve_config_dir(&root, Some(&exe));
+        assert_eq!(mapping.name.as_deref(), Some("PyCharm2026.3"));
+        assert_eq!(mapping.source, Some(MappingSource::ProductInfo));
+        assert_eq!(mapping.version.as_deref(), Some("2026.3"));
+        assert!(mapping.note.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn running_instance(config_dir_name: Option<&str>) -> RunningIde {
+        RunningIde {
+            pid: 4242,
+            launch_target: Some(PathBuf::from("/opt/idea/bin/idea64.exe")),
+            config_dir_name: config_dir_name.map(str::to_string),
+            mapping_source: if config_dir_name.is_some() {
+                MappingSource::ProductInfo
+            } else {
+                MappingSource::Unmapped
+            },
+            product_name: Some("IntelliJ IDEA".to_string()),
+            version: Some("2026.3".to_string()),
+            mapping_note: config_dir_name
+                .is_none()
+                .then(|| "product-info.json 不存在".to_string()),
+        }
+    }
+
+    /// 用户决策（不得改判）：有未映射的运行中 IDE 时**拒绝写入**并列出进程。
+    #[test]
+    fn unmapped_running_ide_blocks_write_and_lists_processes() {
+        let running = vec![
+            running_instance(Some("IntelliJIdea2026.3")),
+            running_instance(None),
+        ];
+        let unmapped = unmapped_running(&running);
+        assert_eq!(unmapped.len(), 1, "只统计映射失败的那一个");
+
+        let hint = unmapped_running_hint(&unmapped);
+        assert!(hint.contains("拒绝写入"), "必须明确拒绝写入：{hint}");
+        assert!(hint.contains("完全退出"), "必须提示先退出 IDE：{hint}");
+        assert!(hint.contains("4242"), "必须列出 PID：{hint}");
+        assert!(hint.contains("IntelliJ IDEA"), "必须列出产品名：{hint}");
+        assert!(
+            hint.contains("product-info.json 不存在"),
+            "必须带失败原因：{hint}"
+        );
+
+        // 全部映射成功时不得阻断。
+        assert!(unmapped_running(&[running_instance(Some("PyCharm2026.3"))]).is_empty());
+
+        // 状态里给前端的结构化清单字段齐全。
+        let list = unmapped_running_json(&running);
+        let first = &list[0];
+        assert_eq!(first["pid"], json!(4242));
+        assert_eq!(first["product"], json!("IntelliJ IDEA"));
+        assert_eq!(first["path"], json!("/opt/idea/bin/idea64.exe"));
+        assert!(first["reason"].is_string());
+    }
+
+    /// 失败诊断必须含关键字段（配置根 / 目标与插件命中 / 运行实例与映射来源）。
+    #[test]
+    fn failure_context_contains_key_diagnostic_fields() {
+        let targets = vec![
+            make_target("PyCharm2026.3"),
+            Target {
+                config_dir: PathBuf::from("/tmp/IntelliJIdea2026.3"),
+                name: "IntelliJIdea2026.3".to_string(),
+                plugin_installed: false,
+            },
+        ];
+        let running = vec![running_instance(None)];
+        let text = failure_context(&targets, &running);
+        for expected in [
+            "configRoot=",
+            "target=PyCharm2026.3 pluginInstalled=true",
+            "target=IntelliJIdea2026.3 pluginInstalled=false",
+            "running pid=4242 mappingSource=unmapped configDir=(未映射)",
+            "note=product-info.json 不存在",
+        ] {
+            assert!(text.contains(expected), "诊断缺少 {expected}：\n{text}");
+        }
+    }
+
+    /// 「已识别 N 个 IDE：A、B」必须出现在失败提示里（区分没识别到 / 操作错了）。
+    #[test]
+    fn describe_detected_reports_count_and_names() {
+        let targets = vec![make_target("PyCharm2026.3")];
+        let text = describe_detected(&targets);
+        assert!(text.contains("已识别 1 个"), "{text}");
+        assert!(text.contains("PyCharm2026.3"), "{text}");
+        assert!(text.contains("已装插件"), "{text}");
+
+        let empty = describe_detected(&[]);
+        assert!(empty.contains("已识别 0 个"), "{empty}");
+        assert!(empty.contains("配置根"), "{empty}");
+    }
+
     #[test]
     fn xml_escape_and_unescape_round_trip() {
         let raw = "a&b<c>\"d\"'e'f\n\tg";
@@ -142,14 +416,14 @@
             std::env::temp_dir().join(format!("workbuddy-shift-jb-info-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(data_dir_name_for_install_root(&dir), None);
+        assert_eq!(read_product_info(&dir).data_dir_name, None);
         std::fs::write(
             dir.join("product-info.json"),
             r#"{"name":"IntelliJ IDEA","version":"2026.2.1","dataDirectoryName":"IntelliJIdea2026.2"}"#,
         )
         .unwrap();
         assert_eq!(
-            data_dir_name_for_install_root(&dir).as_deref(),
+            read_product_info(&dir).data_dir_name.as_deref(),
             Some("IntelliJIdea2026.2")
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -208,4 +482,208 @@
 
         let missing = vec!["PyCharm2020.1".to_string()];
         assert!(filter_targets_by_selection(all, Some(&missing)).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 关闭结论 / 回滚：不允许留下「IDE 被关了但盘没写、也没开回来」的状态
+    // -----------------------------------------------------------------------
+
+    fn instance(pid: u32, launch_target: Option<&str>) -> RunningIde {
+        RunningIde {
+            pid,
+            launch_target: launch_target.map(PathBuf::from),
+            config_dir_name: Some("PyCharm2026.3".to_string()),
+            mapping_source: MappingSource::ProductInfo,
+            product_name: Some("PyCharm".to_string()),
+            version: Some("2026.3".to_string()),
+            mapping_note: None,
+        }
+    }
+
+    /// 关闭结论必须把「已关掉」与「超时仍存活」切分干净：回滚只重开自己关掉的。
+    #[test]
+    fn close_report_partitions_closed_and_alive_instances() {
+        let instances = vec![instance(1, Some("/opt/idea/bin/idea64")), instance(2, None)];
+
+        let all_closed = CloseReport::from_alive(&instances, Vec::new());
+        assert!(all_closed.is_complete());
+        assert_eq!(all_closed.closed.len(), 2);
+        assert!(all_closed.alive.is_empty());
+
+        // 2 号没退出：只有 1 号算「我们关掉的」。
+        let partial = CloseReport::from_alive(&instances, vec![2]);
+        assert!(!partial.is_complete());
+        assert_eq!(partial.alive, vec![2]);
+        assert_eq!(partial.closed.len(), 1);
+        assert_eq!(partial.closed[0].pid, 1, "只回滚确实退出的实例");
+
+        // 空输入：什么都不关，也不算失败。
+        let empty = CloseReport::from_alive(&[], Vec::new());
+        assert!(empty.is_complete());
+        assert!(empty.closed.is_empty());
+    }
+
+    /// 关闭超时：错误文案保留原始原因，并把已关闭的实例开回来（不留半开状态）。
+    #[test]
+    fn partial_close_error_relaunches_the_instances_it_closed() {
+        // 路径不存在 → `launch_ide` 立刻失败（不会真的起进程），拿到的是可见错误。
+        let closed = instance(1, Some("/nonexistent/workbuddy-shift/idea64"));
+        let report = CloseReport {
+            closed: vec![closed],
+            alive: vec![7],
+        };
+        let text = partial_close_error(&report);
+        assert!(text.contains("超时"), "必须保留原始原因：{text}");
+        assert!(text.contains('7'), "必须列出未退出的 PID：{text}");
+        assert!(
+            text.contains("重新打开"),
+            "必须说明已尝试把关掉的 IDE 开回来：{text}"
+        );
+        assert!(text.contains("请手动打开"), "重开失败要给出下一步：{text}");
+
+        // 没有关掉任何实例时不要凭空说「已重新打开」。
+        let nothing_closed = CloseReport {
+            closed: Vec::new(),
+            alive: vec![7],
+        };
+        let text = partial_close_error(&nothing_closed);
+        assert!(!text.contains("已重新打开"), "没关过就别说开回来了：{text}");
+    }
+
+    /// 多目标写入中途失败 → 已写过的目标恢复成写入前的值（不论原来有没有登录态）。
+    #[test]
+    fn rollback_restores_previous_secret_and_removes_created_entry() {
+        let base =
+            std::env::temp_dir().join(format!("workbuddy-shift-jb-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let logged_in = base.join("PyCharm2026.3");
+        let fresh = base.join("IntelliJIdea2026.3");
+        std::fs::create_dir_all(logged_in.join("options")).unwrap();
+        std::fs::create_dir_all(fresh.join("options")).unwrap();
+
+        // 目标 1 原本已登录（原值要能还原）；目标 2 原本没有登录态（要删干净）。
+        write_secret_for(&logged_in, "original-token").unwrap();
+        write_secret_for(&logged_in, "switched-token").unwrap();
+        write_secret_for(&fresh, "switched-token").unwrap();
+
+        let applied = vec![
+            (logged_in.clone(), Some("original-token".to_string())),
+            (fresh.clone(), None),
+        ];
+        let errors = rollback_writes(&applied);
+        assert!(errors.is_empty(), "回滚不应报错：{errors:?}");
+        assert_eq!(
+            read_secret_for(&logged_in).unwrap().as_deref(),
+            Some("original-token")
+        );
+        assert_eq!(
+            read_secret_for(&fresh).unwrap(),
+            None,
+            "写入前没有登录态的目标必须回到「未登录」"
+        );
+        assert!(
+            !secret_path_for(&fresh).exists(),
+            "只剩空表时连文件一起删，不留空壳"
+        );
+
+        // 回滚文案：成功 / 失败两种口径都要能看懂。
+        assert!(join_with_rollback("写入失败".to_string(), 2, Vec::new())
+            .contains("已回滚本次写入的 2 个目标"));
+        let failed = join_with_rollback(
+            "写入失败".to_string(),
+            2,
+            vec!["PyCharm2026.3: 权限不足".to_string()],
+        );
+        assert!(failed.contains("回滚失败"), "{failed}");
+        assert!(failed.contains("PyCharm2026.3"), "{failed}");
+        assert_eq!(
+            join_with_rollback("写入失败".to_string(), 0, Vec::new()),
+            "写入失败",
+            "一个都没写时不该追加回滚说明"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 失败日志的内容口径：标题固定、摘要与现场缺一不可（第 16 条 16.4 P1#6）。
+    #[test]
+    fn failure_log_detail_carries_summary_error_and_scene() {
+        let targets = vec![make_target("PyCharm2026.3")];
+        let summary = describe_detected(&targets);
+        let scene = failure_context(&targets, &[]);
+        let text = failure_log_detail(&summary, "账号缺少 access_token", &scene);
+
+        assert_eq!(FAILURE_LOG_TITLE, "JetBrains IDE 切换失败");
+        assert!(text.contains("已识别 1 个"), "日志必须带摘要：{text}");
+        assert!(
+            text.contains("错误：账号缺少 access_token"),
+            "日志必须带错误原文：{text}"
+        );
+        assert!(text.contains("configRoot="), "日志必须带现场：{text}");
+        assert!(
+            text.contains("target=PyCharm2026.3 pluginInstalled=true"),
+            "日志必须带目标与插件命中：{text}"
+        );
+    }
+
+    /// 没有可切换目标时，诊断必须能回答「是没装插件还是目录名没被识别」。
+    #[test]
+    fn scan_config_root_reports_every_dir_with_reasons() {
+        let root = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-scan-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        // 受支持 + 装插件 + 有登录文件（2026.3 EAP 形态）。
+        std::fs::create_dir_all(root.join("IntelliJIdea2026.3-eap/plugins/Tencent-Cloud.coding-copilot"))
+            .unwrap();
+        std::fs::create_dir_all(root.join("IntelliJIdea2026.3-eap/options")).unwrap();
+        std::fs::write(root.join("IntelliJIdea2026.3-eap/options/secret-storage.xml"), "").unwrap();
+        // 受支持但没装插件。
+        std::fs::create_dir_all(root.join("PyCharm2026.3")).unwrap();
+        // 迁移残留：目录名不支持。
+        std::fs::create_dir_all(root.join("PyCharm2026.2-backup/plugins/coding-copilot-jetbrains"))
+            .unwrap();
+        // 与 IDE 无关的系统目录。
+        std::fs::create_dir_all(root.join("consentOptions")).unwrap();
+
+        let scans = scan_config_root(&root);
+        let by_name = |name: &str| {
+            scans
+                .iter()
+                .find(|scan| scan.name == name)
+                .unwrap_or_else(|| panic!("{name} 必须出现在诊断清单里：{scans:?}"))
+        };
+
+        let eap = by_name("IntelliJIdea2026.3-eap");
+        assert!(eap.accepted, "EAP 目录必须被接受");
+        assert_eq!(eap.plugin_dirs, vec!["Tencent-Cloud.coding-copilot"]);
+        assert!(eap.has_secret_file);
+        let json = eap.to_json();
+        assert_eq!(json["pluginInstalled"], json!(true));
+        assert_eq!(json["hasSecretFile"], json!(true));
+
+        let plain = by_name("PyCharm2026.3");
+        assert!(plain.accepted);
+        assert!(plain.plugin_dirs.is_empty());
+        assert!(!plain.has_secret_file);
+
+        let backup = by_name("PyCharm2026.2-backup");
+        assert!(!backup.accepted, "迁移残留目录必须标为不支持");
+        assert_eq!(
+            backup.to_json()["pluginInstalled"],
+            json!(true),
+            "诊断要如实说明「装了插件但目录名不被接受」"
+        );
+
+        let noise = by_name("consentOptions");
+        assert!(!noise.accepted);
+
+        // 清单按名字排序，诊断输出稳定（便于用户截图对照）。
+        let names: Vec<&str> = scans.iter().map(|scan| scan.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+
+        let _ = std::fs::remove_dir_all(&root);
     }

@@ -98,11 +98,11 @@ export function syncSessionGroupPair(args: {
 }
 
 export function syncSessionGroupUnify(args: {
-  client: "workbuddy" | "vscodeExt";
+  client: SessionGroupClient;
   groupId: string;
   sourceMemberId: string;
   targets: { targetMemberId: string; previewToken: string; mode: SessionSyncMode }[];
-  /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开 VS Code。 */
+  /** 已获用户授权（确认框）时传 `true`：插件侧运行中允许关闭并重开宿主（VS Code / JetBrains IDE）。 */
   restart?: boolean;
 }): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));

@@ -1,5 +1,5 @@
 import { Ellipsis, Folder, MessageCircle, Trash2 } from "lucide-react";
-import { CodeBuddyCnIdeMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
+import { CodeBuddyCnIdeMark, JetbrainsMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -14,6 +14,7 @@ import type {
 export function ClientMark({ client, variantScope }: { client: SessionGroupClient; variantScope?: WbVariant }) {
   if (client === "workbuddy") return variantScope === "ai" ? <WorkBuddyAiMark size={34} /> : <WorkBuddyMark size={34} />;
   if (client === "codebuddyIde") return <CodeBuddyCnIdeMark size={34} />;
+  if (client === "jetbrains") return <JetbrainsMark size={34} className="text-foreground" />;
   return <VscodeExtMark size={34} className="text-foreground" />;
 }
 

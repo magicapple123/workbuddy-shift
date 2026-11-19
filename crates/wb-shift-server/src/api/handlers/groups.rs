@@ -217,6 +217,19 @@ pub(crate) async fn api_vscode_restart_precheck(
     ))
 }
 
+/// JetBrains 侧的运行中预检（与 VS Code 版同形，供前端复用同一套确认框）。
+pub(crate) async fn api_jetbrains_restart_precheck(
+    body: Result<Json<JetbrainsRestartPrecheckRequest>, JsonRejection>,
+) -> Response {
+    let request = match parse_body(body) {
+        Ok(request) => request,
+        Err(rejection) => return invalid_body(rejection),
+    };
+    json_ok(session_groups::jetbrains_restart_precheck(
+        &request.target_account_ids,
+    ))
+}
+
 /// 取消关联：只解除管理关系，不触碰账号内的会话内容。
 pub(crate) async fn api_unlink_session_group_member(
     body: Result<Json<SessionGroupUnlinkRequest>, JsonRejection>,

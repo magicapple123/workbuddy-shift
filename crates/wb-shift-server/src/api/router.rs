@@ -63,6 +63,10 @@ pub fn router(state: SharedState) -> Router {
             post(api_vscode_restart_precheck),
         )
         .route(
+            "/api/jetbrains/restart-precheck",
+            post(api_jetbrains_restart_precheck),
+        )
+        .route(
             "/api/vscode-ext/session-links",
             post(api_vscode_ext_session_links_preview),
         )

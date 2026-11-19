@@ -66,7 +66,7 @@
     fn settle_editor_window_reports_restart_only_when_closed_here() {
         // 未关过（本来没运行或关闭前已退出）：不加字段、不调用重开。
         let report = settle_editor_window(
-            Some(VscodeEditorGuard { relaunch: None }),
+            Some(EditorGuard::Vscode(VscodeEditorGuard { relaunch: None })),
             Ok(json!({ "errors": [] })),
         )
         .unwrap();
@@ -75,9 +75,9 @@
 
         // 本次关过且重开成功：restartedEditor = true。
         let report = settle_editor_window(
-            Some(VscodeEditorGuard {
+            Some(EditorGuard::Vscode(VscodeEditorGuard {
                 relaunch: Some(Box::new(|| Ok(()))),
-            }),
+            })),
             Ok(json!({ "errors": [] })),
         )
         .unwrap();
@@ -88,9 +88,9 @@
     fn settle_editor_window_degrades_restart_failure_without_failing_operation() {
         // 重开失败：操作仍返回 Ok，失败信息进 errors[]（不能只报成功）。
         let report = settle_editor_window(
-            Some(VscodeEditorGuard {
+            Some(EditorGuard::Vscode(VscodeEditorGuard {
                 relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
-            }),
+            })),
             Ok(json!({ "errors": [] })),
         )
         .unwrap();
@@ -103,9 +103,9 @@
 
         // 没有 errors 数组（add_member 形态）：失败信息挂顶层 editorError。
         let report = settle_editor_window(
-            Some(VscodeEditorGuard {
+            Some(EditorGuard::Vscode(VscodeEditorGuard {
                 relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
-            }),
+            })),
             Ok(json!({ "status": "linked" })),
         )
         .unwrap();
@@ -120,9 +120,9 @@
     fn settle_editor_window_relaunches_on_failure_and_keeps_original_error() {
         // 操作失败：必须 best-effort 重开，原错误保留。
         let error = settle_editor_window(
-            Some(VscodeEditorGuard {
+            Some(EditorGuard::Vscode(VscodeEditorGuard {
                 relaunch: Some(Box::new(|| Ok(()))),
-            }),
+            })),
             Err("同步失败".to_string()),
         )
         .unwrap_err();
@@ -130,9 +130,9 @@
 
         // 重开也失败：两条信息都要给用户（他不知道编辑器还关着，也不知道为什么）。
         let error = settle_editor_window(
-            Some(VscodeEditorGuard {
+            Some(EditorGuard::Vscode(VscodeEditorGuard {
                 relaunch: Some(Box::new(|| Err("open 超时".to_string()))),
-            }),
+            })),
             Err("同步失败".to_string()),
         )
         .unwrap_err();

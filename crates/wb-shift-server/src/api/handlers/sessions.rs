@@ -38,23 +38,9 @@ pub(crate) async fn api_account_sessions(RawQuery(query): RawQuery) -> Response 
         Ok(client) => client,
         Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
     };
-    match client {
-        session_groups::SessionClient::VscodeExt => {
-            let Some(uid) = account::get_str(&account, "uid")
-                .map(|uid| uid.trim().to_string())
-                .filter(|uid| !uid.is_empty())
-            else {
-                return json_err("账号缺少 uid".to_string(), StatusCode::BAD_REQUEST);
-            };
-            json_ok(vscode_session::list_vscode_sessions(&uid))
-        }
-        session_groups::SessionClient::Workbuddy => {
-            json_ok(session::list_sessions_for_account(&account))
-        }
-        session_groups::SessionClient::CodebuddyIde => json_err(
-            "当前客户端暂不支持列出账号会话".to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
+    match session_groups::list_account_sessions(client, &account) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
 

@@ -9,14 +9,19 @@ import type { SessionGroupClient, SessionGroupPruneReport } from "@/lib/types";
  */
 
 /**
- * 批量清理在三个客户端都提供（WorkBuddy / VS Code 插件 / CodeBuddy IDE）。
+ * 批量清理在四个客户端都提供（WorkBuddy / VS Code 插件 / CodeBuddy IDE / JetBrains 插件）。
  *
- * 三者的「会话行」判定依据不同（`sessions` 表 vs 工作区索引），但都在后端按客户端分派：
+ * 各自的「会话行」判定依据不同（`sessions` 表 vs 工作区索引），但都在后端按客户端分派：
  * 索引可读时正常统计与删除，读不到时后端会**拒绝整次清理**并把「哪个账号、为什么判不了」
  * 放进错误文案（页面原样透传，见 `pruneFailureDescription`）。
  */
 export function supportsPrune(client: SessionGroupClient): boolean {
-  return client === "workbuddy" || client === "vscodeExt" || client === "codebuddyIde";
+  return (
+    client === "workbuddy" ||
+    client === "vscodeExt" ||
+    client === "codebuddyIde" ||
+    client === "jetbrains"
+  );
 }
 
 /**

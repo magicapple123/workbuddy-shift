@@ -55,7 +55,7 @@ pub fn prune_dead_groups(
     // 直接给出可读原因（不写盘、不备份）。
     let index_root = match client {
         SessionClient::Workbuddy => None,
-        SessionClient::VscodeExt | SessionClient::CodebuddyIde => Some(
+        SessionClient::VscodeExt | SessionClient::CodebuddyIde | SessionClient::Jetbrains => Some(
             client
                 .data_root()
                 .ok_or_else(|| prune_unsupported_reason(client))?,

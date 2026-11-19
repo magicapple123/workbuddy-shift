@@ -6,6 +6,12 @@ use super::*;
 ///
 /// 供 `add_member`（往已有组加成员）与 `copy_linked_sessions`（从零复制并建组）共用；
 /// 只做复制与登记，不做运行门禁与收尾——生命周期窗口由调用方负责。
+///
+/// `spec` 决定复制与登记落在哪棵同构会话树上（VS Code 插件 / JetBrains 插件），
+/// 两处都必须用它，否则会「复制到 JetBrains 目录、登记到 VS Code 表」。
+///
+/// 复制策略沿用 [`vscode_session::VSCODE_COPY`]（一律新 id + 同步写工作区索引备份）：
+/// 用户决策「复制一律新 id」对两个插件型客户端一致——复制体必须与源会话区分。
 pub(super) fn plugin_copy_and_register(
     spec: SessionStoreSpec,
     root: &Path,
@@ -19,14 +25,17 @@ pub(super) fn plugin_copy_and_register(
         .backup_root()
         .join(spec.backup_kind)
         .join(config::utc_iso());
-    let report =
-        vscode_session::copy_sessions_in(root, &backup_root, source_uid, target_uid, items)?;
-    let link_errors = vscode_session_sync::register_copied_sessions_in(
-        VSCODE_STORE,
+    let report = vscode_session::copy_sessions_in_with(
+        spec,
+        vscode_session::VSCODE_COPY,
         root,
-        paths,
-        variant,
-        &report,
+        &backup_root,
+        source_uid,
+        target_uid,
+        items,
+    )?;
+    let link_errors = vscode_session_sync::register_copied_sessions_in(
+        spec, root, paths, variant, &report,
     );
     Ok((report, link_errors))
 }
@@ -111,7 +120,7 @@ pub fn add_member(
                 "report": report,
             }))
         }
-        SessionClient::CodebuddyIde | SessionClient::VscodeExt => {
+        SessionClient::CodebuddyIde | SessionClient::VscodeExt | SessionClient::Jetbrains => {
             let variant = scope.unwrap_or_else(|| account::variant_of(&target));
             let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
             // Recheck under the operation lock: the underlying IDE/plugin copy kernels are not idempotent.
@@ -167,12 +176,8 @@ pub fn add_member(
                 conversation_id: source.session_id.clone(),
             };
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
-            let guard = prepare_editor_window(
-                client,
-                restart,
-                VSCODE_ADD_MEMBER_RUNNING_HINT,
-                &[target_uid.as_str()],
-            )?;
+            let guard =
+                prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
             let result = (|| -> Result<Value, String> {
                 let (report, link_errors) = match client {
                     SessionClient::CodebuddyIde => {
@@ -192,7 +197,7 @@ pub fn add_member(
                         );
                         (report, link_errors)
                     }
-                    SessionClient::VscodeExt => plugin_copy_and_register(
+                    SessionClient::VscodeExt | SessionClient::Jetbrains => plugin_copy_and_register(
                         spec,
                         &root,
                         &paths,
@@ -232,8 +237,9 @@ pub fn add_member(
 
 /// 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
 ///
-/// 仅 `VscodeExt` 支持（其他客户端尚未接入该入口）；运行门禁与「确认后关闭重开」沿用插件侧
-/// 统一生命周期：全部校验通过后才关闭编辑器，失败路径尽力开回。
+/// 支持 VS Code 插件与 JetBrains 插件（CodeBuddy IDE 走 `add_member` 的加成员路径，
+/// WorkBuddy 走 `copySessionsCross`）。运行门禁与「确认后关闭重开」沿用插件侧统一
+/// 生命周期：全部校验通过后才关闭宿主，失败路径尽力开回。
 pub fn copy_linked_sessions(
     client: SessionClient,
     source_account_id: &str,
@@ -241,7 +247,7 @@ pub fn copy_linked_sessions(
     session_ids: &[String],
     restart: bool,
 ) -> Result<Value, String> {
-    if client != SessionClient::VscodeExt {
+    if !client.is_editor_plugin() {
         return Err("当前客户端暂不支持新增关联会话".to_string());
     }
     if session_ids.is_empty() {
@@ -273,9 +279,10 @@ pub fn copy_linked_sessions(
     if source_uid == target_uid {
         return Err("来源账号与目标账号相同，无需复制会话".to_string());
     }
-    let root = client
-        .data_root()
-        .ok_or_else(|| "未找到 VS Code CodeBuddy 插件数据目录".to_string())?;
+    let root = client.data_root().ok_or_else(|| match client {
+        SessionClient::Jetbrains => "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string(),
+        _ => "未找到 VS Code CodeBuddy 插件数据目录".to_string(),
+    })?;
     let spec = client
         .store_spec()
         .ok_or_else(|| "插件数据仓不可用".to_string())?;
@@ -309,12 +316,7 @@ pub fn copy_linked_sessions(
         return Err("勾选的会话都没有可复制的内容".to_string());
     }
     let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
-    let guard = prepare_editor_window(
-        client,
-        restart,
-        VSCODE_ADD_MEMBER_RUNNING_HINT,
-        &[target_uid.as_str()],
-    )?;
+    let guard = prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
     let result = (|| -> Result<Value, String> {
         let (report, link_errors) = plugin_copy_and_register(
             spec,
@@ -450,6 +452,32 @@ pub(super) fn delete_group_in(
         .ok_or_else(|| "会话关联组不存在或不属于当前客户端".to_string())?;
     store.groups.retain(|group| group.id != group_id);
     Ok(removed)
+}
+
+/// 列出某账号在指定客户端下的可复制会话（两个宿主共用同一份实现）。
+///
+/// 三个客户端的数据来源完全不同（数据库 / VS Code 插件仓 / JetBrains 插件仓），但形状一致：
+/// `{ sourceUid, sessions: [...], skipped, dataRoot }`。CodeBuddy IDE 尚未接入该入口。
+pub fn list_account_sessions(client: SessionClient, account: &Value) -> Result<Value, String> {
+    let uid = account::get_str(account, "uid")
+        .map(|uid| uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| "账号缺少 uid".to_string())?;
+    match client {
+        SessionClient::Workbuddy => Ok(session::list_sessions_for_account(account)),
+        SessionClient::VscodeExt => Ok(vscode_session::list_vscode_sessions(&uid)),
+        SessionClient::Jetbrains => {
+            let root = client
+                .data_root()
+                .ok_or_else(|| "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string())?;
+            Ok(vscode_session::list_sessions_in_store(
+                JETBRAINS_STORE,
+                &root,
+                &uid,
+            ))
+        }
+        SessionClient::CodebuddyIde => Err("当前客户端暂不支持列出账号会话".to_string()),
+    }
 }
 
 pub(super) fn compatible_accounts(

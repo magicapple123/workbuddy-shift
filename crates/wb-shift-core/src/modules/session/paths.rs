@@ -22,6 +22,8 @@ pub enum LinkNamespace {
     VscodeExt,
     /// CodeBuddy IDE（国内版桌面客户端）的会话（独立文件名与目录）。
     CodeBuddyIde,
+    /// JetBrains IDE（IDEA / PyCharm）CodeBuddy 插件的会话（独立文件名与目录）。
+    Jetbrains,
 }
 
 /// 会话操作涉及的路径集合：工具存储根（`~/.workbuddy-shift`）与档位数据根。
@@ -88,6 +90,24 @@ impl SessionPaths {
         }
     }
 
+    /// JetBrains IDE（IDEA / PyCharm）CodeBuddy 插件的关联存储路径。
+    ///
+    /// 与 [`Self::for_vscode_ext`] 同构：只用到 `store_root`，插件的会话文件由调用方按
+    /// 数据根（`.../Data/<uid>/JetBrains/<uid>/history`）另行解析。
+    pub fn for_jetbrains() -> Self {
+        Self::for_jetbrains_at(store_dir())
+    }
+
+    /// [`Self::for_jetbrains`] 的可测实现：显式传入工具存储根。
+    pub fn for_jetbrains_at(store_root: PathBuf) -> Self {
+        Self {
+            store_root,
+            data_root: PathBuf::new(),
+            auth_file: PathBuf::new(),
+            link_namespace: LinkNamespace::Jetbrains,
+        }
+    }
+
     pub fn workbuddy_db(&self) -> PathBuf {
         self.data_root.join("workbuddy.db")
     }
@@ -104,12 +124,13 @@ impl SessionPaths {
         self.store_root.join("backups")
     }
 
-    /// 关联组主表：三个目标各一份，互不可见（design §2）。
+    /// 关联组主表：四个目标各一份，互不可见（design §2）。
     pub fn session_links_file(&self) -> PathBuf {
         match self.link_namespace {
             LinkNamespace::WorkBuddy => self.store_root.join("session_links.json"),
             LinkNamespace::VscodeExt => self.store_root.join("vscode_session_links.json"),
             LinkNamespace::CodeBuddyIde => self.store_root.join("codebuddy_ide_session_links.json"),
+            LinkNamespace::Jetbrains => self.store_root.join("jetbrains_session_links.json"),
         }
     }
 
@@ -119,6 +140,7 @@ impl SessionPaths {
             LinkNamespace::WorkBuddy => self.store_root.join("session-links"),
             LinkNamespace::VscodeExt => self.store_root.join("vscode-session-links"),
             LinkNamespace::CodeBuddyIde => self.store_root.join("codebuddy-ide-session-links"),
+            LinkNamespace::Jetbrains => self.store_root.join("jetbrains-session-links"),
         }
     }
 
@@ -152,6 +174,7 @@ impl SessionPaths {
             LinkNamespace::WorkBuddy => "workbuddy",
             LinkNamespace::VscodeExt => "vscode-ext",
             LinkNamespace::CodeBuddyIde => "codebuddy-ide",
+            LinkNamespace::Jetbrains => "jetbrains",
         };
         self.locks_dir().join(format!("session-client-{name}.lock"))
     }
@@ -164,6 +187,7 @@ impl SessionPaths {
             LinkNamespace::CodeBuddyIde => {
                 self.locks_dir().join("codebuddy-ide-session-links.lock")
             }
+            LinkNamespace::Jetbrains => self.locks_dir().join("jetbrains-session-links.lock"),
         }
     }
 }

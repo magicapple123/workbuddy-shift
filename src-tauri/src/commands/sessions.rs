@@ -5,7 +5,7 @@
 use serde_json::json;
 use serde_json::Value;
 use wb_shift_core::modules::variant::WbVariant;
-use wb_shift_core::modules::{account, session, session_groups, vscode_session};
+use wb_shift_core::modules::{account, session, session_groups};
 
 /// GET /api/sessions —— 当前账号的会话列表（`variant` 缺省国内版）。
 #[tauri::command]
@@ -22,28 +22,16 @@ pub fn list_sessions(variant: Option<String>) -> Value {
 
 /// GET /api/sessions/account —— 指定账号名下的会话列表（会话管理页源账号视角）。
 ///
-/// `client` 缺省 workbuddy（读 WorkBuddy 数据库）；`vscodeExt` 改读插件数据仓。
+/// `client` 缺省 workbuddy（读 WorkBuddy 数据库）；`vscodeExt` / `jetbrains` 改读各自插件的
+/// 会话数据仓（两棵树同构，只有客户端段目录名不同）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_account_sessions(account_id: String, client: Option<String>) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
     let account = account::find_account(&account_id).ok_or("账号不存在")?;
-    match session_groups::SessionClient::parse(client.as_deref().unwrap_or("workbuddy"))? {
-        session_groups::SessionClient::VscodeExt => {
-            let uid = account::get_str(&account, "uid")
-                .map(|uid| uid.trim().to_string())
-                .filter(|uid| !uid.is_empty())
-                .ok_or("账号缺少 uid")?;
-            Ok(vscode_session::list_vscode_sessions(&uid))
-        }
-        session_groups::SessionClient::Workbuddy => {
-            Ok(session::list_sessions_for_account(&account))
-        }
-        session_groups::SessionClient::CodebuddyIde => {
-            Err("当前客户端暂不支持列出账号会话".to_string())
-        }
-    }
+    let client = session_groups::SessionClient::parse(client.as_deref().unwrap_or("workbuddy"))?;
+    session_groups::list_account_sessions(client, &account)
 }
 
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B）。
