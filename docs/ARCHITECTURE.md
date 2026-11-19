@@ -350,13 +350,13 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `src-tauri/src/update_service/mod.rs` | 553 | 更新状态机 | 检查（single-flight + 20s 预算）、阶段流转入口与单测共用同一份进程级状态（快照 / BUSY / 上次检查结果）；测试必须与状态机同文件才能复用 `TEST_LOCK` 串行化，拆开会引入跨文件竞态。 | 下一轮把检查编排抽 `update_service/check.rs`，测试随之迁移。 |
 | `src/pages/settings/settings-sync-card.tsx` | 788 | 页面卡片 | 设置同步的预览/二次确认/备份还原/未登录账号出口共用同一份 `plan` 与 `config` 状态；拆成多个子组件会把「当前选中备份」「待确认计划」跨文件传递。第四轮补 3 个 P0 与还原入口后超过阈值。 | 下一轮把「备份列表 + 还原对话框」抽到 `settings/settings-backup-section.tsx`，主卡片只保留状态与动作。 |
 
-| `crates/wb-shift-core/src/modules/limits/vscode_ext.rs` | 509 | 探针 | VS Code 插件日志的增量采样（偏移/大小/mtime、强信号、脱敏样本）与四个单测共用同一组信号判定；拆开会让「什么算限额」出现第二份定义。 | 保持单文件；若接入正式 ScanSource，把解析抽到 limits/parse/vscode.rs。 |
+| `crates/wb-shift-core/src/modules/limits/vscode_ext.rs` | 533 | 探针 | VS Code 插件日志的增量采样（偏移/大小/mtime、强信号、脱敏样本）与四个单测共用同一组信号判定；拆开会让「什么算限额」出现第二份定义。 | 保持单文件；若接入正式 ScanSource，把解析抽到 limits/parse/vscode.rs。 |
 | `crates/wb-shift-core/src/modules/settings_sync/apply.rs` | 704 | 同步执行 | 预览/应用/二次确认/备份/还原共用同一份 merge 结果与备份命名（stamp）；拆开会让「预览承诺」与「实际写入」跨文件传递。 | 下一轮把备份列表与还原抽到 settings_sync/backup.rs。 |
 | `crates/wb-shift-core/src/modules/settings_sync/tests.rs` | 560 | 测试 | 三个 P0（自动同步写状态、纯 revision 过滤、工作区配置计数）与还原/二次确认用例共用同一套临时目录夹具。 | 保留；继续膨胀时按「预览」「应用」「还原」拆三组。 |
 | `crates/wb-shift-core/src/modules/token_stats/tests/ide_roots.rs` | 573 | 测试 | IDE 目录布局（含按客户端拆 source）与副本并集去重用例共用造数函数。 | 保留；膨胀时按「客户端拆分」「副本并集」拆两组。 |
 | `crates/wb-shift-core/src/modules/vscode_session/copy.rs` | 571 | 复制 | JetBrains 复制要同时处理 projectKey / bucket / 会话 id 三层路径，且与 VS Code 分支共享同一套索引重写；拆开会让两条路径的校验分叉。 | 下一轮把 JetBrains 路径解析抽到 vscode_session/jetbrains_paths.rs。 |
 | `src/pages/credit-stats/data.ts` | 586 | 纯逻辑 | 档位过滤、客户端筛选（明细重算）、账本形状转换三套口径都在这里收敛，页面只调用；拆开会让同一口径出现多份实现。 | 下一轮把账本转换抽到 credit-stats/ledger-view.ts。 |
-| `src/pages/credit-stats/index.tsx` | 635 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
+| `src/pages/credit-stats/index.tsx` | 636 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
 
 > 该表由 `node scripts/check-structure.mjs` **双向校验**：未登记的 >500 行文件、行数与实际不符、
 > 已缩小到 500 行以内但条目未删，都会让 CI 失败。新增文件必须先拆分，或按同一格式登记理由与计划。
