@@ -79,5 +79,6 @@ export function formatFullDateTime(
 /** 数量展示：千分位 + 最多两位小数；非有限值返回占位符。 */
 export function formatAmount(value: number | null | undefined, fallback = EMPTY_TEXT): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+  // `-0` 会在 Intl 里渲染成「-0」（快照差值算出来的负数零），统一归一成 0。
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value === 0 ? 0 : value);
 }

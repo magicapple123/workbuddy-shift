@@ -54,6 +54,7 @@ describe("format", () => {
   it("formatAmount 千分位 + 最多两位小数，非有限值回退占位符", () => {
     expect(formatAmount(1234567.891)).toBe("1,234,567.89");
     expect(formatAmount(1)).toBe("1");
+    expect(formatAmount(-0)).toBe("0");
     expect(formatAmount(Number.NaN)).toBe(EMPTY_TEXT);
     expect(formatAmount(null, "无")).toBe("无");
   });
