@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
+import { ExportMenu } from "@/components/export-menu";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -227,32 +228,26 @@ export default function TokenStatsPage() {
               查看请求明细
             </Button>
           )}
-          <DemoAction>
-            <Button
-              className="shrink-0"
-              variant="outline"
-              size="sm"
-              onClick={() => void exportCsv()}
-              disabled={!filteredSource}
-              title={filteredSource ? "导出当前数据源 + 当前账号的 CSV" : "没有可导出的数据"}
-            >
-              <Download />
-              导出 CSV
-            </Button>
-          </DemoAction>
-          <DemoAction>
-            <Button
-              className="shrink-0"
-              variant="outline"
-              size="sm"
-              onClick={() => void exportXlsx()}
-              disabled={!filteredSource}
-              title={filteredSource ? "导出当前数据源 + 当前账号的 Excel（xlsx）" : "没有可导出的数据"}
-            >
-              <FileSpreadsheet />
-              导出 Excel
-            </Button>
-          </DemoAction>
+          <ExportMenu
+            disabled={!filteredSource}
+            title={filteredSource ? "导出当前数据源 + 当前账号" : "没有可导出的数据"}
+            items={[
+              {
+                key: "csv",
+                label: "CSV",
+                description: "分段明细，UTF-8 BOM，Excel 可直接打开",
+                icon: <Download className="size-3.5" />,
+                onSelect: () => void exportCsv(),
+              },
+              {
+                key: "xlsx",
+                label: "Excel（xlsx）",
+                description: "多个 sheet，数字可求和",
+                icon: <FileSpreadsheet className="size-3.5" />,
+                onSelect: () => void exportXlsx(),
+              },
+            ]}
+          />
           <DemoAction>
             <Button
               className="shrink-0"
