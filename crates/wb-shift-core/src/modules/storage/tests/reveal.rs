@@ -33,7 +33,7 @@ fn compat_no_scope_is_identical_to_explicit_storage_scope() {
     assert_eq!(legacy.path, explicit.path, "不传 scope 必须与 storage 同路径");
     assert_eq!(legacy.path, inside);
     assert_eq!(legacy.fell_back, explicit.fell_back);
-    assert_eq!(legacy.fell_back, false);
+    assert!(!legacy.fell_back);
     assert_eq!(legacy.mode, explicit.mode);
     assert_eq!(legacy.mode, "open");
     assert_eq!(legacy.scope, SCOPE_STORAGE);

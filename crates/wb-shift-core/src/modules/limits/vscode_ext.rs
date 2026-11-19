@@ -103,7 +103,7 @@ pub(crate) fn probe_roots(roots: &[PathBuf], now: i64) -> Value {
         collect_log_files(root, 0, now, &mut files);
     }
     // 新的先看：探测只是为了取证，不追求全量。
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|item| std::cmp::Reverse(item.0));
     files.truncate(MAX_FILES);
 
     let mut scanned = 0usize;
@@ -204,7 +204,7 @@ mod tests {
         )
         .expect("写日志");
 
-        let value = probe_roots(&[root.clone()], now_ms());
+        let value = probe_roots(std::slice::from_ref(&root), now_ms());
         assert_eq!(value["supported"], json!(false));
         assert_eq!(value["markerHits"], json!(0));
         assert_eq!(value["scannedFiles"], json!(1));
@@ -224,7 +224,7 @@ mod tests {
         )
         .expect("写日志");
 
-        let value = probe_roots(&[root.clone()], now_ms());
+        let value = probe_roots(std::slice::from_ref(&root), now_ms());
         assert_eq!(value["supported"], json!(true));
         assert_eq!(value["markerHits"], json!(1));
 
@@ -240,7 +240,7 @@ mod tests {
         std::fs::write(&path, "超出频率限制\n").expect("写日志");
 
         // now 往前推 10 天：窗口（2 天）之外的文件不参与探测。
-        let value = probe_roots(&[root.clone()], now_ms() + 10 * DAY_MS);
+        let value = probe_roots(std::slice::from_ref(&root), now_ms() + 10 * DAY_MS);
         assert_eq!(value["scannedFiles"], json!(0));
         assert_eq!(value["markerHits"], json!(0));
 

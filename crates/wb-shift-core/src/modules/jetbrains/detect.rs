@@ -218,10 +218,11 @@ fn product_prefix_from_exe(exe: &Path) -> Option<&'static str> {
 /// 安装目录名里的版本号（取最后一个形如 `2026.3[-eap]` 的空白分隔 token）。
 fn version_from_dir_name(dir_name: &str) -> Option<String> {
     dir_name
-        .split(|c: char| c.is_whitespace() || c == '_')
-        .filter(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .filter(|token| is_version_suffix(token))
-        .last()
+        .rsplit(|c: char| c.is_whitespace() || c == '_')
+        .find(|token| {
+            token.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && is_version_suffix(token)
+        })
         .map(str::to_string)
 }
 
