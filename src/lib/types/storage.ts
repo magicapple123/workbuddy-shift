@@ -30,6 +30,16 @@ export interface StorageCategory {
   protected: string | null;
 }
 
+/** 扫描各阶段耗时（毫秒），用于诊断与「改前 / 改后」对照。 */
+export interface StorageTimings {
+  totalMs: number;
+  catalogMs: number;
+  sessionsMs: number;
+  trashMs: number;
+  /** 客户端进程探测耗时（Windows 上数百毫秒，与扫描无关）。 */
+  probeMs?: number;
+}
+
 export interface StorageScan {
   generatedAt: number;
   variant: string;
@@ -52,6 +62,11 @@ export interface StorageScan {
   };
   trash: { entries: number; bytes: number; files: number };
   clientRunning: boolean;
+  /** 受保护大目录还在后台计量：`totals` / 客户端卡是**部分和**，必须标注。 */
+  protectedPending?: boolean;
+  /** 后台补算是否正在运行（诊断用）。 */
+  protectedFilling?: boolean;
+  timings?: StorageTimings;
   warnings: string[];
 }
 
@@ -93,6 +108,8 @@ export interface StorageSession {
 
 export interface StorageSessionsPayload {
   variant: string;
+  /** 复用服务端快照（同一 TTL 内会话树只走一遍）。 */
+  cached?: boolean;
   clientRunning: boolean;
   sessions: StorageSession[];
 }
@@ -163,6 +180,8 @@ export interface StorageTrashPayload {
   problems: string[];
   bytes: number;
   files: number;
+  cached?: boolean;
+  timings?: StorageTimings;
 }
 
 export interface StorageRestoreResult {

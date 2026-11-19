@@ -64,6 +64,22 @@ const CATEGORIES: StorageCategory[] = [
   category("client.cn.artifact-index", "client", "国内版产物索引", 69 * MB, 137, 0, false, "索引指向工作区真实文件", "索引指向工作区真实文件"),
 ];
 
+/** 「其它 / 未分类」：让演示数据的「分类之和 = 根总量」与真实扫描同口径。 */
+function otherCategory(group: StorageCategory["group"], suffix: string, bytes: number): StorageCategory {
+  return {
+    id: `${group}.${suffix}other`,
+    group,
+    label: group === "client" ? "国内版其它 / 未分类" : "其它 / 未分类",
+    path: group === "client" ? "~/.workbuddy" : "~/.workbuddy-shift",
+    bytes: Math.max(0, bytes),
+    files: 0,
+    units: 0,
+    deletable: false,
+    note: "根总量减去已列分类，含不可清理的大目录；只读展示，不提供清理",
+    protected: "根总量减去已列分类；只读展示，不提供清理",
+  };
+}
+
 function scan(): StorageScan {
   return {
     generatedAt: Date.now(),
@@ -75,7 +91,11 @@ function scan(): StorageScan {
       { id: "ai", label: "WorkBuddy（国际版）", path: "~/.workbuddy-ai", exists: false },
     ],
     totals: { bytes: 7.28 * GB, files: 104956 },
-    categories: CATEGORIES,
+    categories: [
+      ...CATEGORIES,
+      otherCategory("tool", "", 84 * MB - CATEGORIES.filter((item) => item.group === "tool").reduce((sum, item) => sum + item.bytes, 0)),
+      otherCategory("client", "cn.", 7.2 * GB - CATEGORIES.filter((item) => item.group === "client").reduce((sum, item) => sum + item.bytes, 0)),
+    ],
     sessions: {
       counts: { live: 225, softDeleted: 31, orphan: 4, redundant: 18, present: 198, partial: 33, bodyMissing: 9 },
       bytes: 1.83 * GB,
@@ -83,6 +103,8 @@ function scan(): StorageScan {
     },
     trash: { entries: 3, bytes: 128 * MB, files: 412 },
     clientRunning: false,
+    protectedPending: false,
+    timings: { totalMs: 360, catalogMs: 240, sessionsMs: 110, trashMs: 10, probeMs: 40 },
     warnings: [
       "回收站不释放空间：只有「彻底删除」才会真正释放。",
       "删除会话后云端同步可能重新拉回，页面会给出提示。",

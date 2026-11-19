@@ -25,7 +25,8 @@ interface SessionListProps {
   /** 已按外部校验刷新的 presence（外部删除后 focus 重校验的结果）。 */
   presenceOverrides: Record<string, string>;
   onClean: (sessionId: string, entries: StorageEntryKind[], deleteRow: boolean) => void;
-  onReveal: (path: string, mode: "select" | "open") => void;
+  /** `scope: "cwd"` 只读打开任意绝对目录（工作目录在白名单外也能开）。 */
+  onReveal: (path: string, mode: "select" | "open", scope?: "storage" | "cwd") => void;
 }
 
 type StatusFilter = "all" | "live" | "softDeleted" | "orphan" | "redundant" | "missing";
@@ -245,8 +246,19 @@ export function SessionList({
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={busy}
-                          onClick={() => onReveal(session.cwd || session.entries[0]?.path || "", "open")}
+                          disabled={busy || !(session.cwd || session.entries[0]?.path)}
+                          title={
+                            session.cwd
+                              ? `在文件管理器中打开：${session.cwd}`
+                              : "该会话没有工作目录，只能定位存储副本所在的目录"
+                          }
+                          onClick={() =>
+                            onReveal(
+                              session.cwd || session.entries[0]?.path || "",
+                              "open",
+                              session.cwd ? "cwd" : "storage",
+                            )
+                          }
                         >
                           <FolderSearch className="size-3.5" />
                           工作目录

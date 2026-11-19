@@ -67,7 +67,10 @@ pub fn revalidate(
                 }));
             }
             "category" => {
-                let all = categories.get_or_insert_with(|| catalog::catalog(roots).categories);
+                let all = categories.get_or_insert_with(|| {
+                    let links = super::sessions::read_session_links(&roots.store);
+                    catalog::catalog(roots, variant, &links).categories
+                });
                 let Some(category) = catalog::find(all, id) else {
                     out.push(json!({ "target": text, "exists": false, "bytes": 0, "files": 0 }));
                     continue;

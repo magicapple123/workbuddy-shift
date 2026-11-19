@@ -1,115 +1,38 @@
 //! 存储管理的行为测试：全部在临时沙箱里造数，不读写真实账号 / 客户端数据。
 
 use super::catalog::{self, CLIPBOARD_RETENTION_DAYS};
-use super::clean::{clean, CleanContext};
-use super::roots::StorageRoots;
+use super::clean::clean;
+use super::sessions::{scan_sessions_with_links, Bundle};
 use super::trash;
 use crate::modules::variant::WbVariant;
 use rusqlite::Connection;
-use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use serde_json::{json, Map, Value};
+use std::path::Path;
 
-struct Sandbox {
-    base: PathBuf,
-    roots: StorageRoots,
-    data_root: PathBuf,
-}
+mod bench;
+mod fixture;
+mod reveal;
+mod snapshot;
 
-impl Sandbox {
-    fn new(name: &str) -> Self {
-        let base =
-            std::env::temp_dir().join(format!("wb-storage-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let store = base.join(".workbuddy-shift");
-        let client = base.join(".workbuddy");
-        std::fs::create_dir_all(&store).expect("建工具根");
-        std::fs::create_dir_all(client.join("projects/ws")).expect("建客户端根");
-        let roots = StorageRoots::new(store, client.clone(), base.join(".workbuddy-ai"));
-        Self {
-            base,
-            roots,
-            data_root: client,
-        }
-    }
+use fixture::{lock_snapshot, Sandbox};
 
-    fn ctx(&self) -> CleanContext {
-        CleanContext {
-            roots: self.roots.clone(),
-            variant: WbVariant::Cn,
-            data_root: self.data_root.clone(),
-            client_running: false,
-        }
-    }
-
-    fn make_db(&self, ids: &[(&str, Option<i64>)]) {
-        let conn = Connection::open(self.data_root.join("workbuddy.db")).expect("建库");
-        conn.execute_batch(
-            "CREATE TABLE sessions (
-                id TEXT PRIMARY KEY, cwd TEXT NOT NULL, user_id TEXT NOT NULL,
-                title TEXT, custom_title TEXT, status TEXT NOT NULL DEFAULT 'Completed',
-                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-                deleted_at INTEGER, is_playground INTEGER NOT NULL DEFAULT 0
-            );",
-        )
-        .expect("建表");
-        for (id, deleted) in ids {
-            conn.execute(
-                "INSERT INTO sessions (id, cwd, user_id, title, created_at, updated_at, deleted_at, is_playground)
-                 VALUES (?1, 'D:/proj', 'u1', ?2, 1, 2, ?3, 0)",
-                rusqlite::params![id, format!("标题 {id}"), deleted],
-            )
-            .expect("写行");
-        }
-    }
-
-    fn write_session_assets(&self, id: &str) {
-        let body = self.data_root.join(format!("projects/ws/{id}.jsonl"));
-        std::fs::write(&body, b"{\"type\":\"user\"}\n").expect("写正文");
-        std::fs::create_dir_all(self.data_root.join(format!("projects/ws/{id}/subagents")))
-            .expect("建附属目录");
-        std::fs::write(
-            self.data_root
-                .join(format!("projects/ws/{id}/subagents/a.jsonl")),
-            b"{}",
-        )
-        .expect("写子代理");
-        std::fs::create_dir_all(self.data_root.join(format!("file-history/{id}")))
-            .expect("建文件历史");
-        std::fs::write(
-            self.data_root.join(format!("file-history/{id}/v1")),
-            b"history",
-        )
-        .expect("写历史");
-        std::fs::create_dir_all(self.data_root.join("artifact-index")).expect("建索引目录");
-        std::fs::write(
-            self.data_root.join(format!("artifact-index/{id}.json")),
-            b"{\"uri\":\"D:/proj/a.ts\"}",
-        )
-        .expect("写索引");
-        std::fs::create_dir_all(self.data_root.join("changes-index")).expect("建变更索引目录");
-        std::fs::write(
-            self.data_root.join(format!("changes-index/{id}.json")),
-            b"{}",
-        )
-        .expect("写变更索引");
-        std::fs::create_dir_all(self.data_root.join(format!("changes-detail/{id}")))
-            .expect("建变更明细目录");
-        std::fs::write(
-            self.data_root.join(format!("changes-detail/{id}/0.json")),
-            b"{}",
-        )
-        .expect("写变更明细");
-    }
-
-    fn session_clean(&self, targets: Value, dry_run: bool) -> Result<Value, String> {
-        clean(&self.ctx(), dry_run, &targets)
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.base);
-    }
+/// 夹具入口：显式给数据根 / 关联主表根 / 行集合（不碰真实客户端数据）。
+///
+/// 原本是 `sessions.rs` 里一段 `#[cfg(test)]` 的转发函数；移到测试侧后
+/// `sessions.rs` 回到 500 行以内（`scripts/check-structure.mjs` 的门槛）。
+fn scan_sessions_at(
+    variant: WbVariant,
+    data_root: &Path,
+    store_root: &Path,
+    rows: Vec<Map<String, Value>>,
+) -> Vec<Bundle> {
+    scan_sessions_with_links(
+        variant,
+        data_root,
+        store_root,
+        rows,
+        &super::sessions::read_session_links(store_root),
+    )
 }
 
 fn mtime(path: &Path) -> i64 {
@@ -125,6 +48,7 @@ fn mtime(path: &Path) -> i64 {
 
 #[test]
 fn dry_run_writes_nothing_and_creates_no_trash() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("dry-run");
     let log = sandbox.data_root.join("logs/app.log");
     std::fs::create_dir_all(log.parent().expect("父目录")).expect("建日志目录");
@@ -149,6 +73,7 @@ fn dry_run_writes_nothing_and_creates_no_trash() {
 
 #[test]
 fn category_clean_goes_to_trash_and_restores() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("category-roundtrip");
     let log = sandbox.data_root.join("logs/app.log");
     std::fs::create_dir_all(log.parent().expect("父目录")).expect("建日志目录");
@@ -171,6 +96,7 @@ fn category_clean_goes_to_trash_and_restores() {
 
 #[test]
 fn single_entry_removal_marks_partial_and_keeps_row() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("single-entry");
     sandbox.make_db(&[("s1", None)]);
     sandbox.write_session_assets("s1");
@@ -196,6 +122,7 @@ fn single_entry_removal_marks_partial_and_keeps_row() {
 
 #[test]
 fn body_removal_marks_body_missing_without_deleting_row() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("body-missing");
     sandbox.make_db(&[("s1", None)]);
     sandbox.write_session_assets("s1");
@@ -227,6 +154,7 @@ fn body_removal_marks_body_missing_without_deleting_row() {
 
 #[test]
 fn live_session_delete_backs_up_db_and_restores_row_and_files() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("live-roundtrip");
     sandbox.make_db(&[("s1", None), ("s2", None)]);
     sandbox.write_session_assets("s1");
@@ -274,6 +202,7 @@ fn live_session_delete_backs_up_db_and_restores_row_and_files() {
 
 #[test]
 fn protected_categories_and_running_client_are_rejected_before_writing() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("reject");
     sandbox.make_db(&[("s1", None)]);
     sandbox.write_session_assets("s1");
@@ -319,7 +248,7 @@ fn clipboard_category_only_selects_files_older_than_retention() {
         - std::time::Duration::from_secs((CLIPBOARD_RETENTION_DAYS + 5) * 24 * 3600);
     set_mtime(&old, cutoff);
 
-    let catalog = catalog::catalog(&sandbox.roots);
+    let catalog = catalog::catalog(&sandbox.roots, WbVariant::Cn, "");
     let category =
         catalog::find(&catalog.categories, "client.cn.clipboard-images").expect("剪贴板分类");
     assert_eq!(category.units.len(), 1, "只应选中 30 天前的文件");
@@ -348,13 +277,14 @@ fn whitelist_rejects_outside_paths() {
         sandbox.roots.root_containing(&target).is_some(),
         "白名单内路径必须解析到根"
     );
-    let error = super::reveal(&sandbox.roots, &outside.to_string_lossy(), "select")
+    let error = super::reveal(&sandbox.roots, &outside.to_string_lossy(), "select", None)
         .expect_err("白名单外必须拒绝");
     assert!(error.contains("白名单"), "{error}");
 }
 
 #[test]
 fn revalidate_reports_missing_body_after_external_delete() {
+    let _guard = lock_snapshot();
     let sandbox = Sandbox::new("revalidate");
     sandbox.make_db(&[("s1", None)]);
     sandbox.write_session_assets("s1");
@@ -379,9 +309,12 @@ fn revalidate_reports_missing_body_after_external_delete() {
     assert_eq!(after["items"][0]["presence"], "bodyMissing");
 }
 
+// 定位 scope 的用例在 `tests/reveal.rs`：默认只在白名单内打开，`cwd` 放开只读定位但
+// 拒绝 UNC / 设备 / 相对路径 / `..` 穿越（只测纯函数，不真的启动 explorer）。
+
 /// 会话资产包分类口径（从 `sessions.rs` 拆出，避免单文件超过 500 行）。
 mod session_assets {
-    use super::super::sessions::scan_sessions_at;
+    use super::scan_sessions_at;
     use crate::modules::variant::WbVariant;
     use serde_json::{json, Map, Value};
     use std::path::PathBuf;

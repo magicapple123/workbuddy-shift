@@ -140,19 +140,30 @@ fn project_index(data_root: &Path) -> ProjectIndex {
     index
 }
 
-fn asset_ids(root: &Path, sub: &str, extension: Option<&str>) -> Vec<String> {
-    let mut ids = Vec::new();
+fn asset_ids(root: &Path, sub: &str, extension: Option<&str>) -> HashSet<String> {
+    let mut ids = HashSet::new();
     let Ok(entries) = std::fs::read_dir(root.join(sub)) else {
         return ids;
     };
     for entry in entries.flatten() {
+        let path = entry.path();
+        // 链接不算存在：删除会拒绝，展示上也不能计入体积（与 `Entry::exists` 同口径）。
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if super::roots::is_link(&meta) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(ext) = extension {
-            if let Some(stem) = name.strip_suffix(ext) {
-                ids.push(stem.to_string());
+        match extension {
+            Some(ext) => {
+                if let Some(stem) = name.strip_suffix(ext) {
+                    ids.insert(stem.to_string());
+                }
             }
-        } else {
-            ids.push(name);
+            None => {
+                ids.insert(name);
+            }
         }
     }
     ids
@@ -224,14 +235,21 @@ fn int_of(row: &Map<String, Value>, key: &str) -> i64 {
     row.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-/// 关联组索引：sessionId → (groupId, 组内该档位成员数)。
-fn group_index(store_root: &Path, variant: WbVariant) -> HashMap<String, (String, usize)> {
-    let file = store_root.join("session_links.json");
+/// 读关联主表原文（`session_links.json`）。
+///
+/// 同一份快照里 `catalog`（无引用基线）与 `sessions`（关联组）都要用它，因此由快照
+/// 统一读一次再分发，避免同一文件解析两遍（第三轮第 6 条 6.5）。
+pub fn read_session_links(store_root: &Path) -> String {
+    std::fs::read_to_string(store_root.join("session_links.json")).unwrap_or_default()
+}
+
+/// 关联组索引（原文由调用方提供）。
+pub fn group_index_from_text(
+    text: &str,
+    variant: WbVariant,
+) -> HashMap<String, (String, usize)> {
     let mut out = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return out;
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&text) else {
+    let Ok(json) = serde_json::from_str::<Value>(text) else {
         return out;
     };
     let Some(groups) = json.get("groups").and_then(Value::as_array) else {
@@ -263,31 +281,42 @@ fn group_index(store_root: &Path, variant: WbVariant) -> HashMap<String, (String
     out
 }
 
+/// 读一个档位的全部会话行（快照构建与 `scan_sessions` 共用；库缺失/被占用时返回空）。
+pub fn read_rows_at(data_root: &Path) -> Vec<Map<String, Value>> {
+    match open_db(&data_root.join("workbuddy.db")) {
+        Some(conn) => read_rows(&conn),
+        None => Vec::new(),
+    }
+}
+
 /// 读一个档位的全部会话资产包（含无行的孤儿）。
 ///
 /// `store_root` 只用于读关联主表（判断冗余副本）；`data_root` 是客户端数据根。
 pub fn scan_sessions(store_root: &Path, data_root: &Path, variant: WbVariant) -> Vec<Bundle> {
-    let db = data_root.join("workbuddy.db");
-    let rows = match open_db(&db) {
-        Some(conn) => read_rows(&conn),
-        None => Vec::new(),
-    };
-    scan_sessions_at(variant, data_root, store_root, rows)
+    let rows = read_rows_at(data_root);
+    scan_sessions_with_links(
+        variant,
+        data_root,
+        store_root,
+        rows,
+        &read_session_links(store_root),
+    )
 }
 
-/// 可测实现：显式给数据根、关联主表根与行集合（夹具不碰真实客户端数据）。
-pub fn scan_sessions_at(
+/// 快照入口：关联主表原文由调用方读一次后传入（不再二次读盘）。
+pub fn scan_sessions_with_links(
     variant: WbVariant,
     data_root: &Path,
-    store_root: &Path,
+    _store_root: &Path,
     rows: Vec<Map<String, Value>>,
+    links: &str,
 ) -> Vec<Bundle> {
     let projects = project_index(data_root);
     let artifact_ids = asset_ids(data_root, "artifact-index", Some(".json"));
     let history_ids = asset_ids(data_root, "file-history", None);
     let changes_index_ids = asset_ids(data_root, "changes-index", Some(".json"));
     let changes_detail_ids = asset_ids(data_root, "changes-detail", None);
-    let groups = group_index(store_root, variant);
+    let groups = group_index_from_text(links, variant);
 
     let mut row_by_id: HashMap<String, Map<String, Value>> = HashMap::new();
     for row in &rows {
@@ -300,10 +329,10 @@ pub fn scan_sessions_at(
     let mut ids: HashSet<String> = row_by_id.keys().cloned().collect();
     ids.extend(projects.bodies.keys().cloned());
     ids.extend(projects.sidecars.keys().cloned());
-    ids.extend(artifact_ids);
-    ids.extend(history_ids);
-    ids.extend(changes_index_ids);
-    ids.extend(changes_detail_ids);
+    ids.extend(artifact_ids.iter().cloned());
+    ids.extend(history_ids.iter().cloned());
+    ids.extend(changes_index_ids.iter().cloned());
+    ids.extend(changes_detail_ids.iter().cloned());
     ids.extend(groups.keys().cloned());
 
     // 只有「本机有行」或「本机有文件」的 id 才构成资产包：关联组成员可能指向其它账号
@@ -316,7 +345,19 @@ pub fn scan_sessions_at(
                 Some((group, count)) => (Some(group.clone()), *count),
                 None => (None, 0),
             };
-            let bundle = build_bundle(variant, data_root, &projects, &id, row, group_id, copies);
+            let bundle = build_bundle(
+                variant,
+                data_root,
+                &projects,
+                &id,
+                row,
+                group_id,
+                copies,
+                &artifact_ids,
+                &history_ids,
+                &changes_index_ids,
+                &changes_detail_ids,
+            );
             let present = bundle.entries.iter().any(|entry| entry.exists);
             (present || bundle.row.is_some()).then_some(bundle)
         })
@@ -330,6 +371,12 @@ pub fn scan_sessions_at(
     bundles
 }
 
+/// 一个会话资产包的 6 个子项（删除粒度）。
+///
+/// 索引类子项的存在性来自 `read_dir` 得到的 id 集合：不再为每个会话的 6 个 entry
+/// 各做一次 `symlink_metadata`（不存在也 stat），只有确实存在的子项才 `usage_of`
+/// 一次（第三轮第 6 条 6.5「entry 去掉双 stat」）。
+#[allow(clippy::too_many_arguments)]
 fn build_bundle(
     variant: WbVariant,
     data_root: &Path,
@@ -338,6 +385,10 @@ fn build_bundle(
     row: Option<&Map<String, Value>>,
     group_id: Option<String>,
     live_copies: usize,
+    artifact_ids: &HashSet<String>,
+    history_ids: &HashSet<String>,
+    changes_index_ids: &HashSet<String>,
+    changes_detail_ids: &HashSet<String>,
 ) -> Bundle {
     let deleted_at = row
         .map(|row| int_of(row, "deleted_at"))
@@ -349,27 +400,41 @@ fn build_bundle(
     };
 
     let entries = vec![
-        entry("body", "会话正文", projects.bodies.get(id).cloned()),
-        entry("sidecar", "附属目录", projects.sidecars.get(id).cloned()),
+        entry(
+            "body",
+            "会话正文",
+            projects.bodies.get(id).cloned(),
+            projects.bodies.contains_key(id),
+        ),
+        entry(
+            "sidecar",
+            "附属目录",
+            projects.sidecars.get(id).cloned(),
+            projects.sidecars.contains_key(id),
+        ),
         entry(
             "artifact-index",
             "产物索引",
             Some(data_root.join("artifact-index").join(format!("{id}.json"))),
+            artifact_ids.contains(id),
         ),
         entry(
             "file-history",
             "文件历史",
             Some(data_root.join("file-history").join(id)),
+            history_ids.contains(id),
         ),
         entry(
             "changes-index",
             "变更索引",
             Some(data_root.join("changes-index").join(format!("{id}.json"))),
+            changes_index_ids.contains(id),
         ),
         entry(
             "changes-detail",
             "变更明细",
             Some(data_root.join("changes-detail").join(id)),
+            changes_detail_ids.contains(id),
         ),
     ];
 
@@ -416,24 +481,18 @@ fn build_bundle(
     }
 }
 
-fn entry(kind: &'static str, label: &str, path: Option<PathBuf>) -> Entry {
+/// 构造一个资产包子项。
+///
+/// `present` 由调用方给出（正文 / 附属目录来自一次 `read_dir` 的索引，四类索引来自
+/// `read_dir` 得到的 id 集合）；只有 `present` 时才 `usage_of` 走盘，避免「不存在也 stat」。
+fn entry(kind: &'static str, label: &str, path: Option<PathBuf>, present: bool) -> Entry {
     let path = path.unwrap_or_default();
-    let meta = std::fs::symlink_metadata(&path).ok();
-    // 符号链接不算存在：删除时会拒绝，展示上也不能计入体积。
-    let exists = match &meta {
-        Some(meta) => !super::roots::is_link(meta),
-        None => false,
-    };
-    let usage = if exists {
-        usage_of(&path)
-    } else {
-        Usage::default()
-    };
+    let usage = if present { usage_of(&path) } else { Usage::default() };
     Entry {
         kind,
         label: label.to_string(),
         path,
         usage,
-        exists,
+        exists: present,
     }
 }

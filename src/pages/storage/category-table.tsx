@@ -16,7 +16,9 @@ interface CategoryTableProps {
 
 const GROUP_LABELS: Record<string, string> = {
   tool: "工具数据（~/.workbuddy-shift）",
-  client: "客户端缓存（~/.workbuddy）",
+  // 国内 + 国际共用一组：每个分类的 label 里已经带「国内版 / 国际版」前缀，
+  // 标题只是分组，不再暗示「只有 ~/.workbuddy」（第三轮第 8 条 8.3-2）。
+  client: "客户端数据（~/.workbuddy + ~/.workbuddy-ai）",
 };
 
 /** 分类明细：体积 / 文件数 / 可清理单元数 + 单项清理入口。 */

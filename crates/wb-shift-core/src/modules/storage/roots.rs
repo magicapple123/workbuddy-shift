@@ -5,8 +5,11 @@
 //! 只读统计跳过链接，不跟随，也不读写文件内容。
 
 use crate::modules::config::home_dir;
-use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+
+mod index;
+
+pub use index::{usage_index, usage_index_deferred};
 
 /// 三个受管根：工具自身存储、国内版客户端、国际版客户端。
 ///
@@ -108,6 +111,18 @@ impl Usage {
         self.bytes = self.bytes.saturating_add(other.bytes);
         self.files = self.files.saturating_add(other.files);
     }
+
+    /// 补集用：`self - other`，减到 0 为止（只用于「其它 / 未分类」展示，不能出现负数）。
+    pub fn saturating_sub(&self, other: Usage) -> Usage {
+        Usage {
+            bytes: self.bytes.saturating_sub(other.bytes),
+            files: self.files.saturating_sub(other.files),
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.bytes == 0 && self.files == 0
+    }
 }
 
 /// 统计一个路径（文件或目录）的用量；不跟随符号链接，读不到的子项按 0 计。
@@ -132,133 +147,6 @@ pub fn usage_of(path: &Path) -> Usage {
         usage.add(usage_of(&entry.path()));
     }
     usage
-}
-
-/// 按「相对路径前 N 级」归集一个根下的用量。
-///
-/// 一次遍历同时给出总量与各分类的分子，分类之和恒等于总量（不会出现两个数字对不上）。
-/// 键是 `/` 分隔的相对目录路径（深度 1 与 2 都记），例如 `session-links` 与
-/// `session-links/baselines`；根自身是空串键。文件计入**父目录**的键。
-/// 链接与非普通文件（管道 / 设备）跳过。
-pub fn usage_index(root: &Path, depth: usize) -> HashMap<String, Usage> {
-    let mut index: HashMap<String, Usage> = HashMap::new();
-    let mut total = Usage::default();
-
-    let Ok(entries) = std::fs::read_dir(root) else {
-        index.insert(String::new(), total);
-        return index;
-    };
-    let children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-    // 顶层并行：10 万级小文件在 Windows 上主要是元数据等待，多线程能把首次扫描从
-    // 二十多秒降到几秒；分块避免目录项很多时线程数失控。
-    let threads = children.len().clamp(1, 12);
-    let chunk = children.len().div_ceil(threads.max(1));
-    let mut partials: Vec<(HashMap<String, Usage>, Usage)> = Vec::new();
-    std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for slice in children.chunks(chunk.max(1)) {
-            handles.push(scope.spawn(move || {
-                let mut local: HashMap<String, Usage> = HashMap::new();
-                let mut local_total = Usage::default();
-                for child in slice {
-                    let Ok(meta) = std::fs::symlink_metadata(child) else {
-                        continue;
-                    };
-                    if is_link(&meta) {
-                        continue;
-                    }
-                    if meta.is_file() {
-                        let usage = Usage {
-                            bytes: meta.len(),
-                            files: 1,
-                        };
-                        for key in ancestor_keys(root, root, depth) {
-                            local.entry(key).or_default().add(usage);
-                        }
-                        local_total.add(usage);
-                        continue;
-                    }
-                    if !meta.is_dir() {
-                        continue;
-                    }
-                    for key in ancestor_keys(root, child, depth) {
-                        local.entry(key).or_default();
-                    }
-                    walk_index(root, child, depth, &mut local, &mut local_total);
-                }
-                (local, local_total)
-            }));
-        }
-        for handle in handles {
-            if let Ok(partial) = handle.join() {
-                partials.push(partial);
-            }
-        }
-    });
-    for (local, local_total) in partials {
-        total.add(local_total);
-        for (key, usage) in local {
-            let slot = index.entry(key).or_default();
-            slot.add(usage);
-        }
-    }
-    index.insert(String::new(), total);
-    index
-}
-
-fn walk_index(
-    root: &Path,
-    dir: &Path,
-    depth: usize,
-    index: &mut HashMap<String, Usage>,
-    total: &mut Usage,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if is_link(&meta) {
-            continue;
-        }
-        if meta.is_file() {
-            let usage = Usage {
-                bytes: meta.len(),
-                files: 1,
-            };
-            for key in ancestor_keys(root, dir, depth) {
-                index.entry(key).or_default().add(usage);
-            }
-            total.add(usage);
-            continue;
-        }
-        if !meta.is_dir() {
-            continue;
-        }
-        for key in ancestor_keys(root, &path, depth) {
-            index.entry(key).or_default();
-        }
-        walk_index(root, &path, depth, index, total);
-    }
-}
-
-fn ancestor_keys(root: &Path, dir: &Path, depth: usize) -> Vec<String> {
-    let rel = dir.strip_prefix(root).unwrap_or(dir);
-    let mut parts: Vec<String> = Vec::new();
-    for component in rel.components() {
-        if let Component::Normal(text) = component {
-            parts.push(text.to_string_lossy().to_string());
-            if parts.len() == depth {
-                break;
-            }
-        }
-    }
-    (1..=parts.len())
-        .map(|count| parts[..count].join("/"))
-        .collect()
 }
 
 /// 把相对路径拼到白名单根下，并拒绝任何越界写法。

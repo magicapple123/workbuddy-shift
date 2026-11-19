@@ -21,6 +21,7 @@ import { useSessionsNavEnabled } from "@/lib/nav-prefs";
 import { useCreditAutoRefresh } from "@/hooks/use-credit-auto-refresh";
 import { useRotateDeferredNotice } from "@/hooks/use-rotate-deferred-notice";
 import { useStatsWarmup } from "@/hooks/use-stats-warmup";
+import { useStorageWarmup } from "@/hooks/use-storage-warmup";
 import { useWorkbuddyStatusRefresh } from "@/hooks/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -51,6 +52,8 @@ function Layout() {
   useRotateDeferredNotice();
   // 启动预热：空闲时先把账号 / 积分 / Token 统计备好，进统计页直接渲染（一次会话只跑一次）。
   useStatsWarmup();
+  // 存储总览预热排在统计之后（统计优先），只预热总览；会话资产由存储页按需加载。
+  useStorageWarmup();
 
   // 沙箱角标只查一次：环境变量在进程生命周期内不变，无需轮询。
   useEffect(() => {

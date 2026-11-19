@@ -119,7 +119,10 @@ pub fn clean(ctx: &CleanContext, dry_run: bool, targets: &Value) -> Result<Value
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "category 缺少 id".to_string())?;
-                let all = categories.get_or_insert_with(|| catalog::catalog(&ctx.roots).categories);
+                let all = categories.get_or_insert_with(|| {
+                    let links = super::sessions::read_session_links(&ctx.roots.store);
+                    catalog::catalog(&ctx.roots, ctx.variant, &links).categories
+                });
                 let category = catalog::find(all, id).ok_or_else(|| format!("未知分类：{id}"))?;
                 if !category.deletable {
                     return Err(category

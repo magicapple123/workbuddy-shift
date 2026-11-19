@@ -13,12 +13,13 @@ use crate::api::*;
 use wb_shift_core::modules::storage::{self, CleanContext, StorageRoots};
 use wb_shift_core::modules::variant::WbVariant;
 
-/// GET /api/storage/scan —— 总览与分类明细（60 秒缓存）。
+/// GET /api/storage/scan —— 总览与分类明细（60 秒快照；`refresh` 强制重算）。
 pub(crate) async fn api_storage_scan(RawQuery(query): RawQuery) -> Response {
     let variant = query_variant(query.as_deref());
+    let refresh = query_flag_enabled(query.as_deref(), "refresh");
     let result = tokio::task::spawn_blocking(move || {
         let roots = StorageRoots::resolve();
-        storage::scan(&roots, variant)
+        storage::scan_with(&roots, variant, refresh)
     })
     .await;
     match result {
@@ -70,10 +71,13 @@ pub(crate) async fn api_storage_clean(
     }
 }
 
-/// GET /api/storage/trash —— 回收站条目。
-pub(crate) async fn api_storage_trash() -> Response {
-    let result =
-        tokio::task::spawn_blocking(|| storage::trash_payload(&StorageRoots::resolve())).await;
+/// GET /api/storage/trash —— 回收站条目（`variant` 可选，缺省国内版）。
+pub(crate) async fn api_storage_trash(RawQuery(query): RawQuery) -> Response {
+    let variant = query_variant(query.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        storage::trash_payload(&StorageRoots::resolve(), variant, &variant.data_root())
+    })
+    .await;
     match result {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
@@ -120,6 +124,8 @@ pub(crate) async fn api_storage_trash_purge(
 }
 
 /// POST /api/storage/reveal —— 在系统文件管理器中定位。
+///
+/// `scope` 是新增的可选字段：`storage`（缺省，白名单内）/ `cwd`（只读打开任意绝对目录）。
 pub(crate) async fn api_storage_reveal(
     payload: Result<Json<StorageRevealRequest>, JsonRejection>,
 ) -> Response {
@@ -128,8 +134,14 @@ pub(crate) async fn api_storage_reveal(
         Err(rejection) => return invalid_body(rejection),
     };
     let mode = request.mode.unwrap_or_else(|| "select".to_string());
+    let scope = request.scope;
     let result = tokio::task::spawn_blocking(move || {
-        storage::reveal(&StorageRoots::resolve(), &request.path, &mode)
+        storage::reveal(
+            &StorageRoots::resolve(),
+            &request.path,
+            &mode,
+            scope.as_deref(),
+        )
     })
     .await;
     match result {

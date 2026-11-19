@@ -401,12 +401,6 @@ pub fn purge(roots: &StorageRoots, id: Option<&str>) -> Result<Value, String> {
     Ok(json!({"deleted": 1, "bytes": usage.bytes, "files": usage.files}))
 }
 
-/// 回收站总量（扫描总览用）。
-pub fn usage(roots: &StorageRoots) -> (Usage, usize) {
-    let dir = roots.trash_root();
-    let usage = super::roots::usage_of(&dir);
-    let entries = std::fs::read_dir(&dir)
-        .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
-        .unwrap_or(0);
-    (usage, entries)
-}
+// 回收站总量 / 条目数不再由本模块单独走盘计算：两者都来自 `catalog` 那一趟遍历的
+// `trash` 键（`catalog::Catalog::trash_usage` / `trash_entries`），保证总览卡与分类行
+// 是同一个数字，同时省掉一次整棵回收站树的遍历（第三轮第 6 条 6.5）。
