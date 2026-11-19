@@ -2,12 +2,10 @@
 //!
 //! 口径断言：`已列分类之和 == 根总量`（每个根都有一行 `*.other` 补集）。
 
-use super::super::protected::{self, SizeCache, SizeEntry};
 use super::super::{invalidate_scan_cache, scan_at, sessions_payload, trash_payload};
 use super::fixture::{lock_snapshot, Sandbox};
 use crate::modules::variant::WbVariant;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 /// 某个分组的分类字节数之和。
 fn group_bytes(scan: &Value, group: &str) -> u64 {
@@ -57,7 +55,17 @@ fn one_snapshot_serves_scan_sessions_and_trash() {
     );
 
     // 会话资产与回收站复用同一份快照：同一 TTL 内会话树只走一遍。
-    let sessions = sessions_payload(&sandbox.roots, WbVariant::Cn, &sandbox.data_root);
+    //
+    // 受保护项在后台线程补算（不同平台的受保护目录集合不同），补算未完成时 `ensure`
+    // 会重建一次快照而不是复用。这里等它收敛，避免把「平台差异」当成「没复用」。
+    let mut sessions = sessions_payload(&sandbox.roots, WbVariant::Cn, &sandbox.data_root);
+    for _ in 0..100 {
+        if sessions["cached"] == true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sessions = sessions_payload(&sandbox.roots, WbVariant::Cn, &sandbox.data_root);
+    }
     assert_eq!(sessions["cached"], true, "会话资产必须复用快照");
     assert_eq!(
         sessions["sessions"].as_array().map(Vec::len),
@@ -235,28 +243,17 @@ fn protected_directories_are_deferred_then_served_from_cache() {
     assert_eq!(cold["protectedPending"], true, "首次必须标注计算中");
     assert_eq!(category_bytes(&cold, "client.cn.binaries"), 0);
 
-    // 2) 后台补算已写入缓存（这里直接写同口径的值，避免依赖线程调度）：
+    // 2) 等后台补算把缓存写完：不同平台的受保护目录集合不同（多一个目录就会多一个
+    //    pending 键），手写固定键会在 Linux/macOS 上永远凑不齐。这里只等真实线程收敛，
     //    下一次扫描必须重建一次，把完整数字与 pending=false 一起交回页面。
-    let mut cache = SizeCache {
-        at: protected::now_secs(),
-        variant: "cn".to_string(),
-        sizes: BTreeMap::new(),
-    };
-    cache.sizes.insert(
-        protected::key("cn", "binaries"),
-        SizeEntry {
-            bytes: 10,
-            files: 1,
-        },
-    );
-    cache.sizes.insert(
-        protected::key("cn", "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"),
-        SizeEntry { bytes: 5, files: 1 },
-    );
-    protected::save(&sandbox.roots.store, &cache).expect("写体积缓存");
-    invalidate_scan_cache();
-
-    let warm = scan_at(&sandbox.roots, WbVariant::Cn, &sandbox.data_root, false);
+    let mut warm = scan_at(&sandbox.roots, WbVariant::Cn, &sandbox.data_root, false);
+    for _ in 0..100 {
+        if warm["protectedPending"] == false {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        warm = scan_at(&sandbox.roots, WbVariant::Cn, &sandbox.data_root, false);
+    }
     assert_eq!(warm["protectedPending"], false, "缓存命中后不再 pending");
     assert_eq!(
         category_bytes(&warm, "client.cn.binaries"),
