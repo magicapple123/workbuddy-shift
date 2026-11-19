@@ -48,6 +48,19 @@ const FAILURE_BASE_BACKOFF_SECS: i64 = 10 * 60;
 /// 失败负缓存上限（6 小时）。
 const FAILURE_MAX_BACKOFF_SECS: i64 = 6 * 60 * 60;
 
+/// `github_config.json` 里「启动时检查更新」的字段名。
+///
+/// 与前端 `GithubConfig.autoCheck` 逐字一致（camelCase）：配置对象整体在两端之间往返，
+/// 键名一旦分叉，设置页开关就会静默失效。
+const AUTO_CHECK_KEY: &str = "autoCheck";
+
+/// 发布说明最大保留字符数。
+///
+/// Release notes 常常是一整篇 changelog，全量过 IPC 再塞进卡片没有意义：卡片只展示前
+/// 三行，「查看完整说明」走浏览器打开 Release 页。按**字符**截断（不是字节），
+/// 中文说明被切在多字节中间会变成乱码。
+pub const NOTES_MAX_CHARS: usize = 8000;
+
 /// 进程级内存缓存，只缓存 ok=true 的结果；失败不写缓存。
 struct CachedCheck {
     checked_at: i64,
@@ -87,6 +100,7 @@ fn load_github_config_at(f: &Path) -> Value {
     let mut owner = GITHUB_OWNER.to_string();
     let mut repo = GITHUB_REPO.to_string();
     let mut proxy = String::new();
+    let mut auto_check = true;
     let mut should_normalize = false;
     if f.exists() {
         if let Ok(text) = std::fs::read_to_string(f) {
@@ -104,11 +118,19 @@ fn load_github_config_at(f: &Path) -> Value {
                 if let Some(value) = v.get("proxy").and_then(|v| v.as_str()) {
                     proxy = value.trim().to_string();
                 }
+                if let Some(value) = v.get(AUTO_CHECK_KEY).and_then(Value::as_bool) {
+                    auto_check = value;
+                }
                 should_normalize = v.get("token").is_some();
             }
         }
     }
-    let normalized = json!({"owner": owner, "repo": repo, "proxy": proxy});
+    let normalized = json!({
+        "owner": owner,
+        "repo": repo,
+        "proxy": proxy,
+        "autoCheck": auto_check,
+    });
     if should_normalize {
         let _ = atomic_write(
             f,
@@ -118,8 +140,35 @@ fn load_github_config_at(f: &Path) -> Value {
     normalized
 }
 
+/// 读配置文件里的 [`AUTO_CHECK_KEY`]；文件不存在 / 字段缺失返回 None。
+fn read_auto_check_at(f: &Path) -> Option<bool> {
+    let text = std::fs::read_to_string(f).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get(AUTO_CHECK_KEY).and_then(Value::as_bool)
+}
+
+/// [`auto_check_enabled`] 的显式路径版本（单测用）。
+fn auto_check_enabled_at(f: &Path) -> bool {
+    read_auto_check_at(f).unwrap_or(true)
+}
+
+/// 后台是否允许自动检查更新（默认开启）。
+///
+/// 后台轮询每轮都重读一次：设置页关掉「启动时检查更新」后不需要重启进程。
+pub fn auto_check_enabled() -> bool {
+    auto_check_enabled_at(&github_config_file())
+}
+
 /// 保存更新源配置；公开仓库不需要也不保存 GitHub token。
 pub fn save_github_config(cfg: &Value) -> std::io::Result<()> {
+    save_github_config_at(&store_dir(), &github_config_file(), cfg)
+}
+
+/// [`save_github_config`] 的显式路径版本（单测注入临时目录，绝不写真实配置）。
+///
+/// 前端保存代理时只提交 `proxy`，不带 [`AUTO_CHECK_KEY`]：这里必须沿用文件里已有的值，
+/// 否则「保存代理」会把「启动时检查更新」静默重置成默认开启。
+fn save_github_config_at(dir: &Path, f: &Path, cfg: &Value) -> std::io::Result<()> {
     let owner = cfg
         .get("owner")
         .and_then(|v| v.as_str())
@@ -135,12 +184,19 @@ pub fn save_github_config(cfg: &Value) -> std::io::Result<()> {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .unwrap_or("");
-    let clean = json!({"owner": owner, "repo": repo, "proxy": proxy});
-    std::fs::create_dir_all(store_dir())?;
-    atomic_write(
-        &github_config_file(),
-        &serde_json::to_string_pretty(&clean).unwrap_or_default(),
-    )
+    let auto_check = cfg
+        .get(AUTO_CHECK_KEY)
+        .and_then(Value::as_bool)
+        .or_else(|| read_auto_check_at(f))
+        .unwrap_or(true);
+    let clean = json!({
+        "owner": owner,
+        "repo": repo,
+        "proxy": proxy,
+        "autoCheck": auto_check,
+    });
+    std::fs::create_dir_all(dir)?;
+    atomic_write(f, &serde_json::to_string_pretty(&clean).unwrap_or_default())
 }
 
 /// 解析版本号（允许 `v` 前缀，语义按 semver：`0.2.1-rc.1 < 0.2.1`）。
@@ -345,6 +401,20 @@ fn meaningful_release_name(manifest: &Value, tag: &str, latest: &str) -> Option<
     Some(name.to_string())
 }
 
+/// 清单里的发布说明：trim 后按 [`NOTES_MAX_CHARS`] 字符截断。
+///
+/// 老 Release 的清单没有 `notes` 字段（或只有空白）→ 返回 None，前端据此只显示
+/// 版本号与日期，不留一块空白说明区。
+fn manifest_notes(manifest: &Value) -> Option<String> {
+    let raw = manifest.get("notes").and_then(|v| v.as_str())?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let truncated: String = raw.chars().take(NOTES_MAX_CHARS).collect();
+    let trimmed = truncated.trim_end().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 /// 记录一次失败（负缓存），返回对外的错误结果。
 fn remember_failure(value: Value) -> Value {
     let now = now_secs();
@@ -418,6 +488,7 @@ pub async fn update_check(proxy: Option<&str>, force: bool) -> Value {
                 .get("pub_date")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let notes = manifest_notes(&manifest);
             // 版本号不合法时不得猜：明确报「无法比较」，不给出可下载按钮。
             let has_update = match compare_versions(&latest, &current) {
                 Ok(ordering) => ordering == Ordering::Greater,
@@ -447,6 +518,7 @@ pub async fn update_check(proxy: Option<&str>, force: bool) -> Value {
                 "manifestAvailable": true,
                 "releaseUrl": release_url,
                 "publishedAt": published_at,
+                "notes": notes,
                 "checkedAt": now_secs(),
             });
             if let Some(name) = release_name {
@@ -620,6 +692,90 @@ mod tests {
         let config = load_github_config_at(&absent.file);
         assert_eq!(config["owner"], "magicapple123", "{config}");
         assert_eq!(config["repo"], "workbuddy-shift");
+    }
+
+    /// 更新说明：trim、按字符截断、空说明返回 None（老 Release 没有 notes 字段）。
+    #[test]
+    fn manifest_notes_trims_truncates_and_skips_empty() {
+        let manifest = json!({"version": "0.2.0", "notes": "  修复若干问题\n\n第二行  "});
+        assert_eq!(
+            manifest_notes(&manifest).as_deref(),
+            Some("修复若干问题\n\n第二行")
+        );
+
+        assert_eq!(manifest_notes(&json!({"version": "0.2.0"})), None);
+        assert_eq!(manifest_notes(&json!({"version": "0.2.0", "notes": "   "})), None);
+        assert_eq!(manifest_notes(&json!({"version": "0.2.0", "notes": null})), None);
+
+        let long = "改".repeat(NOTES_MAX_CHARS + 500);
+        let notes = manifest_notes(&json!({"version": "0.2.0", "notes": long}))
+            .expect("截断后仍应有说明");
+        assert_eq!(notes.chars().count(), NOTES_MAX_CHARS);
+        assert!(
+            notes.chars().all(|c| c == '改'),
+            "按字符截断，不得切坏多字节字符"
+        );
+    }
+
+    /// `autoCheck` 缺省为 true；显式关闭后 load / auto_check_enabled 都必须如实反映。
+    #[test]
+    fn auto_check_defaults_to_true_and_follows_config() {
+        let absent = TempConfig::new("auto-check-default", None);
+        assert_eq!(load_github_config_at(&absent.file)["autoCheck"], json!(true));
+        assert!(auto_check_enabled_at(&absent.file), "缺省应允许自动检查");
+
+        let off = TempConfig::new("auto-check-off", Some(r#"{"autoCheck":false}"#));
+        assert_eq!(load_github_config_at(&off.file)["autoCheck"], json!(false));
+        assert!(!auto_check_enabled_at(&off.file), "关闭后不得自动检查");
+
+        // 旧配置带 token 会被归一化改写，autoCheck 同样要保留。
+        let legacy = TempConfig::new(
+            "auto-check-legacy",
+            Some(r#"{"owner":"magicapple123","repo":"workbuddy-shift","token":"","autoCheck":false}"#),
+        );
+        assert_eq!(load_github_config_at(&legacy.file)["autoCheck"], json!(false));
+        assert!(!auto_check_enabled_at(&legacy.file));
+        assert!(!legacy.raw().contains("token"), "token 必须被清掉");
+        assert!(legacy.raw().contains("\"autoCheck\": false"), "{}", legacy.raw());
+    }
+
+    /// 保存代理时前端不提交 autoCheck：必须沿用旧值，不能重置回默认开启。
+    #[test]
+    fn save_github_config_preserves_auto_check() {
+        let temp = TempConfig::new(
+            "save-auto-check",
+            Some(
+                r#"{"owner":"magicapple123","repo":"workbuddy-shift","proxy":"","autoCheck":false}"#,
+            ),
+        );
+        save_github_config_at(
+            &temp.dir,
+            &temp.file,
+            &json!({"proxy": "http://127.0.0.1:7897"}),
+        )
+        .unwrap();
+        let config = load_github_config_at(&temp.file);
+        assert_eq!(config["proxy"], "http://127.0.0.1:7897");
+        assert_eq!(config["autoCheck"], json!(false), "缺省字段必须沿用旧值");
+        assert_eq!(config["owner"], "magicapple123");
+
+        // 设置页开关显式提交时按提交值落盘。
+        save_github_config_at(&temp.dir, &temp.file, &json!({"proxy": "", "autoCheck": true}))
+            .unwrap();
+        let config = load_github_config_at(&temp.file);
+        assert_eq!(config["autoCheck"], json!(true));
+        assert_eq!(config["proxy"], "");
+    }
+
+    /// 没有任何配置文件时保存：autoCheck 落到默认 true。
+    #[test]
+    fn save_github_config_defaults_auto_check_when_absent() {
+        let temp = TempConfig::new("save-auto-check-default", None);
+        save_github_config_at(&temp.dir, &temp.file, &json!({"owner": "someone", "repo": "r"}))
+            .unwrap();
+        let config = load_github_config_at(&temp.file);
+        assert_eq!(config["autoCheck"], json!(true));
+        assert_eq!(config["owner"], "someone");
     }
 
     #[test]

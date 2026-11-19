@@ -76,6 +76,52 @@ export function numberInputHint(field: NumberFieldSpec): string {
     : `${field.label}需为 ${field.min}–${field.max} 之间的数字，已恢复为原值`;
 }
 
+/**
+ * 代理地址归一化：只去掉首尾空白。
+ *
+ * 用户从文档/聊天窗口粘贴时经常带上换行与前后空格；保留原样的首尾空白会让
+ * 「改回原值」被判成脏（按钮不消失），也会让落盘的地址与展示值不一致。
+ * 内部空白一律保留（`http:// user:pass@host` 这种写法不是我们要纠正的错）。
+ */
+export function normalizeProxy(raw: string | null | undefined): string {
+  return (raw ?? "").trim();
+}
+
+/**
+ * 代理地址校验：空串合法（表示关闭代理），非空必须是带 hostname 的 http(s) 地址。
+ *
+ * 返回 `null` 表示合法，否则返回可直接展示给用户的原因。只认 http/https：
+ * 其他 scheme（ftp / socks5 / file）在 reqwest 侧会以更难懂的错误失败，
+ * 在这里拦下来文案才说得清。
+ */
+export function validateProxyUrl(raw: string | null | undefined): string | null {
+  const value = normalizeProxy(raw);
+  if (!value) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "代理地址格式不正确，请填写 HTTP/HTTPS 地址，例如 http://127.0.0.1:7897";
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return "代理地址只支持 http:// 或 https://，例如 http://127.0.0.1:7897";
+  }
+  if (!parsed.hostname) {
+    return "代理地址缺少主机名，例如 http://127.0.0.1:7897";
+  }
+  return null;
+}
+
+/**
+ * 代理输入框是否有未保存的修改（忽略首尾空白差异）。
+ *
+ * 未加载配置时把已保存值视为空串：此时输入框为空 → 不脏 → 不显示「保存代理」。
+ * 只差空格也算「没改」——否则用户点进输入框再离开，按钮就会常驻。
+ */
+export function isProxyDirty(current: string | null | undefined, saved: string | null | undefined): boolean {
+  return normalizeProxy(current) !== normalizeProxy(saved);
+}
+
 /** 待提交的一次落盘：编辑字段 + 成功后提示（连续编辑合并时提示取最新一次）。 */
 export interface SaveCommit<T> {
   edits: Partial<T>;

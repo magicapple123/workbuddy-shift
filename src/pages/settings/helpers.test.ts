@@ -4,9 +4,12 @@ import {
   CHECKIN_NUMBER_FIELDS,
   ROTATE_NUMBER_FIELDS,
   checkinWindowIssue,
+  isProxyDirty,
   logLabel,
+  normalizeProxy,
   numberInputHint,
   resolveNumberInput,
+  validateProxyUrl,
 } from "./helpers";
 
 describe("settings helpers", () => {
@@ -51,5 +54,40 @@ describe("settings helpers", () => {
   it("numberInputHint 按是否有上限给出不同提示", () => {
     expect(numberInputHint(CHECKIN_NUMBER_FIELDS.keepalive_days)).toContain("0–90");
     expect(numberInputHint(ROTATE_NUMBER_FIELDS.min_remaining_credits)).toContain("不小于 0");
+  });
+
+  it("normalizeProxy 只修剪首尾空白", () => {
+    expect(normalizeProxy("  http://127.0.0.1:7897\n")).toBe("http://127.0.0.1:7897");
+    expect(normalizeProxy("")).toBe("");
+    expect(normalizeProxy(null)).toBe("");
+    expect(normalizeProxy(undefined)).toBe("");
+    expect(normalizeProxy(" http://a b/ ")).toBe("http://a b/");
+  });
+
+  it("validateProxyUrl：空串合法，http/https 且带 host 才通过", () => {
+    expect(validateProxyUrl("")).toBeNull();
+    expect(validateProxyUrl("   ")).toBeNull();
+    expect(validateProxyUrl("http://127.0.0.1:7897")).toBeNull();
+    expect(validateProxyUrl(" HTTPS://proxy.example.com:7897 ")).toBeNull();
+    expect(validateProxyUrl("http://user:pass@10.0.0.2:1080")).toBeNull();
+  });
+
+  it("validateProxyUrl：非 http(s) / 缺 host / 无法解析都拒绝", () => {
+    expect(validateProxyUrl("ftp://127.0.0.1:21")).toContain("只支持 http");
+    expect(validateProxyUrl("socks5://127.0.0.1:1080")).toContain("只支持 http");
+    expect(validateProxyUrl("http://")).toContain("格式不正确");
+    expect(validateProxyUrl("127.0.0.1:7897")).toContain("格式不正确");
+    expect(validateProxyUrl("not a url")).toContain("格式不正确");
+    expect(validateProxyUrl("file:///tmp/proxy")).toContain("只支持 http");
+  });
+
+  it("isProxyDirty：仅空白差异不算脏", () => {
+    expect(isProxyDirty("", "")).toBe(false);
+    expect(isProxyDirty("  ", "")).toBe(false);
+    expect(isProxyDirty("", undefined)).toBe(false);
+    expect(isProxyDirty(" http://127.0.0.1:7897 ", "http://127.0.0.1:7897")).toBe(false);
+    expect(isProxyDirty("http://127.0.0.1:7897", "http://127.0.0.1:7898")).toBe(true);
+    expect(isProxyDirty("http://127.0.0.1:7897", "")).toBe(true);
+    expect(isProxyDirty("", "http://127.0.0.1:7897")).toBe(true);
   });
 });

@@ -33,6 +33,13 @@ pub struct UpdateSnapshot {
     pub percent: Option<u8>,
     /// 错误 / 提示文案。
     pub message: Option<String>,
+    /// 新版本的发布说明（后端已 trim 并按 8000 字符截断）。
+    ///
+    /// 只在 `available` 阶段有值：`idle` / `upToDate` 清空，避免下一次检查后卡片
+    /// 拿着上一个版本的说明。老 Release 没有 notes 字段时为 None（卡片只显示版本 + 日期）。
+    pub notes: Option<String>,
+    /// 新版本发布日期（ISO 8601 原文，前端自行本地化）；无合法日期时为 None。
+    pub published_at: Option<String>,
     /// 最近一次检查完成时刻（秒）。
     pub checked_at: Option<i64>,
     /// 当前占用更新互斥的任务类型（`download` / `install`），空闲为 None。
@@ -54,6 +61,8 @@ impl UpdateSnapshot {
             latest: None,
             percent: None,
             message: None,
+            notes: None,
+            published_at: None,
             checked_at: None,
             busy_kind: None,
             busy_since: None,
@@ -248,6 +257,8 @@ pub(crate) fn apply_check_result(result: &Value) -> UpdateSnapshot {
             }
             snapshot.phase = UpdatePhase::Error;
             snapshot.latest = None;
+            snapshot.notes = None;
+            snapshot.published_at = None;
             snapshot.message = result
                 .get("message")
                 .and_then(Value::as_str)
@@ -270,6 +281,28 @@ pub(crate) fn apply_check_result(result: &Value) -> UpdateSnapshot {
         };
         snapshot.latest = has_update.then_some(latest);
         snapshot.message = None;
+        // 说明与日期只属于「有新版本」这一态：已是最新 / 检查失败都要清掉，
+        // 否则卡片会拿上一个目标版本的说明去描述当前状态。
+        snapshot.notes = if has_update {
+            result
+                .get("notes")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|notes| !notes.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        snapshot.published_at = if has_update {
+            result
+                .get("publishedAt")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
         snapshot.checked_at = result
             .get("checkedAt")
             .and_then(Value::as_i64)

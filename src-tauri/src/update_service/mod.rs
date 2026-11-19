@@ -173,11 +173,16 @@ pub(crate) fn busy_message() -> String {
 ///
 /// 常驻循环随进程存活，轻量模式（WebView 销毁）与主窗口关闭时同样在跑；
 /// 未带 force 走 core 的 6 小时缓存，因此多数轮次不发网络请求。
+///
+/// 每轮先读 `github_config.json` 的 `autoCheck`：设置页关掉「启动时检查更新」后，
+/// 下一轮起不再联网（sleep 保留，改回来即可恢复，不需要重启进程）。
 pub fn spawn_periodic_check(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
         loop {
-            let _ = check(&app, None, false).await;
+            if update::auto_check_enabled() {
+                let _ = check(&app, None, false).await;
+            }
             tokio::time::sleep(CHECK_INTERVAL).await;
         }
     });
@@ -470,6 +475,56 @@ mod tests {
         assert!(!should_rebuild_menu(100), "同档不重复重建");
     }
 
+    /// 检查结果里的说明与日期随 `available` 阶段写入，`upToDate` / `idle` 清空。
+    #[test]
+    fn check_result_carries_notes_and_published_at_only_when_available() {
+        let _guard = lock();
+        reset();
+        let available = apply_check_result(&json!({
+            "ok": true,
+            "latest": "9.9.9",
+            "hasUpdate": true,
+            "publishedAt": "2026-01-02T03:04:05Z",
+            "notes": "  新增启动发现新版本卡片  \n修复若干问题  ",
+        }));
+        assert_eq!(available.phase, UpdatePhase::Available);
+        assert_eq!(
+            available.notes.as_deref(),
+            Some("新增启动发现新版本卡片  \n修复若干问题")
+        );
+        assert_eq!(
+            available.published_at.as_deref(),
+            Some("2026-01-02T03:04:05Z")
+        );
+
+        // 老 Release 没有说明：字段为 None，卡片只显示版本 + 日期。
+        let bare = apply_check_result(&json!({
+            "ok": true,
+            "latest": "9.9.9",
+            "hasUpdate": true,
+        }));
+        assert_eq!(bare.notes, None);
+        assert_eq!(bare.published_at, None);
+
+        // 已是最新：上一轮的说明必须清掉。
+        apply_check_result(&json!({
+            "ok": true,
+            "latest": "9.9.9",
+            "hasUpdate": true,
+            "notes": "旧说明",
+            "publishedAt": "2026-01-02T03:04:05Z",
+        }));
+        let up_to_date =
+            apply_check_result(&json!({"ok": true, "latest": "0.0.1", "hasUpdate": false}));
+        assert_eq!(up_to_date.phase, UpdatePhase::UpToDate);
+        assert_eq!(up_to_date.notes, None);
+        assert_eq!(up_to_date.published_at, None);
+
+        reset();
+        assert_eq!(snapshot().notes, None);
+        assert_eq!(snapshot().published_at, None);
+    }
+
     /// 事件 / 命令负载的字段契约（前端 `UpdateSnapshot` 按此解析）。
     #[test]
     fn snapshot_serializes_camel_case_contract() {
@@ -478,6 +533,8 @@ mod tests {
         assert_eq!(value["latest"], json!(null));
         assert_eq!(value["percent"], json!(null));
         assert_eq!(value["message"], json!(null));
+        assert_eq!(value["notes"], json!(null));
+        assert_eq!(value["publishedAt"], json!(null));
         assert_eq!(value["checkedAt"], json!(null));
         assert_eq!(value["busyKind"], json!(null));
         assert_eq!(value["busySince"], json!(null));

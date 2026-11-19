@@ -346,6 +346,9 @@ fn update_menu_spec_maps_each_phase_to_its_entry() {
         latest: latest.map(str::to_string),
         percent,
         message: None,
+        // 说明与发布日期只影响前端卡片，托盘菜单文案不看这两个字段。
+        notes: None,
+        published_at: None,
         checked_at: None,
         busy_kind: None,
         busy_since: None,

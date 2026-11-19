@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UpdateCenter } from "@/components/app-shell/update-center";
+import { UpdateHost } from "@/components/update-host";
 import { demoModeEnabled, pagesDemoHostingEnabled } from "@/lib/demo-mode";
 import { useSessionsNavEnabled } from "@/lib/nav-prefs";
 import { useCreditAutoRefresh } from "@/hooks/use-credit-auto-refresh";
@@ -177,6 +178,8 @@ function Layout() {
       >
         <Outlet />
       </main>
+      {/* 更新宿主：右下角「发现新版本」卡片 + 全局更新弹窗（与托盘同一状态机）。 */}
+      <UpdateHost />
     </div>
   );
 }

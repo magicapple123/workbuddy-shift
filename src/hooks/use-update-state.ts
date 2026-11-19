@@ -20,6 +20,8 @@ const IDLE_SNAPSHOT: UpdateSnapshot = {
   latest: null,
   percent: null,
   message: null,
+  notes: null,
+  publishedAt: null,
   checkedAt: null,
   busyKind: null,
   busySince: null,

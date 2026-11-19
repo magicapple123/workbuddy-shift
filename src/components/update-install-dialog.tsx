@@ -18,8 +18,6 @@ import { useUpdateState } from "@/hooks/use-update-state";
 interface UpdateInstallDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 设置页输入框的代理值：下载与检查共用同一代理源（可能尚未保存）。 */
-  proxy?: string;
 }
 
 /**
@@ -28,8 +26,12 @@ interface UpdateInstallDialogProps {
  * 阶段与进度来自 `update-state` 订阅，不再自己调用 `@tauri-apps/plugin-updater`；
  * 下载 / 重启都只是把动作交给后端（`updateDownload` / `updateRestart`），状态由后端
  * 持有——关掉弹窗再打开，看到的仍是同一阶段与进度。
+ *
+ * 弹窗是全局唯一的（挂在 `UpdateHost`），拿不到设置页输入框里的临时值：下载代理一律
+ * 由后端 `configured_proxy()` 读 `github_config.json`。设置页「检查更新」在发起请求前
+ * 已把脏代理落盘，因此这里不会用到过期配置。
  */
-export function UpdateInstallDialog({ open, onOpenChange, proxy }: UpdateInstallDialogProps) {
+export function UpdateInstallDialog({ open, onOpenChange }: UpdateInstallDialogProps) {
   const snapshot = useUpdateState();
   const [restarting, setRestarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -50,7 +52,8 @@ export function UpdateInstallDialog({ open, onOpenChange, proxy }: UpdateInstall
   async function startDownload() {
     setActionError(null);
     try {
-      await api.updateDownload(proxy);
+      // 不传代理：由后端回落到已保存配置（设置页检查前已把脏代理落盘）。
+      await api.updateDownload();
     } catch (e) {
       setActionError(`下载更新失败：${api.asError(e)}`);
     }

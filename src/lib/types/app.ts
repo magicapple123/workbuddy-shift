@@ -22,6 +22,8 @@ export interface GithubConfig {
   owner?: string;
   repo?: string;
   proxy?: string;
+  /** 启动时检查更新（默认开启）。关闭后只有手动点「检查更新」才联网。 */
+  autoCheck?: boolean;
 }
 
 export interface UpdateInfo {
@@ -35,6 +37,8 @@ export interface UpdateInfo {
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
+  /** 发布说明（后端已 trim 并按 8000 字符截断）；老 Release 没有说明时为缺省。 */
+  notes?: string;
   error?: string;
   message?: string;
 }
@@ -59,6 +63,10 @@ export interface UpdateSnapshot {
   latest: string | null;
   percent: number | null;
   message: string | null;
+  /** 新版本发布说明（后端已 trim / 截断）；只在 `available` 阶段有值。 */
+  notes: string | null;
+  /** 新版本发布日期（ISO 8601 原文）；只在 `available` 阶段有值。 */
+  publishedAt: string | null;
   checkedAt: number | null;
   /** 占用更新互斥的任务类型（下载 / 安装）；检查不占锁，因此不会是 check。 */
   busyKind: "download" | "install" | null;
