@@ -8,6 +8,8 @@ import {
   formatDate,
   formatDateTime,
   formatFullDateTime,
+  formatPath,
+  isForeignPath,
   isUsableTimestamp,
   pad2,
 } from "./format";
@@ -57,5 +59,24 @@ describe("format", () => {
     expect(formatAmount(-0)).toBe("0");
     expect(formatAmount(Number.NaN)).toBe(EMPTY_TEXT);
     expect(formatAmount(null, "无")).toBe("无");
+  });
+
+  it("formatPath 只在 Windows 归一成本机分隔符", () => {
+    expect(formatPath("D:/workbuddy-shift", "win")).toBe("D:\\workbuddy-shift");
+    expect(formatPath("D:/a/b/c", "win")).toBe("D:\\a\\b\\c");
+    expect(formatPath("D:/a/b", "mac")).toBe("D:/a/b");
+    expect(formatPath("/Users/x/proj", "linux")).toBe("/Users/x/proj");
+    expect(formatPath("", "win")).toBe("");
+    expect(formatPath(null, "win")).toBe("");
+  });
+
+  it("isForeignPath 识别另一套系统的绝对路径", () => {
+    expect(isForeignPath("/Users/x/proj", "win")).toBe(true);
+    expect(isForeignPath("D:/workbuddy-shift", "win")).toBe(false);
+    expect(isForeignPath("//server/share", "win")).toBe(false);
+    expect(isForeignPath("D:/workbuddy-shift", "mac")).toBe(true);
+    expect(isForeignPath("/Users/x/proj", "mac")).toBe(false);
+    expect(isForeignPath("", "win")).toBe(false);
+    expect(isForeignPath(null, "win")).toBe(false);
   });
 });

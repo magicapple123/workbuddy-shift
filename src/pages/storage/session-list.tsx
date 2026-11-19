@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { DemoAction } from "@/components/demo-action";
 import type { StorageEntryKind, StorageSession } from "@/lib/types";
+import { formatPath, isForeignPath } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 import {
@@ -132,6 +133,7 @@ export function SessionList({
               const presence = presenceOverrides[session.id] ?? session.presence;
               const isOpen = expanded === session.id;
               const picked = selection[session.id] ?? [];
+              const foreign = isForeignPath(session.cwd);
               return (
                 <tr key={session.id} className="border-t border-border/50 align-top">
                   <td className="px-2 py-2.5">
@@ -159,7 +161,7 @@ export function SessionList({
                       ) : null}
                     </div>
                     <div className="mt-0.5 break-all text-[11px] text-muted-foreground">
-                      {formatTime(session.updatedAt)} · {session.cwd || "（无工作目录）"}
+                      {formatTime(session.updatedAt)} · {formatPath(session.cwd) || "（无工作目录）"}
                     </div>
                     <div className="break-all font-mono text-[10px] text-muted-foreground/70">
                       {session.id}
@@ -246,11 +248,13 @@ export function SessionList({
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={busy || !(session.cwd || session.entries[0]?.path)}
+                          disabled={busy || foreign || !(session.cwd || session.entries[0]?.path)}
                           title={
-                            session.cwd
-                              ? `在文件管理器中打开：${session.cwd}`
-                              : "该会话没有工作目录，只能定位存储副本所在的目录"
+                            foreign
+                              ? "该会话的工作目录来自其它系统，无法在本机打开"
+                              : session.cwd
+                                ? `在文件管理器中打开：${formatPath(session.cwd)}`
+                                : "该会话没有工作目录，只能定位存储副本所在的目录"
                           }
                           onClick={() =>
                             onReveal(

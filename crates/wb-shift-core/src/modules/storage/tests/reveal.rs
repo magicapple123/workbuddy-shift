@@ -292,3 +292,59 @@ fn scope_constants_are_stable() {
     assert_eq!(SCOPE_STORAGE, "storage");
     assert_eq!(SCOPE_CWD, "cwd");
 }
+
+/// 第四轮 01：数据库里的 cwd 是正斜杠（`D:/x`），交给 explorer 前必须换成本机分隔符。
+#[test]
+fn launch_arg_normalizes_slashes_on_windows() {
+    #[cfg(windows)]
+    {
+        assert_eq!(reveal_api::launch_arg("D:/a/b"), r"D:\a\b");
+        assert_eq!(
+            reveal_api::launch_arg(r"D:\a\b"),
+            r"D:\a\b",
+            "已经是反斜杠时不变"
+        );
+        assert_eq!(
+            reveal_api::launch_arg("D:/WorkBuddy_data/spaces/x"),
+            r"D:\WorkBuddy_data\spaces\x",
+            "带空格的多层目录同样归一"
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            reveal_api::launch_arg("D:/a/b"),
+            "D:/a/b",
+            "非 Windows 必须原样返回（open / xdg-open 只认正斜杠）"
+        );
+    }
+}
+
+/// 正斜杠的绝对目录在 cwd 分支必须判「存在」而不是回退（第三轮 fell_back 永远 false 的反面）。
+#[test]
+fn cwd_accepts_forward_slash_absolute_path() {
+    let sandbox = Sandbox::new("reveal-forward");
+    let dir = sandbox.base.join("proj");
+    std::fs::create_dir_all(&dir).expect("建目录");
+    let raw = dir.to_string_lossy().replace('\\', "/");
+
+    let target =
+        reveal_api::resolve_target(&sandbox.roots, &raw, "open", Some(SCOPE_CWD)).expect("必须允许");
+    assert!(!target.fell_back, "目录存在时不能标记回退：{raw}");
+    assert_eq!(target.path, dir);
+}
+
+/// 01-b：另一套系统的绝对路径给友好文案，而不是「只接受绝对路径」。
+#[test]
+fn cwd_reports_foreign_system_path() {
+    let sandbox = Sandbox::new("reveal-foreign");
+    #[cfg(windows)]
+    let raw = "/Users/x/proj";
+    #[cfg(not(windows))]
+    let raw = "D:/workbuddy-shift";
+
+    let error = reveal_api::resolve_target(&sandbox.roots, raw, "open", Some(SCOPE_CWD))
+        .expect_err("跨系统路径必须拒绝");
+    assert_eq!(error, reveal_api::FOREIGN_CWD_ERROR);
+    assert!(error.contains("其它系统"), "{error}");
+}

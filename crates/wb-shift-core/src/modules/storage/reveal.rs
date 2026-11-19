@@ -52,8 +52,35 @@ pub fn parse_scope(scope: Option<&str>) -> Result<&'static str, String> {
     }
 }
 
+/// 会话的工作目录来自其它系统时给用户的友好文案（第四轮 01-b）。
+pub const FOREIGN_CWD_ERROR: &str = "该会话的工作目录来自其它系统，无法在本机打开";
+
+/// 路径是否是「另一套系统的绝对路径」。
+///
+/// Windows 上 `Path::is_absolute()` 不认 `/Users/x`，会退化成「只接受绝对路径」这种
+/// 让人摸不着头脑的报错；反过来 POSIX 上 `D:/x` 也一样。这里先按字面前缀识别，
+/// 交给 [`FOREIGN_CWD_ERROR`] 说明真实原因。
+fn looks_foreign_absolute(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.starts_with('/') && !text.starts_with("//")
+    }
+    #[cfg(not(windows))]
+    {
+        let bytes = text.as_bytes();
+        bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'/' || bytes[2] == b'\\')
+    }
+}
+
 /// `scope="cwd"` 的路径约束：绝对路径、非 UNC / 设备 / 长路径前缀、无 `..` 穿越。
 fn validate_cwd_path(path: &Path) -> Result<(), String> {
+    if looks_foreign_absolute(path) {
+        return Err(FOREIGN_CWD_ERROR.to_string());
+    }
     if !path.is_absolute() {
         return Err("scope=cwd 只接受绝对路径".to_string());
     }
@@ -128,6 +155,22 @@ pub fn resolve_target(
     })
 }
 
+/// 交给文件管理器命令行参数的路径。
+///
+/// `explorer.exe` **不认正斜杠**：`explorer D:/workbuddy-shift` 会静默打开「文档」而
+/// 不是目标目录（第四轮 01 的根因）。所以 Windows 上把 `/` 归一成 `\`；
+/// 其它平台原样返回（`open` / `xdg-open` 只接受 `/`）。
+pub fn launch_arg(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.replace('/', "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
 /// `POST /api/storage/reveal`：解析目标并在系统文件管理器中打开。
 pub fn reveal(
     roots: &StorageRoots,
@@ -137,9 +180,10 @@ pub fn reveal(
 ) -> Result<Value, String> {
     let target = resolve_target(roots, path, mode, scope)?;
     spawn_reveal(&target.path, target.mode)?;
+    let launched = launch_arg(&target.path.to_string_lossy());
     Ok(json!({
         "ok": true,
-        "path": target.path.to_string_lossy(),
+        "path": launched,
         "fellBack": target.fell_back,
         "scope": target.scope,
     }))
@@ -162,11 +206,13 @@ fn existing_ancestor(path: &Path) -> (PathBuf, bool) {
 
 #[cfg(target_os = "windows")]
 fn spawn_reveal(path: &Path, mode: &str) -> Result<(), String> {
+    // explorer 只认本机分隔符：原样传 `D:/x` 会静默打开「文档」（第四轮 01）。
+    let arg = launch_arg(&path.to_string_lossy());
     let mut command = std::process::Command::new("explorer");
     if mode == "select" {
-        command.arg(format!("/select,{}", path.to_string_lossy()));
+        command.arg(format!("/select,{arg}"));
     } else {
-        command.arg(path);
+        command.arg(arg);
     }
     command
         .spawn()

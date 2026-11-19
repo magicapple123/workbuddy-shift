@@ -82,3 +82,47 @@ export function formatAmount(value: number | null | undefined, fallback = EMPTY_
   // `-0` 会在 Intl 里渲染成「-0」（快照差值算出来的负数零），统一归一成 0。
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value === 0 ? 0 : value);
 }
+
+/** 展示层使用的平台：`win` / `mac` / `linux`（测试可显式传入）。 */
+export type PathPlatform = "win" | "mac" | "linux";
+
+/** 从 UA 推断平台；非浏览器环境按 POSIX 处理。 */
+export function detectPlatform(): PathPlatform {
+  if (typeof navigator === "undefined") return "linux";
+  const ua = `${navigator.userAgent} ${navigator.platform ?? ""}`;
+  if (/Windows|Win32|Win64/i.test(ua)) return "win";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "mac";
+  return "linux";
+}
+
+/**
+ * 路径展示：仅 Windows 把 `/` 归一成本机原生分隔符。
+ *
+ * 数据库里的 `cwd` 原值就是正斜杠（`D:/x`），Windows 用户看到「界面 `D:\`、实际传 `D:/`」
+ * 会自相矛盾。只改显示，不回写数据（macOS / Linux 的 cwd 本来就是 `/`）。
+ * 任何「复制路径 / 导出清单 / 搜索建议」入口都必须复用它，避免同一页面两种写法。
+ */
+export function formatPath(
+  value: string | null | undefined,
+  platform: PathPlatform = detectPlatform(),
+): string {
+  if (!value) return "";
+  return platform === "win" ? value.replace(/\//g, "\\") : value;
+}
+
+/**
+ * 工作目录是否来自另一套系统（Windows 上的 `/Users/x`、POSIX 上的 `D:/x`）。
+ *
+ * 这类路径在本机 `is_absolute()` 为 false，点下去只会弹「只接受绝对路径」。
+ * 提前判出来，把按钮置灰并给出可读原因。
+ */
+export function isForeignPath(
+  value: string | null | undefined,
+  platform: PathPlatform = detectPlatform(),
+): boolean {
+  const text = (value ?? "").trim();
+  if (!text) return false;
+  if (platform === "win") return text.startsWith("/") && !text.startsWith("//");
+  return /^[A-Za-z]:[\\/]/.test(text);
+}
+
