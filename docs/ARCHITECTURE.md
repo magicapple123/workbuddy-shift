@@ -346,7 +346,8 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/session_groups/tests/jetbrains.rs` | 596 | 测试 | JetBrains 组同步/守卫用例，共用 `tests/editor.rs` 的造数夹具。 | 继续膨胀时按「守卫拒绝」「同步执行」拆两组。 |
 | `crates/wb-shift-core/src/modules/token_stats/jsonl.rs` | 568 | 流式解码 | JSONL 解码与 per-account 聚合在同一遍流式解析里完成；拆开要么二次读盘，要么跨文件持有游标与累加器。 | 下一轮把 `SourceCollector` 的累加逻辑抽到 `token_stats/collector.rs`，解码留原位。 |
 | `crates/wb-shift-core/src/modules/token_stats/projection.rs` | 517 | 投影聚合 | 维度/账号/会话三套累加器共享同一份投影上下文，拆开会让口径分叉（第三轮刚补齐「全局 = 各账号之和」）。 | 保持单文件；新增维度时先抽 `projection/dims.rs`。 |
-| `crates/wb-shift-core/src/modules/update.rs` | 673 | 更新清单与状态 | 清单 URL 优先级、semver 比较、检查缓存键与失败退避共享同一组常量与状态；第三轮加入代理/并发/负缓存后超过阈值。 | 下一轮把清单获取与解析抽 `update/manifest.rs`（`fetch_manifest`/`manifest_urls`），状态机留在 `update.rs`。 |
+| `crates/wb-shift-core/src/modules/update.rs` | 845 | 更新清单与状态 | 清单 URL 优先级、semver 比较、检查缓存键与失败退避共享同一组常量与状态；第三轮加入代理/并发/负缓存，第四轮加入 `notes` 截断与 `autoCheck` 配置后超过阈值。 | 下一轮把清单获取与解析抽 `update/manifest.rs`（`fetch_manifest`/`manifest_urls`/`manifest_notes`），状态机与配置留在 `update.rs`。 |
+| `src-tauri/src/update_service/mod.rs` | 553 | 更新状态机 | 检查（single-flight + 20s 预算）、阶段流转入口与单测共用同一份进程级状态（快照 / BUSY / 上次检查结果）；测试必须与状态机同文件才能复用 `TEST_LOCK` 串行化，拆开会引入跨文件竞态。 | 下一轮把检查编排抽 `update_service/check.rs`，测试随之迁移。 |
 
 > 该表由 `node scripts/check-structure.mjs` **双向校验**：未登记的 >500 行文件、行数与实际不符、
 > 已缩小到 500 行以内但条目未删，都会让 CI 失败。新增文件必须先拆分，或按同一格式登记理由与计划。
