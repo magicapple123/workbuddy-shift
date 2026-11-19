@@ -29,6 +29,12 @@ import urllib.request
 # 0.2.0 及更早：Windows 双名是已发布事实，不能回改（回改会让 0.2.0 客户端 404）。
 LEGACY_DUAL_NAME_MAX = (0, 2, 0)
 
+# 预发布版本也要能匹配：0.2.1-rc.1 的安装包名是
+# `workbuddy-shift_0.2.1-rc.1_x64-setup.exe`（tag 与文件名同源）。
+VERSIONED_WINDOWS_INSTALLER_RE = re.compile(
+    r"workbuddy-shift_\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?_x64-setup\.exe$"
+)
+
 REQUIRED_MANIFESTS = [
     "latest.json",
     "latest-windows-x86_64.json",
@@ -127,6 +133,10 @@ def download_manifest(owner_repo: str, tag: str, attempts: int = 12) -> dict:
     raise SystemExit(f"拉取 {url} 失败：{last_error}")
 
 
+def is_versioned_windows_installer(name: str) -> bool:
+    return VERSIONED_WINDOWS_INSTALLER_RE.match(name) is not None
+
+
 def check_assets(tag: str, version: tuple[int, int, int]) -> list[dict]:
     owner_repo = repo_slug()
     release = gh_api(f"repos/{owner_repo}/releases/tags/{tag}")
@@ -146,11 +156,7 @@ def check_assets(tag: str, version: tuple[int, int, int]) -> list[dict]:
     windows_installers = sorted(
         name for name in names if name.endswith("-setup.exe")
     )
-    versioned = [
-        name
-        for name in windows_installers
-        if re.match(r"workbuddy-shift_\d+\.\d+\.\d+_x64-setup\.exe$", name)
-    ]
+    versioned = [name for name in windows_installers if is_versioned_windows_installer(name)]
     if len(versioned) != 1:
         fail(f"Windows 人用安装包应恰好 1 份带版本号的，实际：{versioned}")
     if "workbuddy-shift-windows-x86_64-setup.exe" in windows_installers:
@@ -216,7 +222,32 @@ def check_manifest(tag: str, config_path: str = "src-tauri/tauri.conf.json") -> 
         warn("latest.json 的 notes 为空（发版时未提供 release-notes 文件）")
 
 
+def selftest() -> int:
+    """不联网的名字规则自测，CI 里跑，防止预发布版本再被误判。"""
+    accepted = [
+        "workbuddy-shift_0.2.1_x64-setup.exe",
+        "workbuddy-shift_0.2.1-rc.1_x64-setup.exe",
+        "workbuddy-shift_0.2.1-rc.10_x64-setup.exe",
+        "workbuddy-shift_1.0.0-beta.2_x64-setup.exe",
+    ]
+    rejected = [
+        "workbuddy-shift_x64-setup.exe",
+        "workbuddy-shift_0.2.1_x64-setup.exe.sig",
+        "workbuddy-shift_0.2_x64-setup.exe",
+        "WorkBuddy Shift_0.2.1_x64-setup.exe",
+    ]
+    bad = [name for name in accepted if not is_versioned_windows_installer(name)]
+    bad += [name for name in rejected if is_versioned_windows_installer(name)]
+    if bad:
+        print(f"self-test failed: {bad}")
+        return 1
+    print("self-test passed")
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--selftest"]:
+        return selftest()
     tag = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("GITHUB_REF_NAME", "")
     if not tag:
         raise SystemExit("用法：check-release-assets.py <tag>")

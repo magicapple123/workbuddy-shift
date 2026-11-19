@@ -134,6 +134,8 @@ jobs:
           node scripts/check-rust-locks.mjs
           node scripts/check-structure.mjs
           node scripts/check-companion-contract.mjs
+          # 发布校验脚本的名字规则自测：预发布版本（0.2.1-rc.1）也要被认成带版本号的安装包。
+          python scripts/check-release-assets.py --selftest
 
       # tauri-build 还要求 externalBin 存在。这里只放占位文件让编译检查通过；
       # 真实 runtime 由 build.yml（发版）与 scripts/build-companion.mjs 产出。
