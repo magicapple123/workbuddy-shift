@@ -179,7 +179,10 @@ export function AutoCheckinCard() {
 
   /** 逐账号开关只列出支持签到的档位（国际版签到接口未开放）。 */
   const checkinAccounts = accounts.filter((account) => variantSupportsCheckin(accountVariant(account)));
+  /** 被关闭参与资格的账号数（空名单 → 0）。折叠行用它显示「已关闭 N 个」。 */
+  const intlOnlyCount = accounts.length - checkinAccounts.length;
   const excludedIds = new Set(cfg?.excluded_account_ids ?? []);
+  const excludedCount = checkinAccounts.filter((account) => excludedIds.has(account.id)).length;
   const windowIssue = cfg ? checkinWindowIssue(cfg.checkin_start, cfg.checkin_end) : null;
 
   return (
@@ -284,29 +287,54 @@ export function AutoCheckinCard() {
                 </div>
               </AccordionSettingsRow>
 
-              {/* 逐账号开关：切换即落盘，与参数编辑共用同一条提交链。 */}
+              {/* 逐账号开关：切换即落盘，与参数编辑共用同一条提交链。
+                  标题必须与开关语义一致（开 = 参与）：数据层存的是排除名单
+                  `excluded_account_ids`，之前标题从模型反推成「不参与」，与
+                  `checked={!excluded}` 恰好相反（第三轮第 12 条）。 */}
               <AccordionSettingsRow
                 value="excluded"
-                label="不参与自动签到的账号"
+                label="参与自动签到的账号"
                 description="关闭后，后台轮次、刷新积分与全部立即签到都会跳过该账号；仍可在账号卡片进行单账号手动签到。"
+                actions={
+                  excludedCount > 0 ? (
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      已关闭 {excludedCount} 个
+                    </span>
+                  ) : undefined
+                }
               >
                 <div className={INSET_PANEL}>
                   {checkinAccounts.length === 0 ? (
-                    <p className="py-2 text-xs text-muted-foreground">暂无可签到的账号</p>
+                    <p className="py-2 text-xs text-muted-foreground">
+                      {accounts.length === 0
+                        ? "尚未添加账号，添加后可按账号选择是否参与自动签到"
+                        : intlOnlyCount > 0
+                          ? `没有可参与自动签到的账号：其中 ${intlOnlyCount} 个国际版账号不支持自动签到`
+                          : "没有可参与自动签到的账号"}
+                    </p>
                   ) : (
                     checkinAccounts.map((account) => {
                       const name = displayName(account);
+                      const participating = !excludedIds.has(account.id);
                       return (
                         <div
                           key={account.id}
                           className="flex min-w-0 items-center justify-between gap-3 border-b border-border/50 py-2.5 last:border-b-0"
                         >
-                          <span className="min-w-0 flex-1 truncate text-xs leading-4" title={name}>
-                            {name}
+                          <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                            <span className="min-w-0 truncate text-xs leading-4" title={name}>
+                              {name}
+                            </span>
+                            {/* 行内状态：与折叠行的「已关闭 N 个」用同一个词，避免两套说法。 */}
+                            {!participating && (
+                              <span className="shrink-0 text-[10px] leading-4 text-muted-foreground">
+                                已关闭
+                              </span>
+                            )}
                           </span>
                           <DemoAction>
                             <Switch
-                              checked={!excludedIds.has(account.id)}
+                              checked={participating}
                               onCheckedChange={(allowed) => onAutoCheckinChange(account, allowed)}
                               aria-label={`${name}参与自动签到`}
                             />
