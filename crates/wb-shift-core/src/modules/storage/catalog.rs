@@ -61,7 +61,13 @@ impl Category {
     }
 
     /// 「其它 / 未分类」：只读补集，让分类之和等于根总量。
-    pub(super) fn other(id: &str, label: &str, group: &'static str, path: PathBuf, usage: Usage) -> Self {
+    pub(super) fn other(
+        id: &str,
+        label: &str,
+        group: &'static str,
+        path: PathBuf,
+        usage: Usage,
+    ) -> Self {
         let why = "根总量减去已列分类，含不可清理的大目录；只读展示，不提供清理";
         Self {
             id: id.to_string(),
@@ -112,8 +118,7 @@ pub struct Catalog {
 /// （无引用基线判定）与 [`super::sessions`]（关联组解析），避免同一文件读两遍。
 pub fn catalog(roots: &StorageRoots, variant: WbVariant, links: &str) -> Catalog {
     let mut categories = Vec::new();
-    let (store_total, trash_usage, trash_entries) =
-        tool_categories(roots, links, &mut categories);
+    let (store_total, trash_usage, trash_entries) = tool_categories(roots, links, &mut categories);
     let mut client_total = Usage::default();
     let mut client_roots = Vec::new();
     let mut protected_pending = false;

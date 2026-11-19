@@ -62,12 +62,7 @@ pub fn scan_with(roots: &StorageRoots, variant: WbVariant, refresh: bool) -> Val
 ///
 /// 快照键包含数据根，因此「总览」与「会话资产」必须用同一个 `data_root` 才会共享
 /// 同一份快照；生产路径两者都是 `variant.data_root()`。
-pub fn scan_at(
-    roots: &StorageRoots,
-    variant: WbVariant,
-    data_root: &Path,
-    refresh: bool,
-) -> Value {
+pub fn scan_at(roots: &StorageRoots, variant: WbVariant, data_root: &Path, refresh: bool) -> Value {
     if refresh {
         snapshot::invalidate();
         // 受保护项也要重算：只把 `at` 归零，数字留着（页面不会突然掉到 0）。
@@ -190,11 +185,7 @@ fn bump(counts: &mut Value, key: &str) {
 }
 
 /// `POST /api/storage/sessions`：全部会话资产包（含逐子项）。
-pub fn sessions_payload(
-    roots: &StorageRoots,
-    variant: WbVariant,
-    data_root: &Path,
-) -> Value {
+pub fn sessions_payload(roots: &StorageRoots, variant: WbVariant, data_root: &Path) -> Value {
     let (snapshot, reused) = snapshot::ensure(roots, variant, data_root);
     json!({
         "variant": variant.as_str(),

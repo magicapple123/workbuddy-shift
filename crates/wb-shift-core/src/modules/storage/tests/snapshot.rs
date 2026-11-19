@@ -2,9 +2,9 @@
 //!
 //! 口径断言：`已列分类之和 == 根总量`（每个根都有一行 `*.other` 补集）。
 
-use super::fixture::{lock_snapshot, Sandbox};
 use super::super::protected::{self, SizeCache, SizeEntry};
 use super::super::{invalidate_scan_cache, scan_at, sessions_payload, trash_payload};
+use super::fixture::{lock_snapshot, Sandbox};
 use crate::modules::variant::WbVariant;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -70,7 +70,10 @@ fn one_snapshot_serves_scan_sessions_and_trash() {
 
     // 清理后作废：下一次必须重算。
     invalidate_scan_cache();
-    assert_eq!(scan_at(&sandbox.roots, WbVariant::Cn, &sandbox.data_root, false)["cached"], false);
+    assert_eq!(
+        scan_at(&sandbox.roots, WbVariant::Cn, &sandbox.data_root, false)["cached"],
+        false
+    );
     invalidate_scan_cache();
 }
 
@@ -187,7 +190,10 @@ fn overview_category_sessions_and_trash_share_one_caliber() {
         .iter()
         .map(|bundle| bundle["files"].as_u64().unwrap_or(0))
         .sum();
-    assert_eq!(scan["sessions"]["bytes"], bundle_bytes, "会话卡必须等于逐条之和");
+    assert_eq!(
+        scan["sessions"]["bytes"], bundle_bytes,
+        "会话卡必须等于逐条之和"
+    );
     assert_eq!(scan["sessions"]["files"], bundle_files);
 
     // 3) 总量 == 工具数据 + 客户端数据（会话资产与回收站是子集，不可相加）。
@@ -217,7 +223,9 @@ fn protected_directories_are_deferred_then_served_from_cache() {
     std::fs::create_dir_all(&binaries).expect("建运行时目录");
     std::fs::write(binaries.join("app.bin"), b"1234567890").expect("写运行时");
     // 账号目录是最典型的「大但不可清理」项：必须被延迟计量。
-    let account = sandbox.data_root.join("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
+    let account = sandbox
+        .data_root
+        .join("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
     std::fs::create_dir_all(&account).expect("建账号目录");
     std::fs::write(account.join("data.bin"), b"01234").expect("写账号数据");
     invalidate_scan_cache();

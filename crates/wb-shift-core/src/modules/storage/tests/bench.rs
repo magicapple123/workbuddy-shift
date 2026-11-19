@@ -318,9 +318,7 @@ fn storage_bench_before_after() {
     println!("  计入总量的文件 {new_counted} 个（差额 = 受保护项从缓存读到的 {cached_files} 个，不走盘）");
     println!("  快照阶段耗时：{phase}（构建本身 {build_ms} ms）");
     println!("改造后二次进入（纯缓存，只做 JSON 装配 + 进程探测）：{warm_best} ms");
-    println!(
-        "  （`client_running` 进程探测本身约 {probe_ms} ms，两次测量都已计入，不是本次收益）"
-    );
+    println!("  （`client_running` 进程探测本身约 {probe_ms} ms，两次测量都已计入，不是本次收益）");
     println!(
         "相对改造前：{:.0}% 更快（按一屏耗时）；走盘文件数 {:.0}% 更少",
         100.0 * (1.0 - (new_best as f64) / (old_ms.max(1) as f64)),

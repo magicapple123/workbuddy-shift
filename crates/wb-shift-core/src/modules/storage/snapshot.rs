@@ -104,11 +104,7 @@ pub fn invalidate() {
 /// 取当前快照；返回 `(快照, 是否复用缓存)`。
 ///
 /// `data_root` 参与缓存键：不同档位（国内 / 国际）与不同沙箱的数据根不能混用。
-pub fn ensure(
-    roots: &StorageRoots,
-    variant: WbVariant,
-    data_root: &Path,
-) -> (Arc<Snapshot>, bool) {
+pub fn ensure(roots: &StorageRoots, variant: WbVariant, data_root: &Path) -> (Arc<Snapshot>, bool) {
     let key = snapshot_key(roots, variant, data_root);
     let ttl = Duration::from_secs(SNAPSHOT_TTL_SECS);
 
@@ -175,8 +171,13 @@ fn build(roots: &StorageRoots, variant: WbVariant, data_root: &Path) -> Snapshot
     let catalog_ms = millis(catalog_started.elapsed());
 
     let sessions_started = Instant::now();
-    let bundles =
-        sessions::scan_sessions_with_links(variant, data_root, &roots.store, read_rows(data_root), &links);
+    let bundles = sessions::scan_sessions_with_links(
+        variant,
+        data_root,
+        &roots.store,
+        read_rows(data_root),
+        &links,
+    );
     let sessions_ms = millis(sessions_started.elapsed());
 
     // 回收站不再单独走盘：体积与条目数都来自 `catalog` 那一趟遍历的 `trash` 键，

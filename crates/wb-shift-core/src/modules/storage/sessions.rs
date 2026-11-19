@@ -244,10 +244,7 @@ pub fn read_session_links(store_root: &Path) -> String {
 }
 
 /// 关联组索引（原文由调用方提供）。
-pub fn group_index_from_text(
-    text: &str,
-    variant: WbVariant,
-) -> HashMap<String, (String, usize)> {
+pub fn group_index_from_text(text: &str, variant: WbVariant) -> HashMap<String, (String, usize)> {
     let mut out = HashMap::new();
     let Ok(json) = serde_json::from_str::<Value>(text) else {
         return out;
@@ -487,7 +484,11 @@ fn build_bundle(
 /// `read_dir` 得到的 id 集合）；只有 `present` 时才 `usage_of` 走盘，避免「不存在也 stat」。
 fn entry(kind: &'static str, label: &str, path: Option<PathBuf>, present: bool) -> Entry {
     let path = path.unwrap_or_default();
-    let usage = if present { usage_of(&path) } else { Usage::default() };
+    let usage = if present {
+        usage_of(&path)
+    } else {
+        Usage::default()
+    };
     Entry {
         kind,
         label: label.to_string(),

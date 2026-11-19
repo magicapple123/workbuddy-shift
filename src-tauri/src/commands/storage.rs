@@ -11,10 +11,7 @@ use wb_shift_core::modules::variant::WbVariant;
 ///
 /// `refresh = true` 是「重新扫描」：作废服务端快照与受保护项体积缓存后重算。
 #[tauri::command]
-pub async fn storage_scan(
-    variant: Option<String>,
-    refresh: Option<bool>,
-) -> Result<Value, String> {
+pub async fn storage_scan(variant: Option<String>, refresh: Option<bool>) -> Result<Value, String> {
     let variant = WbVariant::parse(variant.as_deref());
     let refresh = refresh.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {

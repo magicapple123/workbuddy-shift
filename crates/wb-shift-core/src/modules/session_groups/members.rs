@@ -34,9 +34,8 @@ pub(super) fn plugin_copy_and_register(
         target_uid,
         items,
     )?;
-    let link_errors = vscode_session_sync::register_copied_sessions_in(
-        spec, root, paths, variant, &report,
-    );
+    let link_errors =
+        vscode_session_sync::register_copied_sessions_in(spec, root, paths, variant, &report);
     Ok((report, link_errors))
 }
 
@@ -176,8 +175,7 @@ pub fn add_member(
                 conversation_id: source.session_id.clone(),
             };
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
-            let guard =
-                prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
+            let guard = prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
             let result = (|| -> Result<Value, String> {
                 let (report, link_errors) = match client {
                     SessionClient::CodebuddyIde => {
@@ -197,15 +195,17 @@ pub fn add_member(
                         );
                         (report, link_errors)
                     }
-                    SessionClient::VscodeExt | SessionClient::Jetbrains => plugin_copy_and_register(
-                        spec,
-                        &root,
-                        &paths,
-                        variant,
-                        &source.uid,
-                        &target_uid,
-                        &[item],
-                    )?,
+                    SessionClient::VscodeExt | SessionClient::Jetbrains => {
+                        plugin_copy_and_register(
+                            spec,
+                            &root,
+                            &paths,
+                            variant,
+                            &source.uid,
+                            &target_uid,
+                            &[item],
+                        )?
+                    }
                     SessionClient::Workbuddy => unreachable!(),
                 };
                 let copied = report

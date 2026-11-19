@@ -220,8 +220,7 @@ fn version_from_dir_name(dir_name: &str) -> Option<String> {
     dir_name
         .rsplit(|c: char| c.is_whitespace() || c == '_')
         .find(|token| {
-            token.chars().next().is_some_and(|c| c.is_ascii_digit())
-                && is_version_suffix(token)
+            token.chars().next().is_some_and(|c| c.is_ascii_digit()) && is_version_suffix(token)
         })
         .map(str::to_string)
 }

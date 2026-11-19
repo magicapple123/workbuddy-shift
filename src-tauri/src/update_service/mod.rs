@@ -64,8 +64,7 @@ const CHECK_BUDGET: Duration = Duration::from_secs(20);
 /// 并发检查的去重窗口：后到的调用直接复用同一结果，不再发第二次网络请求。
 const CHECK_DEDUPE_SECS: i64 = 5;
 
-const CHECK_TIMEOUT_MESSAGE: &str =
-    "检查更新超时（20 秒），请检查网络或更新代理后重试";
+const CHECK_TIMEOUT_MESSAGE: &str = "检查更新超时（20 秒），请检查网络或更新代理后重试";
 
 const NO_PACKAGE_MESSAGE: &str = "没有可安装的更新包，请先下载更新包";
 
@@ -156,7 +155,11 @@ fn remember_check_result(value: &Value) {
 pub(crate) fn busy_message() -> String {
     match busy_info() {
         (Some(kind), Some(since)) => {
-            let label = if kind == "install" { "安装" } else { "下载" };
+            let label = if kind == "install" {
+                "安装"
+            } else {
+                "下载"
+            };
             format!(
                 "已有更新{label}任务正在进行（已 {}s），请稍候",
                 (now_secs() - since).max(0)

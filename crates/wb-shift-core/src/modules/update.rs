@@ -240,7 +240,11 @@ async fn fetch_manifest_at(url: String, proxy: Option<String>) -> Option<Value> 
 /// 并行拉取三条候选清单，按优先级返回第一个成功结果。
 ///
 /// 并行是第 2 条的核心：串行时 3 × 30s 会把「一次检查」放大到 90s 以上。
-async fn fetch_manifest_version(owner: &str, repo: &str, proxy: Option<&str>) -> Result<Value, String> {
+async fn fetch_manifest_version(
+    owner: &str,
+    repo: &str,
+    proxy: Option<&str>,
+) -> Result<Value, String> {
     let urls = updater_manifest_urls(owner, repo, std::env::consts::OS, std::env::consts::ARCH);
     let proxy = proxy.map(str::to_string);
     let first = urls.first().cloned().unwrap_or_default();
@@ -251,7 +255,9 @@ async fn fetch_manifest_version(owner: &str, repo: &str, proxy: Option<&str>) ->
         fetch_manifest_at(second, proxy.clone()),
         fetch_manifest_at(third, proxy),
     );
-    a.or(b).or(c).ok_or_else(|| "更新清单不可达（候选地址全部失败）".to_string())
+    a.or(b)
+        .or(c)
+        .ok_or_else(|| "更新清单不可达（候选地址全部失败）".to_string())
 }
 
 /// 兜底端点：请求 `/releases/latest`，读 302 `Location` 头（形如
@@ -268,8 +274,7 @@ async fn fetch_latest_tag(
     headers.insert("User-Agent".to_string(), "workbuddy-shift".to_string());
     let started = Instant::now();
     let request = http_request_raw(&url, "GET", None, Some(&headers), proxy, false);
-    let (status, resp_headers, body) = match tokio::time::timeout(FALLBACK_TIMEOUT, request).await
-    {
+    let (status, resp_headers, body) = match tokio::time::timeout(FALLBACK_TIMEOUT, request).await {
         Ok(result) => result,
         Err(_) => {
             error_log::record(
@@ -294,7 +299,10 @@ async fn fetch_latest_tag(
         error_log::record(
             "backend",
             "更新兜底请求失败",
-            &format!("url={url} 耗时={}ms 原因={msg}", started.elapsed().as_millis()),
+            &format!(
+                "url={url} 耗时={}ms 原因={msg}",
+                started.elapsed().as_millis()
+            ),
         );
         return Err((msg, -1));
     }
@@ -388,7 +396,10 @@ pub async fn update_check(proxy: Option<&str>, force: bool) -> Value {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty());
-    let proxy = proxy.map(str::trim).filter(|v| !v.is_empty()).or(configured_proxy);
+    let proxy = proxy
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or(configured_proxy);
     let release_url = format!("https://github.com/{owner}/{repo}/releases/latest");
     let current = APP_VERSION.to_string();
 
@@ -622,7 +633,10 @@ mod tests {
     /// 第 19 条的三种预发布场景：旧实现把非数字段整段丢弃，导致比较结果错误。
     #[test]
     fn compare_versions_handles_prerelease() {
-        assert_eq!(compare_versions("0.2.1-rc1", "0.2.0"), Ok(Ordering::Greater));
+        assert_eq!(
+            compare_versions("0.2.1-rc1", "0.2.0"),
+            Ok(Ordering::Greater)
+        );
         assert_eq!(compare_versions("0.2.0-rc1", "0.2.0"), Ok(Ordering::Less));
         assert_eq!(
             compare_versions("1.0.0-beta.1", "1.0.0"),
@@ -644,7 +658,10 @@ mod tests {
     fn compare_versions_rejects_invalid_versions() {
         let error = compare_versions("not-a-version", "0.2.0").unwrap_err();
         assert!(error.contains("不是合法 semver"), "{error}");
-        assert!(compare_versions("0.2", "0.2.0").is_err(), "两段式版本不可比较");
+        assert!(
+            compare_versions("0.2", "0.2.0").is_err(),
+            "两段式版本不可比较"
+        );
     }
 
     /// 发布标题与 tag / 版本号相同时不应输出（否则前端渲染成 `v0.2.0 · v0.2.0`）。

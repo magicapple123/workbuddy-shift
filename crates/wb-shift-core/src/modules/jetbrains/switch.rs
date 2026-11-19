@@ -63,11 +63,7 @@ pub(super) fn switch_after_close_inner(
         if let Err(error) = write_secret_for(&target.config_dir, &payload) {
             let error = describe_inject_error(error);
             let rollback_errors = rollback_writes(&applied);
-            return Err(join_with_rollback(
-                error,
-                applied.len(),
-                rollback_errors,
-            ));
+            return Err(join_with_rollback(error, applied.len(), rollback_errors));
         }
         applied.push((target.config_dir.clone(), existing));
         written.push(target.name.clone());

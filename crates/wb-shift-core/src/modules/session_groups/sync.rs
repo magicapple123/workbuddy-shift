@@ -406,7 +406,8 @@ pub(super) fn prepare_editor_window(
         SessionClient::Jetbrains => {
             // JetBrains 的判定与目标账号无关：IDE 内存里只有一个账号，且多个产品共用数据目录。
             let _ = target_uids;
-            JetbrainsIdeGuard::prepare(restart, hint).map(|guard| Some(EditorGuard::Jetbrains(guard)))
+            JetbrainsIdeGuard::prepare(restart, hint)
+                .map(|guard| Some(EditorGuard::Jetbrains(guard)))
         }
         SessionClient::Workbuddy | SessionClient::CodebuddyIde => Ok(None),
     }

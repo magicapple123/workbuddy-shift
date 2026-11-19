@@ -206,18 +206,14 @@ pub(crate) async fn download_package<R: Runtime>(
             tokio::time::timeout(Duration::from_secs(20), updater.check())
                 .await
                 .map_err(|_| {
-                    DownloadError::from(
-                        "检查更新包超时（20 秒），请检查网络或更新代理".to_string(),
-                    )
+                    DownloadError::from("检查更新包超时（20 秒），请检查网络或更新代理".to_string())
                 })?
                 .map_err(|error| {
                     let described = describe_updater_error(&error);
                     error_log::record("backend", "更新包检查失败", &described.message);
                     described
                 })?
-                .ok_or_else(|| {
-                    DownloadError::from("更新源没有可用的更新包".to_string())
-                })?
+                .ok_or_else(|| DownloadError::from("更新源没有可用的更新包".to_string()))?
         }
     };
 

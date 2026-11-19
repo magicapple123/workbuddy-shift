@@ -53,7 +53,9 @@ impl JetbrainsIdeGuard {
 
     /// 本次窗口是否真的关闭了 IDE（报告字段只认「我们关的」）。
     pub(super) fn closed_by_us(&self) -> bool {
-        self.closed.as_ref().is_some_and(|closed| !closed.is_empty())
+        self.closed
+            .as_ref()
+            .is_some_and(|closed| !closed.is_empty())
     }
 
     /// 成功收尾：重开（仅本次由我们关闭时）。`Err` = 重开失败，操作本身已成功。

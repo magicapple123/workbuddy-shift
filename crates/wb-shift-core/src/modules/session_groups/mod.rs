@@ -125,9 +125,7 @@ pub use maintenance::prune_dead_groups;
 pub use members::{
     add_member, copy_linked_sessions, delete_group, list_account_sessions, remove_member,
 };
-pub use sync::{
-    jetbrains_restart_precheck, preview_pair, sync_pair, vscode_restart_precheck,
-};
+pub use sync::{jetbrains_restart_precheck, preview_pair, sync_pair, vscode_restart_precheck};
 pub use view::{detail, list};
 
 /// 插件侧同步入口运行中的报错文案（`restart=false`，逐字保持既有文案）。

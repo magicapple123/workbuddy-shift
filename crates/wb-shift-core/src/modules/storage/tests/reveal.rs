@@ -21,8 +21,9 @@ fn compat_no_scope_is_identical_to_explicit_storage_scope() {
     std::fs::write(inside.join("app.log"), b"log").expect("写日志");
 
     // 目录：不传 scope == 传 storage（路径 / 回退标志 / mode / scope 全部一致）。
-    let legacy = reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", None)
-        .expect("白名单内目录必须允许");
+    let legacy =
+        reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", None)
+            .expect("白名单内目录必须允许");
     let explicit = reveal_api::resolve_target(
         &sandbox.roots,
         &inside.to_string_lossy(),
@@ -30,7 +31,10 @@ fn compat_no_scope_is_identical_to_explicit_storage_scope() {
         Some(SCOPE_STORAGE),
     )
     .expect("白名单内目录必须允许");
-    assert_eq!(legacy.path, explicit.path, "不传 scope 必须与 storage 同路径");
+    assert_eq!(
+        legacy.path, explicit.path,
+        "不传 scope 必须与 storage 同路径"
+    );
     assert_eq!(legacy.path, inside);
     assert_eq!(legacy.fell_back, explicit.fell_back);
     assert!(!legacy.fell_back);
@@ -57,8 +61,9 @@ fn compat_no_scope_is_identical_to_explicit_storage_scope() {
     assert_eq!(legacy.mode, explicit.mode);
 
     // 空串 scope 也按缺省处理（老前端可能传 `scope: ""`）。
-    let empty = reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", Some(""))
-        .expect("空 scope 必须按缺省处理");
+    let empty =
+        reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", Some(""))
+            .expect("空 scope 必须按缺省处理");
     assert_eq!(empty.scope, SCOPE_STORAGE);
     assert_eq!(empty.path, inside);
 
@@ -96,9 +101,13 @@ fn cwd_allows_outside_root_that_storage_rejects() {
     .expect_err("storage 必须拒绝白名单外的工作目录");
     assert!(error.contains("白名单"), "{error}");
 
-    let target =
-        reveal_api::resolve_target(&sandbox.roots, &project.to_string_lossy(), "open", Some(SCOPE_CWD))
-            .expect("cwd 必须允许白名单外目录");
+    let target = reveal_api::resolve_target(
+        &sandbox.roots,
+        &project.to_string_lossy(),
+        "open",
+        Some(SCOPE_CWD),
+    )
+    .expect("cwd 必须允许白名单外目录");
     assert_eq!(target.scope, SCOPE_CWD);
     assert_eq!(target.path, project);
     assert!(!target.fell_back);
@@ -106,8 +115,20 @@ fn cwd_allows_outside_root_that_storage_rejects() {
     // 白名单内的路径两种 scope 都允许（cwd 只多开一扇门，不关掉原来的）。
     let inside = sandbox.data_root.join("logs");
     std::fs::create_dir_all(&inside).expect("建日志目录");
-    assert!(reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", Some(SCOPE_CWD)).is_ok());
-    assert!(reveal_api::resolve_target(&sandbox.roots, &inside.to_string_lossy(), "open", Some(SCOPE_STORAGE)).is_ok());
+    assert!(reveal_api::resolve_target(
+        &sandbox.roots,
+        &inside.to_string_lossy(),
+        "open",
+        Some(SCOPE_CWD)
+    )
+    .is_ok());
+    assert!(reveal_api::resolve_target(
+        &sandbox.roots,
+        &inside.to_string_lossy(),
+        "open",
+        Some(SCOPE_STORAGE)
+    )
+    .is_ok());
 }
 
 #[test]
@@ -208,9 +229,13 @@ fn cwd_falls_back_to_existing_ancestor() {
     std::fs::create_dir_all(&dir).expect("建目录");
 
     let missing = dir.join("deleted-project");
-    let target =
-        reveal_api::resolve_target(&sandbox.roots, &missing.to_string_lossy(), "open", Some(SCOPE_CWD))
-            .expect("不存在的目录要回退而不是报错");
+    let target = reveal_api::resolve_target(
+        &sandbox.roots,
+        &missing.to_string_lossy(),
+        "open",
+        Some(SCOPE_CWD),
+    )
+    .expect("不存在的目录要回退而不是报错");
     assert!(target.fell_back, "必须标记回退");
     assert_eq!(target.path, dir, "回退到最近的上层目录");
     assert_eq!(target.mode, "open");
@@ -239,7 +264,10 @@ fn unknown_scope_and_bad_mode_are_rejected() {
 
 #[test]
 fn parse_scope_defaults_to_storage() {
-    assert_eq!(reveal_api::parse_scope(None).expect("缺省合法"), SCOPE_STORAGE);
+    assert_eq!(
+        reveal_api::parse_scope(None).expect("缺省合法"),
+        SCOPE_STORAGE
+    );
     assert_eq!(
         reveal_api::parse_scope(Some("")).expect("空串按缺省"),
         SCOPE_STORAGE
