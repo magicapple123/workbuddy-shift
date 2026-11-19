@@ -145,6 +145,32 @@ cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p compa
 > 注意：`createUpdaterArtifacts` 只会为当前版本生成签名安装包；CI 每次构建前会清掉
 > `target/**/release/bundle`，避免 cargo cache 把旧安装包带进 Release。
 
+### 预发布版本（RC）
+
+- tag 用 `vX.Y.Z-rc.N`（例：`v0.2.1-rc.1`）。版本比较按 semver：`0.2.1-rc.1 < 0.2.1`，
+  因此 RC 用户会在正式版发布后正常收到升级提示，正式版用户不会看到 RC。
+- 客户端用 `semver` 解析版本（`crates/wb-shift-core/src/modules/update.rs::parse_version`）；
+  非法版本号会明确报「无法比较版本号」，不会退化成「取数字前缀」。
+- RC 与正式版共用同一签名密钥；不能用「禁止 `-` 的 tag」来规避预发布，那会让 RC 永远收不到正式版。
+
+### 资产命名与发布原子性（第三轮第 4/18 条）
+
+- 人用安装包带版本号：Windows 只有 `workbuddy-shift_<ver>_x64-setup.exe`（+ `.sig`），
+  macOS 是 `workbuddy-shift_<ver>_{aarch64,x86_64}.dmg`，Linux 是 `.deb` / `.AppImage`。
+  Windows 不再额外生成稳定名副本；updater 清单直接引用带版本号的文件。
+- 清单里的资产 URL 必须固定到 tag：`https://github.com/<owner>/<repo>/releases/download/v<ver>/<asset>`，
+  不能用 `releases/latest/download`（检查与下载之间发布新版本会下错包、验签失败）。
+- 发布 job 先创建 **draft** 并上传全部资产，最后 `gh release edit --draft=false --latest`；
+  上传中断时 `latest` 不会被污染。
+- 发布后自动跑 `python3 scripts/check-release-assets.py "$GITHUB_REF_NAME"`：
+  校验 8 份清单、Windows 去重、同 sha 重复资产（macOS 清单别名除外）、
+  清单 version/平台键/签名 key id、发行说明的「下载哪个？」与「其余文件是什么？」。
+  本地 dry-run 同样可用（需 `GH_TOKEN`）。
+- 发行说明模板见 [`docs/release-notes-v0.2.1.md`](release-notes-v0.2.1.md)；
+  资源说明表在 [`docs/release-assets.md`](release-assets.md)，CI 会自动追加（若正文已含则跳过）。
+- **历史 Release 不回改**：`v0.2.0` 仍保留 `workbuddy-shift-windows-x86_64-setup.exe`，
+  删掉会让 0.2.0 客户端自动更新 404；去重只对下一个版本生效。
+
 ### npm 版（webui）发布
 
 1. 编译 server 二进制并上传 GitHub Release（`.github/workflows/build.yml` 自动执行）
