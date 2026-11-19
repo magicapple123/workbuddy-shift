@@ -41,6 +41,17 @@ pub(crate) enum ScanSource {
 }
 
 impl ScanSource {
+    /// 对外来源标签（payload 的 `source` 字段）。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::WorkBuddy(WbVariant::Cn) => "workbuddy-cn",
+            Self::WorkBuddy(WbVariant::Ai) => "workbuddy-ai",
+            Self::Cli => "codebuddy-cli",
+            Self::Ide(CodeBuddyIdeFlavor::Intl) => "codebuddy-ide",
+            Self::Ide(CodeBuddyIdeFlavor::Cn) => "codebuddy-cn-ide",
+        }
+    }
+
     /// 位图里的位序（与 `ScanScope::ALL` 对应）。
     fn bit(self) -> u8 {
         match self {
@@ -142,7 +153,17 @@ pub fn get_rate_limits() -> Value {
     let scope = scan_scope(&ScanRoots::real(), scan_ide_logs);
     let (scanned_at, mut resolved) = cached_scan(scope, now, enabled);
     resolved.extend(crate::modules::rate_limit_events::hook_entries(now));
-    build_payload(resolved, if scanned_at > 0 { scanned_at } else { now }, now)
+    // 13-B 开关：关闭后不再产出 borrowed（账号卡不显示「其它客户端限流至 …」）。
+    let cross_client_infer = crate::modules::config::load_rate_limit_config()
+        .get("crossClientInfer")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    build_payload(
+        resolved,
+        if scanned_at > 0 { scanned_at } else { now },
+        now,
+        cross_client_infer,
+    )
 }
 
 /// hook 安装状态 + 运行期字段（最近一次 hook 事件时刻）。

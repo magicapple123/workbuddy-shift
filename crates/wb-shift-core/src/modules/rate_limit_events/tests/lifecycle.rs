@@ -60,6 +60,7 @@
                 reset_at: 1_500,
                 first_seen_at: 1_000,
                 hit_count: 1,
+                source: None,
             }],
         };
         assert_eq!(

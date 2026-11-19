@@ -107,7 +107,7 @@ export function useAccountsPage() {
     visibleAccounts,
     travelAvailable,
   });
-  const { rateLimitMap, rateLimitEnabled } = useRateLimitSignals();
+  const { rateLimitMap, rateLimitBorrowedMap, rateLimitEnabled } = useRateLimitSignals();
   const {
     codebuddyCli,
     codebuddyCnIde,
@@ -384,6 +384,7 @@ export function useAccountsPage() {
     travelMap,
     autoTravelEnabled,
     rateLimitMap,
+    rateLimitBorrowedMap,
     rateLimitEnabled,
     clientStatus: { codebuddyCli, codebuddyCnIde, vscodeExt, jetbrains },
     codebuddyCli,

@@ -14,8 +14,10 @@ pub const ROTATE_LOG_MAX_RECORDS: usize = 200;
 /// `hookOptOut` = 用户点过「卸载 hook」→ 不再自动接入；默认 `false`（默认接入）。
 /// `scanIdeLogs` = 是否扫描两个 CodeBuddy IDE 的日志；默认 `true`（IDE 的 429 不触发事件，
 /// 日志是它唯一的数据源）。关闭只影响 IDE 两源，CLI / WorkBuddy 的 hook 通路与兜底扫描不变。
+/// `crossClientInfer` = 是否允许「同账号其它客户端的限额」在 VS Code 无自有记录时兜底显示
+/// （第四轮 13-B）；默认 `true`，关闭后账号卡不再出现「其它客户端限流至 …」。
 pub fn default_rate_limit_config() -> Value {
-    json!({ "enabled": true, "hookOptOut": false, "scanIdeLogs": true })
+    json!({ "enabled": true, "hookOptOut": false, "scanIdeLogs": true, "crossClientInfer": true })
 }
 
 /// 读取指定的限额监听配置文件（缺失/损坏时合并默认值）。
@@ -25,7 +27,7 @@ pub fn load_rate_limit_config_at(path: &Path) -> Value {
     let mut cfg = default_rate_limit_config();
     if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
-            for key in ["enabled", "hookOptOut", "scanIdeLogs"] {
+            for key in ["enabled", "hookOptOut", "scanIdeLogs", "crossClientInfer"] {
                 if let Some(value) = map.get(key).and_then(Value::as_bool) {
                     cfg[key] = json!(value);
                 }
@@ -43,7 +45,7 @@ pub fn load_rate_limit_config() -> Value {
 /// 保存限额监听配置到指定路径（只保留已知字段）。
 pub fn save_rate_limit_config_at(path: &Path, cfg: &Value) -> std::io::Result<()> {
     let mut merged = default_rate_limit_config();
-    for key in ["enabled", "hookOptOut", "scanIdeLogs"] {
+    for key in ["enabled", "hookOptOut", "scanIdeLogs", "crossClientInfer"] {
         if let Some(value) = cfg.get(key).and_then(Value::as_bool) {
             merged[key] = json!(value);
         }

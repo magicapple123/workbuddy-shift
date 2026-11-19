@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useVisibleInterval } from "@/hooks/use-visible-interval";
 import * as api from "@/lib/api";
-import type { RateLimitEntry } from "@/lib/types";
+import type { RateLimitBorrowed, RateLimitEntry } from "@/lib/types";
 
 /**
  * 限额：CLI / WorkBuddy 由后端 hook 信号实时入账并推送，这里只兜底 IDE 日志扫描；
@@ -19,6 +19,10 @@ const RATE_LIMIT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
  */
 export function useRateLimitSignals() {
   const [rateLimitMap, setRateLimitMap] = useState<Record<string, RateLimitEntry[]>>({});
+  /** 跨客户端兜底（13-B）：只在后端给出 borrowed 时才有值。 */
+  const [rateLimitBorrowedMap, setRateLimitBorrowedMap] = useState<
+    Record<string, RateLimitBorrowed>
+  >({});
   /**
    * 「限额监听」开关（设置页）：关闭后不扫描、不渲染限额 chip。
    * `null` = 配置尚未读到，不得按默认 true 先扫一轮（关闭开关后进账号页会闪 chip / 误请求）。
@@ -41,12 +45,16 @@ export function useRateLimitSignals() {
       // `scannedAt` 是后端最近一次真实日志扫描的时刻：下一次扫描要等它满 5 分钟。
       lastRateLimitScanRef.current = payload.scannedAt || Date.now();
       const next: Record<string, RateLimitEntry[]> = {};
+      const borrowed: Record<string, RateLimitBorrowed> = {};
       for (const entry of payload.accounts ?? []) {
         if (entry.limited?.length) next[entry.accountId] = entry.limited;
+        if (entry.borrowed) borrowed[entry.accountId] = entry.borrowed;
       }
       setRateLimitMap(next);
+      setRateLimitBorrowedMap(borrowed);
     } catch {
       setRateLimitMap({});
+      setRateLimitBorrowedMap({});
     }
   }
 
@@ -98,5 +106,5 @@ export function useRateLimitSignals() {
     };
   }, []);
 
-  return { rateLimitMap, rateLimitEnabled };
+  return { rateLimitMap, rateLimitBorrowedMap, rateLimitEnabled };
 }

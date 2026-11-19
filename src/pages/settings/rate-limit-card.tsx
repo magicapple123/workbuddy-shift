@@ -64,6 +64,25 @@ export function RateLimitCard() {
    * 「扫描 CodeBuddy IDE 日志」独立开关：只关两个 IDE 的日志来源（IDE 的 429 不触发任何
    * 事件，日志是它唯一的数据源），CLI / WorkBuddy 的 hook 通路不受影响。
    */
+  /** 跨客户端兜底（13-B）：只影响账号卡是否提示「其它客户端限流至 …」。 */
+  async function onToggleCrossClient(crossClientInfer: boolean) {
+    if (!config || busy) return;
+    const previous = config;
+    setConfig({ ...config, crossClientInfer });
+    setBusy(true);
+    try {
+      setConfig(await api.saveRateLimitConfig({ ...config, crossClientInfer }));
+      toast.success(
+        crossClientInfer ? "已开启跨客户端限额提示" : "已关闭跨客户端限额提示",
+      );
+    } catch (e) {
+      setConfig(previous);
+      toast.error("限额监听设置保存失败", { description: api.asError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onToggleIdeLogs(scanIdeLogs: boolean) {
     if (!config || busy) return;
     const previous = config;
@@ -130,6 +149,7 @@ export function RateLimitCard() {
     }
   }
 
+  const probe = status?.vscodeExt;
   const existingTargets = status?.targets.filter((target) => target.exists) ?? [];
   const installedCount = existingTargets.filter((target) => target.installed).length;
   // IDE 的限额只有日志一条来源：扫描开关关闭时文案不能再说「仍按日志扫描」。
@@ -182,6 +202,21 @@ export function RateLimitCard() {
         </SettingsFieldRow>
 
         <SettingsFieldRow
+          label="跨客户端限额提示"
+          description="VS Code 没有自己的限额记录时，用同账号其它客户端（WorkBuddy / CLI / IDE）的限额提示「其它客户端限流至 …」；只作提示，不改任何客户端自己的数字"
+          htmlFor="rl-cross-client"
+          operational
+        >
+          <Switch
+            id="rl-cross-client"
+            checked={config?.crossClientInfer ?? true}
+            disabled={busy || !config}
+            onCheckedChange={(v) => void onToggleCrossClient(v)}
+            aria-label="跨客户端限额提示"
+          />
+        </SettingsFieldRow>
+
+        <SettingsFieldRow
           label="接入客户端 hook"
           description={hookDescription}
           operational
@@ -225,6 +260,31 @@ export function RateLimitCard() {
             <span className="ml-1 font-medium text-foreground">issue #{VSCODE_LIMIT_ISSUE_NUMBER}</span>
             。
           </p>
+          {probe ? (
+            <div className="mt-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-5">
+              <p className="font-medium text-foreground">日志探针（只采样，不判定限流）</p>
+              <p className="mt-1 text-muted-foreground">
+                已监听 {probe.files} 个文件 · 累计命中 {probe.hits} 条强信号 · 本次新读{" "}
+                {probe.scannedFiles} 个文件
+                {probe.lastScanAt ? ` · 最近扫描 ${new Date(probe.lastScanAt).toLocaleString("zh-CN")}` : ""}
+              </p>
+              <p className="mt-1 text-muted-foreground">{probe.reason}</p>
+              {probe.samples.length > 0 ? (
+                <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground/80">
+                  {probe.samples.map((sample, index) => (
+                    <li key={`${index}-${sample.slice(0, 12)}`} className="truncate" title={sample}>
+                      {sample}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {probe.samplesPath ? (
+                <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground/70">
+                  样本：{probe.samplesPath}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </CardContent>
     </SettingsGroup>

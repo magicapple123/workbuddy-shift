@@ -63,7 +63,7 @@ pub(crate) fn account_by_session(
 }
 
 /// 账号归因：归因不到账号的事件直接丢弃（不错归给任何账号）。
-pub(crate) fn resolve(variant: WbVariant, events: &[Event]) -> Vec<Resolved> {
+pub(crate) fn resolve(variant: WbVariant, events: &[Event], source: &str) -> Vec<Resolved> {
     let session_ids: BTreeSet<String> = events
         .iter()
         .filter_map(|event| event.session_id.clone())
@@ -82,6 +82,7 @@ pub(crate) fn resolve(variant: WbVariant, events: &[Event]) -> Vec<Resolved> {
                 reset_at: event.reset_at,
                 first_seen_at: event.first_seen_at,
                 hit_count: event.hit_count,
+                source: source.to_string(),
             })
         })
         .collect()
@@ -144,6 +145,7 @@ pub(crate) fn resolve_by_uid(
     events: &[Event],
     uid_to_account: &HashMap<String, String>,
     fallback: &ActiveAccount,
+    source: &str,
 ) -> Vec<Resolved> {
     events
         .iter()
@@ -160,6 +162,7 @@ pub(crate) fn resolve_by_uid(
                 reset_at: event.reset_at,
                 first_seen_at: event.first_seen_at,
                 hit_count: event.hit_count,
+                source: source.to_string(),
             })
         })
         .collect()

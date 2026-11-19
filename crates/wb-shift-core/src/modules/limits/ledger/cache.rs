@@ -126,7 +126,7 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
             LogFormat::WorkBuddy,
             AuthMarker::None,
         );
-        resolved.extend(resolve(variant, &events));
+        resolved.extend(resolve(variant, &events, ScanSource::WorkBuddy(variant).label()));
     }
     // ② CodeBuddy CLI：日志与 WorkBuddy 同格式（时间戳/事件 id/模型归因全部兼容），
     // 但会话不在 WorkBuddy 的 `sessions` 表里，归因走日志内鉴权 uid + 轮换状态文件回落。
@@ -141,6 +141,7 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
             &cli,
             &uid_to_account,
             &ActiveAccount::load(&cli_state_path()),
+            ScanSource::Cli.label(),
         ));
     }
     // ③ 两个 CodeBuddy IDE：同一份 Ide 格式与同一套归因，只有日志根与状态文件不同。
@@ -170,6 +171,7 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
             &events,
             uid_to_account,
             &ActiveAccount::load(&store_dir().join(state_file)),
+            ScanSource::Ide(flavor).label(),
         ));
     }
     resolved

@@ -35,6 +35,17 @@ pub(super) enum HookSource {
     WorkBuddy(WbVariant),
 }
 
+impl HookSource {
+    /// 对外来源标签（与 `limits::ScanSource::label()` 同一套字符串）。
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "codebuddy-cli",
+            Self::WorkBuddy(WbVariant::Cn) => "workbuddy-cn",
+            Self::WorkBuddy(WbVariant::Ai) => "workbuddy-ai",
+        }
+    }
+}
+
 /// 一行 payload 里识别出的限额事件（来源判定需要环境，见 `source_of`）。
 pub(super) struct QuotaEvent {
     pub(super) transcript_path: String,

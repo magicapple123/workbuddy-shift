@@ -35,6 +35,7 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
     travelMap,
     rateLimitEnabled,
     rateLimitMap,
+    rateLimitBorrowedMap,
     creditMap,
     creditLoadingMap,
     creditUpdatedAtMap,
@@ -100,6 +101,7 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
           autoCheckinAllowed={checkinAvailable && autoCheckinSettled ? !excludedCheckinIds.has(account.id) : undefined}
           travelStatus={autoTravelEnabled ? travelMap[account.id] : undefined}
           rateLimits={rateLimitEnabled ? rateLimitMap[account.id] : undefined}
+          rateLimitBorrowed={rateLimitEnabled ? rateLimitBorrowedMap[account.id] : undefined}
           credit={creditMap[account.id]}
           creditLoading={creditLoadingMap[account.id]}
           creditUpdatedAt={creditUpdatedAtMap[account.id]}

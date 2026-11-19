@@ -18,6 +18,10 @@ pub(super) struct StoredEntry {
     pub(super) reset_at: i64,
     pub(super) first_seen_at: i64,
     pub(super) hit_count: u32,
+    /// 来源标签（第四轮 13-B）。旧状态文件没有该字段：`#[serde(default)]` 读成 None，
+    /// 台账按「其它客户端」处理，不影响条目本身。
+    #[serde(default)]
+    pub(super) source: Option<String>,
 }
 
 /// 后端持有的状态：事件文件已读偏移 + 当前有效的限额条目。

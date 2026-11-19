@@ -1,5 +1,5 @@
 import type { ToolId } from "@/lib/supported-tools";
-import type { AccountMeta, CreditExpiry, RateLimitEntry, TravelStatus } from "@/lib/types";
+import type { AccountMeta, CreditExpiry, RateLimitBorrowed, RateLimitEntry, TravelStatus } from "@/lib/types";
 
 export interface AccountCardProps {
   account: AccountMeta;
@@ -16,6 +16,8 @@ export interface AccountCardProps {
   travelStatus?: TravelStatus;
   /** 该账号当前受限的模型（来自本机日志台账）；空/缺失=无受限，不渲染图标。 */
   rateLimits?: RateLimitEntry[];
+  /** 跨客户端兜底（13-B）：VS Code 无自有记录时提示「其它客户端限流至 …」。 */
+  rateLimitBorrowed?: RateLimitBorrowed | null;
   credit?: CreditExpiry;
   creditLoading?: boolean;
   /** 该账号积分最近一次查询完成时间（时间戳） */

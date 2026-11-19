@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { AccountMeta, RateLimitEntry, TravelStatus } from "@/lib/types";
+import type { AccountMeta, RateLimitBorrowed, RateLimitEntry, TravelStatus } from "@/lib/types";
 
 import { formatRateLimitClock, formatRateLimitRemaining, jetbrainsTooltip, travelTooltip, vscodeExtTooltip } from "./formatters";
 
@@ -24,6 +24,7 @@ export function AccountStatusChips({
   creditPriority,
   now,
   rateLimits,
+  rateLimitBorrowed,
   todayCheckedIn,
   travelStatus,
 }: {
@@ -36,6 +37,7 @@ export function AccountStatusChips({
   /** 限额倒计时的本地时钟（每秒推进）。 */
   now: number;
   rateLimits?: RateLimitEntry[];
+  rateLimitBorrowed?: RateLimitBorrowed | null;
   todayCheckedIn?: boolean;
   travelStatus?: TravelStatus;
 }) {
@@ -63,7 +65,7 @@ export function AccountStatusChips({
           variant: todayCheckedIn ? "success" : "secondary",
         })}
       {travelChip(travelStatus)}
-      {rateLimitChip(rateLimits, now)}
+      {rateLimitChip(rateLimits, now, rateLimitBorrowed)}
       {(account.needsRelogin || (typeof account.expiresAt === "number" && account.expiresAt < Date.now())) && (
         <Badge variant="warning" className={chipClass}>
           {account.needsRelogin ? "需重新登录" : "Token 已过期"}
@@ -158,15 +160,55 @@ export function travelChip(status: TravelStatus | undefined) {
   }
 }
 
-export function rateLimitChip(limits: RateLimitEntry[] | undefined, now: number) {
+/** 来源标签（与后端 `limits::payload::source_label` 同一套取值）。 */
+const SOURCE_LABELS: Record<string, string> = {
+  "workbuddy-cn": "WorkBuddy",
+  "workbuddy-ai": "WorkBuddy 国际版",
+  "codebuddy-cli": "CodeBuddy CLI",
+  "codebuddy-ide": "CodeBuddy IDE",
+  "codebuddy-cn-ide": "CodeBuddy CN IDE",
+  "vscode-ext": "VS Code 插件",
+};
+
+const sourceLabelOf = (source?: string) =>
+  source ? (SOURCE_LABELS[source] ?? "其它客户端") : null;
+
+export function rateLimitChip(
+  limits: RateLimitEntry[] | undefined,
+  now: number,
+  borrowed?: RateLimitBorrowed | null,
+) {
   const active = (limits ?? [])
     .filter((limit) => Number.isFinite(limit.resetAt) && limit.resetAt > now)
     .sort((left, right) => left.resetAt - right.resetAt);
-  if (active.length === 0) return null;
-  const lines = active.map(
-    (limit) =>
-      `${limit.model ?? "未知模型"} · ${formatRateLimitRemaining(limit.resetAt, now)}（${formatRateLimitClock(limit.resetAt, now)}）`,
-  );
+  const ownVscode = active.some((limit) => limit.source === "vscode-ext");
+  const activeBorrowed =
+    borrowed && Number.isFinite(borrowed.resetAt) && borrowed.resetAt > now && !ownVscode
+      ? borrowed
+      : null;
+  if (active.length === 0 && !activeBorrowed) return null;
+  const lines = active.map((limit) => {
+    const source = sourceLabelOf(limit.source);
+    return `${limit.model ?? "未知模型"} · ${formatRateLimitRemaining(limit.resetAt, now)}（${formatRateLimitClock(limit.resetAt, now)}）${source ? ` · 来自${source}` : ""}`;
+  });
+  // 13-B：VS Code 无自有记录时只给「兜底提示」，不把其它客户端的模型限额冒充成 VS Code 的。
+  if (activeBorrowed) {
+    const clock = formatRateLimitClock(activeBorrowed.resetAt, now);
+    return statusIconChip({
+      icon: <Gauge className="size-3.5" />,
+      label: `其它客户端限流至 ${clock}`,
+      tooltip: (
+        <span className="flex flex-col gap-0.5 text-[11px] leading-4">
+          <span>来自 {activeBorrowed.sourceLabel} 的记录；VS Code 用到同一账号/模型时可能同样受限。</span>
+          {lines.map((line) => (
+            <span key={line}>{line}</span>
+          ))}
+        </span>
+      ),
+      variant: "warning",
+      count: active.length || 1,
+    });
+  }
   return statusIconChip({
     icon: <Gauge className="size-3.5" />,
     label: `模型限额：${lines.join("；")}`,

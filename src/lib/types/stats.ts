@@ -55,12 +55,27 @@ export interface RateLimitEntry {
   firstSeenAt: number;
   /** 去重前的原始命中行数（调试/排查用）。 */
   hitCount: number;
+  /** 来源：workbuddy-cn / workbuddy-ai / codebuddy-cli / codebuddy-ide / codebuddy-cn-ide（第四轮 13）。 */
+  source?: string;
+}
+
+/**
+ * 跨客户端兜底（第四轮 13-B）：VS Code 没有自有记录时，用同账号其它客户端里
+ * 最晚的恢复时刻提示「其它客户端限流至 …」。只兜底、不合并，必须带来源。
+ */
+export interface RateLimitBorrowed {
+  resetAt: number;
+  model: string | null;
+  source: string;
+  sourceLabel: string;
 }
 
 /** 一个账号当前受限的全部模型（按 `resetAt` 升序）。 */
 export interface AccountRateLimits {
   accountId: string;
   limited: RateLimitEntry[];
+  /** 无自有 VS Code 记录时的跨客户端兜底；自有优先，缺省为 null。 */
+  borrowed?: RateLimitBorrowed | null;
 }
 
 /** 模型限额台账：一次返回全部账号的当前受限状态（数据来自本机日志）。 */
@@ -97,6 +112,27 @@ export interface RateLimitHookStatus {
   installed: boolean;
   lastEventAt?: number | null;
   targets: RateLimitHookTarget[];
+  /** VS Code 插件日志探针（第四轮 13-A）：只作诊断，不驱动任何限额 chip。 */
+  vscodeExt?: VscodeLimitProbe;
+}
+
+/** VS Code 插件限额日志探针结果（采样，不判定限流）。 */
+export interface VscodeLimitProbe {
+  /** 只表示「日志里出现了值得解析的强信号」，不是「VS Code 已支持限额」。 */
+  supported: boolean;
+  hits: number;
+  newHits: number;
+  /** 已监听的文件数（有偏移记录）。 */
+  files: number;
+  /** 本次真正读了新字节的文件数。 */
+  scannedFiles: number;
+  lastScanAt: number;
+  samples: string[];
+  samplesPath?: string;
+  roots: string[];
+  upstreamIssue: number;
+  reason: string;
+  samplesOnly?: boolean;
 }
 
 /** 限额监听开关（`~/.workbuddy-shift/rate_limit_config.json`）。 */
@@ -110,6 +146,11 @@ export interface RateLimitConfig {
    * CLI / WorkBuddy 的 hook 实时上报与未接 hook 时的日志兜底不变。
    */
   scanIdeLogs: boolean;
+  /**
+   * 是否允许「同账号其它客户端的限额」在 VS Code 无自有记录时兜底显示（默认 true）。
+   * 关闭后账号卡不再出现「其它客户端限流至 …」。
+   */
+  crossClientInfer?: boolean;
 }
 
 export interface AutoRotateConfig {

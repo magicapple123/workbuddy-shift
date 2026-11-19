@@ -871,6 +871,7 @@ fn payload_drops_expired_entries_and_sorts_by_reset_time() {
             reset_at: now + 7_200_000,
             first_seen_at: 0,
             hit_count: 1,
+            source: "workbuddy-cn".to_string(),
         },
         Resolved {
             account_id: "a".to_string(),
@@ -878,6 +879,7 @@ fn payload_drops_expired_entries_and_sorts_by_reset_time() {
             reset_at: now + 600_000,
             first_seen_at: 0,
             hit_count: 3,
+            source: "workbuddy-cn".to_string(),
         },
         Resolved {
             account_id: "a".to_string(),
@@ -885,6 +887,7 @@ fn payload_drops_expired_entries_and_sorts_by_reset_time() {
             reset_at: now - 1,
             first_seen_at: 0,
             hit_count: 1,
+            source: "workbuddy-cn".to_string(),
         },
         Resolved {
             account_id: "b".to_string(),
@@ -892,9 +895,10 @@ fn payload_drops_expired_entries_and_sorts_by_reset_time() {
             reset_at: now + 60_000,
             first_seen_at: 0,
             hit_count: 2,
+            source: "workbuddy-cn".to_string(),
         },
     ];
-    let payload = build_payload(resolved, now, now);
+    let payload = build_payload(resolved, now, now, true);
     assert_eq!(payload["windowDays"], 2);
     assert_eq!(payload["scannedAt"], now);
     let accounts = payload["accounts"].as_array().expect("accounts 数组");
@@ -917,6 +921,7 @@ fn payload_keeps_the_latest_reset_time_per_account_and_model() {
             reset_at: now + 600_000,
             first_seen_at: 10,
             hit_count: 1,
+            source: "workbuddy-cn".to_string(),
         },
         Resolved {
             account_id: "a".to_string(),
@@ -924,9 +929,10 @@ fn payload_keeps_the_latest_reset_time_per_account_and_model() {
             reset_at: now + 3_600_000,
             first_seen_at: 20,
             hit_count: 2,
+            source: "workbuddy-cn".to_string(),
         },
     ];
-    let payload = build_payload(resolved, now, now);
+    let payload = build_payload(resolved, now, now, true);
     let limited = payload["accounts"][0]["limited"]
         .as_array()
         .expect("limited 数组");
@@ -949,8 +955,9 @@ fn payload_drops_entries_reset_between_scan_and_now() {
         reset_at: scanned_at + 60_000,
         first_seen_at: 0,
         hit_count: 1,
+        source: "workbuddy-cn".to_string(),
     }];
-    let payload = build_payload(resolved, scanned_at, now);
+    let payload = build_payload(resolved, scanned_at, now, true);
     assert_eq!(payload["scannedAt"], scanned_at);
     assert!(payload["accounts"]
         .as_array()
@@ -1382,7 +1389,7 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
     let no_uid = HashMap::new();
 
     // ① uid 不可用 + 状态文件缺失 → 丢弃。
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path)).is_empty());
+    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
 
     // ② `updatedAt` 晚于事件 → 不可信：IDE 的 detect 会回写状态，但那不是账号切换。
     std::fs::write(
@@ -1390,7 +1397,7 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
         json!({ "activeAccountId": "acc-1", "updatedAt": 2_000 }).to_string(),
     )
     .expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path)).is_empty());
+    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
 
     // ③ `updatedAt` 早于事件 → 该时刻生效的账号可用。
     std::fs::write(
@@ -1398,17 +1405,17 @@ fn fallback_state_file_only_counts_when_updated_before_the_event() {
         json!({ "activeAccountId": "acc-1", "updatedAt": 1_000 }).to_string(),
     )
     .expect("状态文件");
-    let resolved = resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path));
+    let resolved = resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli");
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].account_id, "acc-1");
 
     // ④ 缺 `updatedAt`（老状态文件）→ 无从证实「当时是谁」，丢弃。
     std::fs::write(&path, json!({ "activeAccountId": "acc-1" }).to_string()).expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path)).is_empty());
+    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
 
     // ⑤ 内容损坏 → 回落不可用，不报错。
     std::fs::write(&path, "{ not json").expect("状态文件");
-    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path)).is_empty());
+    assert!(resolve_by_uid(&events, &no_uid, &ActiveAccount::load(&path), "codebuddy-cli").is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1427,7 +1434,7 @@ fn uid_match_wins_over_the_state_file_fallback() {
     let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-uid".to_string())]);
     let mut event = event_without_uid(1_500);
     event.uid = Some(UID_A.to_string());
-    let resolved = resolve_by_uid(&[event], &uid_to_account, &ActiveAccount::load(&path));
+    let resolved = resolve_by_uid(&[event], &uid_to_account, &ActiveAccount::load(&path), "codebuddy-cli");
     assert_eq!(resolved[0].account_id, "acc-uid");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1444,6 +1451,7 @@ fn unknown_uid_is_dropped_without_a_fallback() {
             account_id: None,
             updated_at: None,
         },
+        "codebuddy-cli",
     );
     assert!(resolved.is_empty());
 }
@@ -1741,4 +1749,67 @@ fn cache_invalidation_keeps_the_next_scan_on_the_requested_scope() {
     std::fs::remove_dir_all(&root).ok();
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// -----------------------------------------------------------------------
+// 第四轮 13-B：跨客户端兜底（borrowed）只在 VS Code 无自有记录时产出
+// -----------------------------------------------------------------------
+
+#[test]
+fn payload_borrows_latest_other_client_limit_only_without_vscode_record() {
+    let now = 1_000_000;
+    let entry = |source: &str, reset_at: i64| Resolved {
+        account_id: "a".to_string(),
+        model: Some("hy3".to_string()),
+        reset_at,
+        first_seen_at: 0,
+        hit_count: 1,
+        source: source.to_string(),
+    };
+
+    let payload = build_payload(
+        vec![
+            entry("workbuddy-cn", now + 60_000),
+            entry("codebuddy-cli", now + 180_000),
+        ],
+        now,
+        now,
+        true,
+    );
+    let borrowed = &payload["accounts"][0]["borrowed"];
+    assert_eq!(borrowed["resetAt"], now + 180_000, "取同账号最晚的恢复时刻");
+    assert_eq!(borrowed["source"], "codebuddy-cli");
+    assert_eq!(borrowed["sourceLabel"], "CodeBuddy CLI");
+
+    // 关闭推断：不产出 borrowed。
+    let disabled = build_payload(
+        vec![entry("workbuddy-cn", now + 60_000)],
+        now,
+        now,
+        false,
+    );
+    assert!(disabled["accounts"][0]["borrowed"].is_null());
+
+    // VS Code 有自有记录：自有优先，不兜底。
+    let own = build_payload(
+        vec![
+            entry("workbuddy-cn", now + 60_000),
+            Resolved {
+                model: Some("vscode-own".to_string()),
+                source: "vscode-ext".to_string(),
+                ..entry("vscode-ext", now + 240_000)
+            },
+        ],
+        now,
+        now,
+        true,
+    );
+    assert!(own["accounts"][0]["borrowed"].is_null());
+    let sources: Vec<&str> = own["accounts"][0]["limited"]
+        .as_array()
+        .expect("limited")
+        .iter()
+        .filter_map(|item| item["source"].as_str())
+        .collect();
+    assert!(sources.contains(&"vscode-ext"));
 }

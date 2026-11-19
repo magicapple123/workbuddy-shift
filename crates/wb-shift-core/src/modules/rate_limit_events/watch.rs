@@ -72,6 +72,7 @@ pub(super) fn ingest_lines(
                 reset_at: event.reset_at,
                 first_seen_at: now,
                 hit_count: 1,
+                source: Some(source.label().to_string()),
             },
         );
         added = true;
@@ -108,6 +109,10 @@ pub(super) fn live_entries(state: &mut State, now: i64) -> Vec<Resolved> {
             reset_at: entry.reset_at,
             first_seen_at: entry.first_seen_at,
             hit_count: entry.hit_count,
+            source: entry
+                .source
+                .clone()
+                .unwrap_or_else(|| "other-client".to_string()),
         })
         .collect()
 }
