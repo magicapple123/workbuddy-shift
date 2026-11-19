@@ -90,7 +90,9 @@ jobs:
                   "update_os": "windows",
                   "update_arch": "x86_64",
                   "update_bundle": "nsis",
-                  "update_archive_name": "workbuddy-shift-windows-x86_64-setup.exe",
+                  # 第 18 条：Windows 只保留带版本号的人用安装包名，updater 清单直接引用它，
+                  # 不再额外复制一份 workbuddy-shift-windows-x86_64-setup.exe。
+                  "update_archive_name": "",
               },
               {
                   "name": "linux-x64",
@@ -350,6 +352,8 @@ jobs:
             exit 0
           fi
           if [ "$UPDATE_OS" = "windows" ]; then
+            # 第 18 条：清单直接引用带版本号的人用安装包，Release 不再出现同 sha 的第二份。
+            UPDATE_ARCHIVE_NAME="workbuddy-shift_${VER}_x64-setup.exe"
             # NSIS 真实文件名是 <productName>_<version>_x64-setup.exe（productName 含空格），
             # 用 glob 取真实文件并校验数量与版本，避免签名对到旧安装包。
             ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*-setup.exe' | sort)"
@@ -379,11 +383,12 @@ jobs:
             echo "error: missing signed updater archive ($ARCHIVE)" >&2
             exit 1
           fi
-          cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
-          cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
-          if [ "$UPDATE_OS" = "windows" ]; then
-            cmp -s "dist-bin/$UPDATE_ARCHIVE_NAME" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe"
+          if [ "$(basename "$ARCHIVE")" = "$UPDATE_ARCHIVE_NAME" ] && [ -f "dist-bin/$UPDATE_ARCHIVE_NAME" ]; then
+            echo "updater 资产已由用户安装包步骤就位：$UPDATE_ARCHIVE_NAME"
+          else
+            cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
           fi
+          cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
           UPDATE_VERSION="$VER" sh scripts/gen-update-json.sh
           MANIFEST="$BUNDLE_DIR/latest-${UPDATE_OS}-${UPDATE_ARCH}.json"
           test -f "$MANIFEST"
@@ -500,7 +505,46 @@ jobs:
           REQUIRED_PLATFORMS: darwin-aarch64,darwin-x86_64,windows-x86_64-nsis,windows-x86_64,linux-x86_64,linux-x86_64-deb,linux-x86_64-appimage
         run: python3 scripts/merge-update-manifests.py artifacts
 
-      - name: Upload to GitHub Release
+      # 第 4 条 A：先建 draft 并上传全部资产，最后一步才切 latest。
+      # 上传中断时 release 保持 draft，/releases/latest 仍指向上一个完整版本。
+      - name: Compose release body
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          BODY="release-body.md"
+          : > "$BODY"
+          NOTES_FILE="docs/release-notes-v${VER}.md"
+          [ -f "$NOTES_FILE" ] || NOTES_FILE="delivery/release-notes-v${VER}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cat "$NOTES_FILE" >> "$BODY"
+            echo "" >> "$BODY"
+            echo "" >> "$BODY"
+          fi
+          # 资源说明独立成文件，避免 heredoc 缩进把 Markdown 变成代码块。
+          if grep -q "下载哪个？" "$BODY"; then
+            echo "发行说明已含资源说明，跳过自动追加"
+          else
+            sed "s/<ver>/${VER}/g" docs/release-assets.md >> "$BODY"
+          fi
+          echo "::group::release body"
+          cat "$BODY"
+          echo "::endgroup::"
+
+      - name: Upload to GitHub Release (draft)
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          draft: true
+          body_path: release-body.md
+          generate_release_notes: false
+
+      - name: Publish release (atomic latest switch)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 资产全部上传成功后才把 draft 转正并设为 latest。
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/check-release-assets.py "$GITHUB_REF_NAME"

@@ -105,7 +105,24 @@ else
   ARCHIVE_NAME=$(basename "$ARCHIVE_FILE")
 fi
 PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-URL="https://github.com/$OWNER/$REPO/releases/latest/download/$ARCHIVE_NAME"
+# 第 4 条 B：资产 URL 必须是 tag 固定路径。用 releases/latest/download 时，
+# 「检查到 vN」与「下载」之间若发布了 vN+1，会拿到 vN+1 的包却用 vN 的签名校验。
+TAG="v${VERSION#v}"
+URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/$ARCHIVE_NAME"
+
+# 第 4 条 H：清单 notes 从 delivery/release-notes-v<ver>.md 注入，弹窗可展示更新内容。
+NOTES_JSON='""'
+NOTES_FILE="docs/release-notes-v${VERSION}.md"
+[ -f "$NOTES_FILE" ] || NOTES_FILE="delivery/release-notes-v${VERSION}.md"
+if [ -f "$NOTES_FILE" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    NOTES_JSON=$(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1], encoding="utf-8").read()))' "$NOTES_FILE")
+  elif command -v python >/dev/null 2>&1; then
+    NOTES_JSON=$(python -c 'import json,sys; print(json.dumps(open(sys.argv[1], encoding="utf-8").read()))' "$NOTES_FILE")
+  else
+    echo "gen-update-json: 未找到 python，notes 留空" >&2
+  fi
+fi
 
 PLATFORMS=""
 for key in $PLATFORM_KEYS; do
@@ -121,7 +138,7 @@ mkdir -p "$BUNDLE_DIR"
 cat > "$JSON_FILE" << EOF
 {
   "version": "$VERSION",
-  "notes": "",
+  "notes": $NOTES_JSON,
   "pub_date": "$PUB_DATE",
   "platforms": {$PLATFORMS
   }
