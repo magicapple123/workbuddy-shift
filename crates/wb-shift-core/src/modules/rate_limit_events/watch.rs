@@ -179,6 +179,52 @@ pub(super) fn compact_if_needed(ctx: &IngestContext, state: &mut State, now: i64
 // 对外入口
 // ---------------------------------------------------------------------------
 
+/// 历史条目没有 `source`（第四轮之前的状态文件）时，从事件文件回填一次。
+///
+/// 事件行里的 `transcriptPath` 决定来源（WorkBuddy CN / 国际版 / CLI），按
+/// `(resetAt, model)` 与台账条目匹配。只在存在缺失来源时扫一遍 1 MB 以内的事件文件，
+/// 回填后写回状态，下次启动不再执行。
+fn migrate_missing_sources(ctx: &IngestContext, state: &mut State) {
+    if state.sources_migrated {
+        return;
+    }
+    state.sources_migrated = true;
+    if state.events.iter().all(|entry| entry.source.is_some()) {
+        let _ = save_state(&ctx.state_path, state);
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&ctx.events) else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut sources: std::collections::HashMap<(i64, Option<String>), String> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some(event) = parse_quota_line(line.trim()) else {
+            continue;
+        };
+        let Some(source) = source_of(&event.transcript_path, &ctx.source_roots) else {
+            continue;
+        };
+        sources
+            .entry((event.reset_at, event.model.clone()))
+            .or_insert_with(|| source.label().to_string());
+    }
+    let mut changed = false;
+    for entry in &mut state.events {
+        if entry.source.is_some() {
+            continue;
+        }
+        if let Some(label) = sources.get(&(entry.reset_at, entry.model.clone())) {
+            entry.source = Some(label.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_state(&ctx.state_path, state);
+    }
+}
+
 /// 消费事件文件里的新事件；返回是否入账了新条目。
 pub(crate) fn consume_pending() -> bool {
     let events = rate_limit_hook::events_path();
@@ -187,6 +233,8 @@ pub(crate) fn consume_pending() -> bool {
     // 事件（同账号/同模型的 hit_count 偏大），但不会丢掉已经发生的限额。
     let mut guard = locks::recover(&STATE);
     let state = guard.get_or_insert_with(|| load_state(&state_file));
+    // 历史状态没有来源：先回填（一次性），否则卡片只能显示「其它客户端」。
+    migrate_missing_sources(&IngestContext::real(), state);
     // 快速路径：一次 stat，没有新字节就直接返回（watcher 每秒走这里）。
     if !has_pending_bytes(&events, state.offset) {
         return false;

@@ -64,8 +64,8 @@ export function AccountStatusChips({
           tooltip: todayCheckedIn ? "今日已签到" : "今日未签到",
           variant: todayCheckedIn ? "success" : "secondary",
         })}
-      {travelChip(travelStatus)}
-      {rateLimitChip(rateLimits, now, rateLimitBorrowed)}
+      {travelChip(travelStatus, compact)}
+      {rateLimitChip(rateLimits, now, rateLimitBorrowed, compact)}
       {(account.needsRelogin || (typeof account.expiresAt === "number" && account.expiresAt < Date.now())) && (
         <Badge variant="warning" className={chipClass}>
           {account.needsRelogin ? "需重新登录" : "Token 已过期"}
@@ -144,8 +144,11 @@ function travelIconChip({
   return statusIconChip({ icon: <PlaneTakeoff className="size-3.5" />, label, tooltip, variant, muted });
 }
 
-export function travelChip(status: TravelStatus | undefined) {
+export function travelChip(status: TravelStatus | undefined, compact = false) {
   if (!status) return null;
+  // 紧凑卡片：只保留「正在旅行 / 已结束」这类有信息量的状态；「未旅行」「无 Buddy」
+  // 是多数账号的常态，留着只会和账号名、限额 chip 争宽度。
+  if (compact && (status.label === "untraveled" || status.label === "no-buddy")) return null;
   switch (status.label) {
     case "no-buddy":
       return <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>无 Buddy</Badge>;
@@ -177,6 +180,8 @@ export function rateLimitChip(
   limits: RateLimitEntry[] | undefined,
   now: number,
   borrowed?: RateLimitBorrowed | null,
+  /** 紧凑卡片空间不足：兜底提示退化为图标 + tooltip，避免挤掉账号名。 */
+  compact = false,
 ) {
   const active = (limits ?? [])
     .filter((limit) => Number.isFinite(limit.resetAt) && limit.resetAt > now)
@@ -194,23 +199,35 @@ export function rateLimitChip(
   // 13-B：VS Code 无自有记录时只给「兜底提示」，不把其它客户端的模型限额冒充成 VS Code 的。
   if (activeBorrowed) {
     const clock = formatRateLimitClock(activeBorrowed.resetAt, now);
-    // 兜底提示必须是**可读文案**而不是只有图标：用户要一眼看出「这不是 VS Code 自己的记录」。
+    // 文案用**真实来源**（WorkBuddy / WorkBuddy 国际版 / CodeBuddy CLI…），不再笼统说
+    // 「其它客户端」：用户看到 WorkBuddy 桌面端限流却写着「其它客户端」会以为是误报。
+    const label = `${activeBorrowed.sourceLabel} 限流至 ${clock}`;
+    const tooltip = (
+      <span className="flex flex-col gap-0.5 text-[11px] leading-4">
+        <span>来自 {activeBorrowed.sourceLabel} 的记录；当前客户端用到同一账号/模型时可能同样受限。</span>
+        {lines.map((line) => (
+          <span key={line}>{line}</span>
+        ))}
+      </span>
+    );
+    // 紧凑卡片：图标 + tooltip，给账号名让出宽度。
+    if (compact) {
+      return statusIconChip({
+        icon: <Gauge className="size-3.5" />,
+        label,
+        tooltip,
+        variant: "warning",
+      });
+    }
     return (
       <Tooltip>
         <TooltipTrigger asChild>
           <Badge variant="warning" className={cn(chipClass, "gap-1 px-1.5")}>
             <Gauge className="size-3.5" aria-hidden="true" />
-            其它客户端限流至 {clock}
+            {label}
           </Badge>
         </TooltipTrigger>
-        <TooltipContent side="top">
-          <span className="flex flex-col gap-0.5 text-[11px] leading-4">
-            <span>来自 {activeBorrowed.sourceLabel} 的记录；VS Code 用到同一账号/模型时可能同样受限。</span>
-            {lines.map((line) => (
-              <span key={line}>{line}</span>
-            ))}
-          </span>
-        </TooltipContent>
+        <TooltipContent side="top">{tooltip}</TooltipContent>
       </Tooltip>
     );
   }

@@ -54,6 +54,7 @@
         let mut state = State {
             offset: 0,
             last_event_at: None,
+            sources_migrated: true,
             events: vec![StoredEntry {
                 account_id: "a".to_string(),
                 model: Some("hy3".to_string()),

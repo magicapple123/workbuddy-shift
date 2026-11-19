@@ -31,6 +31,9 @@ pub(super) struct State {
     pub(super) offset: u64,
     /// 最近一次入账的 hook 限额事件时刻（诊断用）。
     pub(super) last_event_at: Option<i64>,
+    /// 是否已做过「历史条目来源回填」：只尝试一次，避免每秒重读事件文件。
+    #[serde(default)]
+    pub(super) sources_migrated: bool,
     pub(super) events: Vec<StoredEntry>,
 }
 

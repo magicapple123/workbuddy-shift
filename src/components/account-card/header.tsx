@@ -164,23 +164,23 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
         </div>
 
         {compact ? (
-          <div className="relative z-10 flex w-full min-w-0 flex-col gap-1 pr-10">
-            <div className="flex w-full min-w-0 items-center gap-2">
-            <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
+          <div className="relative z-10 flex w-full min-w-0 items-center gap-2 pr-10">
+            <h3 className="min-w-[3rem] flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
+            <div className="hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {toolEntryEnabled(enabledTools, "workbuddy") && (workbuddyActive ? (
                 <ProductCurrentState product="workbuddy" compact iconOnly />
               ) : demoModeEnabled ? (
                 <DemoAction>
-                  <Button variant="outline" size="icon" className="size-7 rounded-lg" aria-label="设为 WorkBuddy 当前账号">
-                    <WorkBuddyMark size={15} />
+                  <Button variant="outline" size="icon" className="size-6 rounded-lg" aria-label="设为 WorkBuddy 当前账号">
+                    <WorkBuddyMark size={14} />
                   </Button>
                 </DemoAction>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="size-7 rounded-lg" disabled={featuresDisabled || !onSwitch} onClick={() => onSwitch?.(account)} aria-label="设为 WorkBuddy 当前账号">
-                      <WorkBuddyMark size={15} />
+                    <Button variant="outline" size="icon" className="size-6 rounded-lg" disabled={featuresDisabled || !onSwitch} onClick={() => onSwitch?.(account)} aria-label="设为 WorkBuddy 当前账号">
+                      <WorkBuddyMark size={14} />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">设为 WorkBuddy 当前账号（会重启 WorkBuddy）</TooltipContent>
@@ -190,15 +190,15 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
                 <ProductCurrentState product="codebuddy-cn" compact iconOnly />
               ) : demoModeEnabled ? (
                 <DemoAction>
-                  <Button variant="outline" size="icon" className="relative size-7 rounded-lg" aria-label="切换到 CodeBuddy IDE">
-                    <CodeBuddyCnIdeMark size={15} />
+                  <Button variant="outline" size="icon" className="relative size-6 rounded-lg" aria-label="切换到 CodeBuddy IDE">
+                    <CodeBuddyCnIdeMark size={14} />
                   </Button>
                 </DemoAction>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="relative size-7 rounded-lg" disabled={featuresDisabled || !codebuddyCnIdeAvailable || !onSwitchCodebuddyCnIde || codebuddyCnIdeBusy} onClick={() => onSwitchCodebuddyCnIde?.(account)} aria-label={codebuddyCnIdeLoading ? "正在切换 CodeBuddy IDE" : "切换到 CodeBuddy IDE"} aria-busy={codebuddyCnIdeLoading}>
-                      {codebuddyCnIdeLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CodeBuddyCnIdeMark size={15} />}
+                    <Button variant="outline" size="icon" className="relative size-6 rounded-lg" disabled={featuresDisabled || !codebuddyCnIdeAvailable || !onSwitchCodebuddyCnIde || codebuddyCnIdeBusy} onClick={() => onSwitchCodebuddyCnIde?.(account)} aria-label={codebuddyCnIdeLoading ? "正在切换 CodeBuddy IDE" : "切换到 CodeBuddy IDE"} aria-busy={codebuddyCnIdeLoading}>
+                      {codebuddyCnIdeLoading ? <Loader2 className="size-3 animate-spin" /> : <CodeBuddyCnIdeMark size={14} />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">{codebuddyCnIdeAvailable ? "切换到 CodeBuddy IDE（会重启 IDE）" : "未检测到 CodeBuddy IDE"}</TooltipContent>
@@ -208,15 +208,15 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
                 <ProductCurrentState product="vscode-ext" compact iconOnly />
               ) : demoModeEnabled ? (
                 <DemoAction>
-                  <Button variant="outline" size="icon" className="relative size-7 rounded-lg" aria-label="切换到 VS Code CodeBuddy 插件（可复制会话）">
-                    <VscodeExtMark size={15} />
+                  <Button variant="outline" size="icon" className="relative size-6 rounded-lg" aria-label="切换到 VS Code CodeBuddy 插件（可复制会话）">
+                    <VscodeExtMark size={14} />
                   </Button>
                 </DemoAction>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="relative size-7 rounded-lg" disabled={featuresDisabled || !vscodeExtAvailable || !onSwitchVscodeExt || vscodeExtBusy} onClick={() => onSwitchVscodeExt?.(account)} aria-label="切换到 VS Code CodeBuddy 插件（可复制会话）" aria-busy={vscodeExtLoading}>
-                      {vscodeExtLoading ? <Loader2 className="size-3.5 animate-spin" /> : <VscodeExtMark size={15} />}
+                    <Button variant="outline" size="icon" className="relative size-6 rounded-lg" disabled={featuresDisabled || !vscodeExtAvailable || !onSwitchVscodeExt || vscodeExtBusy} onClick={() => onSwitchVscodeExt?.(account)} aria-label="切换到 VS Code CodeBuddy 插件（可复制会话）" aria-busy={vscodeExtLoading}>
+                      {vscodeExtLoading ? <Loader2 className="size-3 animate-spin" /> : <VscodeExtMark size={14} />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">{vscodeExtTooltip(vscodeExtInstalled, vscodeExtExtensionInstalled)}</TooltipContent>
@@ -226,15 +226,15 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
                 <ProductCurrentState product="jetbrains" compact iconOnly />
               ) : demoModeEnabled ? (
                 <DemoAction>
-                  <Button variant="outline" size="icon" className="relative size-7 rounded-lg" aria-label="切换到 JetBrains IDE CodeBuddy 插件">
-                    <JetbrainsMark size={15} />
+                  <Button variant="outline" size="icon" className="relative size-6 rounded-lg" aria-label="切换到 JetBrains IDE CodeBuddy 插件">
+                    <JetbrainsMark size={14} />
                   </Button>
                 </DemoAction>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="relative size-7 rounded-lg" disabled={featuresDisabled || !jetbrainsAvailable || !onSwitchJetbrains || jetbrainsBusy} onClick={() => onSwitchJetbrains?.(account)} aria-label="切换到 JetBrains IDE CodeBuddy 插件" aria-busy={jetbrainsLoading}>
-                      {jetbrainsLoading ? <Loader2 className="size-3.5 animate-spin" /> : <JetbrainsMark size={15} />}
+                    <Button variant="outline" size="icon" className="relative size-6 rounded-lg" disabled={featuresDisabled || !jetbrainsAvailable || !onSwitchJetbrains || jetbrainsBusy} onClick={() => onSwitchJetbrains?.(account)} aria-label="切换到 JetBrains IDE CodeBuddy 插件" aria-busy={jetbrainsLoading}>
+                      {jetbrainsLoading ? <Loader2 className="size-3 animate-spin" /> : <JetbrainsMark size={14} />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">{jetbrainsTooltip(jetbrainsInstalled, jetbrainsPluginInstalled)}</TooltipContent>
@@ -244,24 +244,21 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
                 <ProductCurrentState product="codebuddy" compact iconOnly />
               ) : demoModeEnabled ? (
                 <DemoAction>
-                  <Button variant="outline" size="icon" className="size-7 rounded-lg" aria-label="设为 CodeBuddy CLI 当前账号">
-                    <CodeBuddyMark size={15} />
+                  <Button variant="outline" size="icon" className="size-6 rounded-lg" aria-label="设为 CodeBuddy CLI 当前账号">
+                    <CodeBuddyMark size={14} />
                   </Button>
                 </DemoAction>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="size-7 rounded-lg" disabled={featuresDisabled || !codebuddyCliConfigured || !onSwitchCodebuddyCli || codebuddyCliBusy} onClick={() => onSwitchCodebuddyCli?.(account)} aria-label={codebuddyCliLoading ? "正在切换 CodeBuddy CLI 当前账号" : "设为 CodeBuddy CLI 当前账号"} aria-busy={codebuddyCliLoading}>
-                      {codebuddyCliLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CodeBuddyMark size={15} />}
+                    <Button variant="outline" size="icon" className="size-6 rounded-lg" disabled={featuresDisabled || !codebuddyCliConfigured || !onSwitchCodebuddyCli || codebuddyCliBusy} onClick={() => onSwitchCodebuddyCli?.(account)} aria-label={codebuddyCliLoading ? "正在切换 CodeBuddy CLI 当前账号" : "设为 CodeBuddy CLI 当前账号"} aria-busy={codebuddyCliLoading}>
+                      {codebuddyCliLoading ? <Loader2 className="size-3 animate-spin" /> : <CodeBuddyMark size={14} />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">{codebuddyCliConfigured ? "设为 CodeBuddy CLI 当前账号" : "请先接入 CodeBuddy CLI"}</TooltipContent>
                 </Tooltip>
               ))}
             </div>
-            </div>
-            {/* 限额等文案 chip 单独一行：与账号名争宽度会把名字挤成 0（1280 宽下必现）。 */}
-            <div className="flex min-w-0 flex-wrap items-center gap-1 empty:hidden">{statusChips}</div>
           </div>
         ) : (
           /* 文本让位按「有没有水印」而不是按产品：之前只有 VS Code / JetBrains 在线时
