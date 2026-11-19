@@ -627,45 +627,103 @@ pub(super) fn list_targets() -> Vec<Target> {
     targets
 }
 
-/// 从本机 JetBrains IDE 读取当前 token；若能匹配账号库则返回匹配信息。
-pub fn detect_current_account() -> Result<Value, String> {
-    let targets: Vec<Target> = list_targets()
-        .into_iter()
-        .filter(|t| t.plugin_installed)
-        .collect();
-    for target in &targets {
-        // 单个目标的 secret 读取失败按未登录处理，不阻断其它目标。
+/// 从 `secret-storage.xml` 读到的一次「当前登录」识别结论。
+///
+/// 只描述**读到了什么**，不含任何 secret 值；写入（回写本地状态文件）由调用方决定——
+/// [`status`](super::status::status) 只读不写，`detect_current_account` 才落盘。
+///
+/// **红线**：本模块对 `secret-storage.xml` 永远只读，绝不写回。
+#[derive(Debug, Clone)]
+pub(super) enum SecretScan {
+    /// 没有任何装了插件的配置目录读到可用登录态。
+    NotFound,
+    /// 读到登录态，但账号库里没有能与它对上的账号。
+    Unmatched {
+        config_dir: String,
+        uid: Option<String>,
+    },
+    /// 命中账号库里的账号。
+    Matched {
+        config_dir: String,
+        account: Value,
+        uid: Option<String>,
+    },
+}
+
+/// 扫描装了插件的配置目录，识别当前登录账号；`matcher` 由调用方注入。
+///
+/// 生产路径传账号库匹配（[`scan_secret_account`]），用例传固定夹具——这样「从
+/// `secret-storage.xml` 读登录态」这段逻辑可以被单测覆盖，而不必读真实账号库
+/// （AGENTS.md 第 8 节）。
+///
+/// 与历史实现同序：遇到**第一个**能解析出登录态的配置目录就给出结论（无论是否匹配上
+/// 账号库），不再继续扫后面的产品——多个产品写的是同一份账号，先命中的就是真实值。
+pub(super) fn scan_secret_account_with(
+    targets: &[Target],
+    matcher: &dyn Fn(Option<&str>, &str) -> Option<Value>,
+) -> SecretScan {
+    for target in targets.iter().filter(|target| target.plugin_installed) {
+        // 单个目标的 secret 读取失败按「未登录」处理，不阻断其它目标。
         let Some(secret) = read_secret_for(&target.config_dir).ok().flatten() else {
             continue;
         };
         let Some((uid, token)) = parse_token_from_secret(&secret) else {
             continue;
         };
-        if let Some(acc) = match_account_for_token(uid.as_deref(), &token) {
-            let id = get_str(&acc, "id").unwrap_or_default();
+        return match matcher(uid.as_deref(), &token) {
+            Some(account) => SecretScan::Matched {
+                config_dir: target.name.clone(),
+                account,
+                uid,
+            },
+            None => SecretScan::Unmatched {
+                config_dir: target.name.clone(),
+                uid,
+            },
+        };
+    }
+    SecretScan::NotFound
+}
+
+/// 生产路径的识别：装了插件的配置目录 × 账号库。
+pub(super) fn scan_secret_account() -> SecretScan {
+    scan_secret_account_with(&plugin_targets(), &|uid, token| {
+        match_account_for_token(uid, token)
+    })
+}
+
+/// 从本机 JetBrains IDE 读取当前 token；若能匹配账号库则返回匹配信息。
+pub fn detect_current_account() -> Result<Value, String> {
+    Ok(match scan_secret_account() {
+        SecretScan::Matched {
+            config_dir,
+            account,
+            uid,
+        } => {
+            let id = get_str(&account, "id").unwrap_or_default();
             let _ = set_active_account_id(&id);
-            return Ok(json!({
+            json!({
                 "ok": true,
                 "found": true,
                 "matched": true,
-                "configDir": target.name,
+                "configDir": config_dir,
                 "accountId": id,
-                "account": account::account_meta(&acc),
+                "account": account::account_meta(&account),
                 "uid": uid,
-            }));
+            })
         }
-        return Ok(json!({
+        SecretScan::Unmatched { config_dir, uid } => json!({
             "ok": true,
             "found": true,
             "matched": false,
-            "configDir": target.name,
+            "configDir": config_dir,
             "uid": uid,
             "message": "本机 JetBrains IDE 已登录 CodeBuddy 插件，但账号库中无匹配账号；可先用「从本机导入」或扫码登录同步账号后再切换。",
-        }));
-    }
-    Ok(json!({
-        "ok": true,
-        "found": false,
-        "message": "本机 JetBrains IDE 未找到 CodeBuddy 插件登录 secret",
-    }))
+        }),
+        SecretScan::NotFound => json!({
+            "ok": true,
+            "found": false,
+            "message": "本机 JetBrains IDE 未找到 CodeBuddy 插件登录 secret",
+        }),
+    })
 }

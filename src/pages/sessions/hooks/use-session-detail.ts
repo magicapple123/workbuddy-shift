@@ -83,7 +83,11 @@ export function useSessionDetail({
       : client === "codebuddyIde"
         ? [api.getCodebuddyCnIdeStatus().then((status) => ({ variant: "cn" as const, accountId: status.activeAccountId })),
           api.getCodebuddyIdeStatus().then((status) => ({ variant: "ai" as const, accountId: status.activeAccountId }))]
-        : [api.getVscodeExtStatus().then((status) => ({ accountId: status.activeAccountId, running: status.running }))];
+        // JetBrains 必须读自己的状态：先前掉进下面的 VS Code 分支，详情里的「当前账号」
+        // 标记取的是 VS Code 的登录账号，换个 IDE 登录就标错人。
+        : client === "jetbrains"
+          ? [api.getJetbrainsStatus().then((status) => ({ accountId: status.activeAccountId, running: status.running }))]
+          : [api.getVscodeExtStatus().then((status) => ({ accountId: status.activeAccountId, running: status.running }))];
     void Promise.allSettled(reads).then((results) => {
       if (live) setCurrentAccounts(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
     });

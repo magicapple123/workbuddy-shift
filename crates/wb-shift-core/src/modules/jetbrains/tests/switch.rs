@@ -687,3 +687,122 @@
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // -----------------------------------------------------------------------
+    // 当前账号：secret-storage 优先 + 本地状态文件兜底（04 回归口）
+    // -----------------------------------------------------------------------
+    //
+    // 现象：在 PyCharm 里手动登录成另一个账号后，页面仍显示上一次的账号，点一次
+    // 「检测账号」才更新——因为 `status()` 只读本地状态文件，而该文件只在「切换成功」
+    // 与「检测账号」时回写。这里钉住两条口径：
+    //
+    // 1. `status()` 内联一次轻量识别：从 `secret-storage.xml` 读登录态并匹配账号库，
+    //    命中就用它，`detectedFrom` 如实回报 `secret-storage`；
+    // 2. 读不到 / 匹配不上回退本地状态文件，`detectedFrom` 回报 `state-file`。
+
+    /// 造一个「装了插件 + 已登录」的配置目录（secret 内容与真机同 key）。
+    fn jb_logged_in_config_dir(base: &Path, name: &str, uid: &str, token: &str) -> PathBuf {
+        let config_dir = base.join(name);
+        std::fs::create_dir_all(config_dir.join("plugins/coding-copilot-jetbrains")).unwrap();
+        let secret = json!({ "uid": uid, "token": token }).to_string();
+        write_secret_for(&config_dir, &secret).unwrap();
+        config_dir
+    }
+
+    /// secret-storage 命中账号库 → 当前账号来自 secret-storage（而不是滞后的状态文件）。
+    #[test]
+    fn current_account_prefers_secret_storage_over_the_lagging_state_file() {
+        let base = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-current-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let config_dir = jb_logged_in_config_dir(&base, "PyCharm2026.2", "uid-lin", "token-lin");
+        let targets = vec![Target {
+            config_dir,
+            name: "PyCharm2026.2".to_string(),
+            plugin_installed: true,
+        }];
+
+        let scan = scan_secret_account_with(&targets, &|uid, token| {
+            assert_eq!(uid, Some("uid-lin"), "secret 里的 uid 必须透传给匹配器");
+            assert_eq!(token, "token-lin");
+            Some(json!({ "id": "acc-lin", "uid": "uid-lin", "nickname": "林小凤" }))
+        });
+        // 状态文件里还是上一次切换留下的账号：必须被 secret-storage 覆盖。
+        let state = Some(("acc-guo".to_string(), "果妈".to_string()));
+        let (id, name, detected_from) = resolve_active_account(&scan, state);
+        assert_eq!(id.as_deref(), Some("acc-lin"));
+        assert_eq!(name.as_deref(), Some("林小凤"));
+        assert_eq!(detected_from, "secret-storage");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 登录态匹配不上账号库（如刚在 IDE 里登录、账号库还没导入）→ 回退状态文件并如实回报。
+    #[test]
+    fn current_account_falls_back_to_the_state_file() {
+        let base = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-current-fallback-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let config_dir = jb_logged_in_config_dir(&base, "IntelliJIdea2026.3", "uid-new", "token-new");
+        let targets = vec![Target {
+            config_dir,
+            name: "IntelliJIdea2026.3".to_string(),
+            plugin_installed: true,
+        }];
+
+        // 1) 读到登录态但账号库无匹配 → 结论来自状态文件。
+        let unmatched = scan_secret_account_with(&targets, &|_, _| None);
+        assert!(matches!(unmatched, SecretScan::Unmatched { .. }), "应识别为「未匹配」");
+        let (id, name, detected_from) =
+            resolve_active_account(&unmatched, Some(("acc-guo".to_string(), "果妈".to_string())));
+        assert_eq!(id.as_deref(), Some("acc-guo"));
+        assert_eq!(name.as_deref(), Some("果妈"));
+        assert_eq!(detected_from, "state-file");
+
+        // 2) 一个装了插件的目录都没有登录态 → 同样回退状态文件。
+        let no_secret = scan_secret_account_with(&[], &|_, _| Some(json!({ "id": "acc-x" })));
+        assert!(matches!(no_secret, SecretScan::NotFound));
+        let (id, _, detected_from) = resolve_active_account(&no_secret, None);
+        assert_eq!(id, None, "两边都没有时不得凭空给出账号");
+        assert_eq!(detected_from, "state-file");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 只读红线：识别当前账号**绝不**改写 `secret-storage.xml`（改了就等于把用户踢下线）。
+    #[test]
+    fn current_account_detection_never_writes_the_secret_file() {
+        let base = std::env::temp_dir().join(format!(
+            "workbuddy-shift-jb-current-readonly-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let config_dir = jb_logged_in_config_dir(&base, "PyCharm2026.3", "uid-lin", "token-lin");
+        let target = Target {
+            config_dir: config_dir.clone(),
+            name: "PyCharm2026.3".to_string(),
+            plugin_installed: true,
+        };
+        let path = secret_path_for(&config_dir);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let _ = scan_secret_account_with(std::slice::from_ref(&target), &|_, _| {
+            Some(json!({ "id": "acc-lin", "uid": "uid-lin" }))
+        });
+        let _ = resolve_active_account(
+            &scan_secret_account_with(std::slice::from_ref(&target), &|_, _| None),
+            Some(("acc-guo".to_string(), "果妈".to_string())),
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "识别当前账号不得修改 secret-storage.xml"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }

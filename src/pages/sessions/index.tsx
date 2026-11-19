@@ -19,6 +19,7 @@ import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescript
 import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { SessionGroupClient, WbVariant } from "@/lib/types";
+import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 import { AddLinkedSessionDialog } from "./add-linked-session-dialog";
 import { CLIENTS, PAGE_SIZE, PAGINATION_HIDE_MAX } from "./constants";
@@ -54,6 +55,25 @@ export default function SessionsPage() {
   useEffect(() => {
     if (accounts.length === 0) void fetchAll();
   }, [accounts.length, fetchAll]);
+
+  // 进入页面先自动识别一次 JetBrains 当前登录：用户在 PyCharm / IDEA 里换了账号后，
+  // 不必先点「检测账号」才能看到新账号。**失败静默**——没装 IDE、插件没登录都是正常情况，
+  // 不该弹错。命中账号时后端会回写「当前账号」，账号库显示名可能随之变化，故再拉一次。
+  useEffect(() => {
+    if (api.isDemoMode()) return;
+    let live = true;
+    void api
+      .detectJetbrainsAccount()
+      .then((result) => {
+        if (live && result.matched) void fetchAll();
+      })
+      .catch(() => {
+        /* JetBrains 未安装 / 未登录 / 读 secret-storage 失败：静默 */
+      });
+    return () => {
+      live = false;
+    };
+  }, [fetchAll]);
 
   const scope = client === "codebuddyIde" ? variantScope : undefined;
   const list = useSessionGroups(client, scope);

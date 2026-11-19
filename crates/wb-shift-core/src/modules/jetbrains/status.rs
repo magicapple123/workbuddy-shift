@@ -204,11 +204,58 @@ pub(super) fn launch_ide(inst: &RunningIde) -> Result<(), String> {
     }
 }
 
-/// 状态：是否安装、插件安装、运行、登录、当前账号（本地状态文件 + 账号库）。
+/// 本地状态文件里记录的账号（id + 显示名）。
+///
+/// 只有「账号库里确实存在该 id」时才算数（历史行为：状态文件里指向已删除账号的 id
+/// 一律当作没有当前账号）。
+pub(super) type StateAccount = (String, String);
+
+/// 解析「当前账号」：`secret-storage.xml` 优先，读不到 / 匹配不上回退本地状态文件。
+///
+/// 抽成纯函数是为了让两条分支都能被单测钉住（都不用碰真实账号库 / 真实配置目录）。
+/// 返回值第三项是 `detectedFrom`，**如实**告诉前端这个结论是从哪儿来的：
+/// - `secret-storage`：这次真的从 `secret-storage.xml` 读到了能匹配账号库的登录态；
+/// - `state-file`：secret 缺失 / 不匹配 / 账号库换过账号，结论来自本地状态文件
+///   （也可能是两边都没有，此时前两项为 `None`）。
+pub(super) fn resolve_active_account(
+    scan: &SecretScan,
+    state: Option<StateAccount>,
+) -> (Option<String>, Option<String>, &'static str) {
+    if let SecretScan::Matched { account, .. } = scan {
+        let id = get_str(account, "id").unwrap_or_default();
+        if !id.trim().is_empty() {
+            return (
+                Some(id),
+                Some(account::account_display_name(account)),
+                "secret-storage",
+            );
+        }
+    }
+    match state {
+        Some((id, name)) => (Some(id), Some(name), "state-file"),
+        None => (None, None, "state-file"),
+    }
+}
+
+/// 本地状态文件里的当前账号（账号库里查不到对应账号时视为没有）。
+///
+/// 该文件只在「切换成功」与「检测账号」时回写，因此它天然**滞后**于用户在 IDE 内的
+/// 手动登录——这正是 `status()` 要内联一次轻量识别的原因。
+pub(super) fn state_account() -> Option<StateAccount> {
+    let id = active_account_id_from_state()?;
+    account::find_account(&id).map(|acc| (id, account::account_display_name(&acc)))
+}
+
+/// 状态：是否安装、插件安装、运行、登录、当前账号（secret-storage 优先 + 本地状态文件兜底）。
 ///
 /// 除既有开关字段外，额外给出两段**纯诊断**信息：
 /// - `diagnostics`：配置根 / 子目录全量清单（含被拒原因）/ 运行实例映射结果；
 /// - `unmappedRunning`：运行中但映射不到配置目录的实例（前端据此在切换前就拦住）。
+///
+/// `activeAccountId` / `activeAccountName` **不再只读本地状态文件**：用户在 PyCharm 里手动
+/// 登录后，那份文件要等到下一次切换 / 点「检测账号」才更新，页面会长期显示上一次的账号。
+/// 这里内联一次轻量识别（只读 `secret-storage.xml`，绝不写入），`detectedFrom` 如实回报
+/// 结论来源（`secret-storage` / `state-file`）。
 pub fn status() -> Value {
     let targets = list_targets();
     let running = running_ides();
@@ -227,15 +274,8 @@ pub fn status() -> Value {
         .filter(|t| t.plugin_installed)
         .any(|t| read_secret_for(&t.config_dir).ok().flatten().is_some());
 
-    let mut active_account_id = active_account_id_from_state();
-    let mut active_account_name: Option<String> = None;
-    if let Some(id) = active_account_id.clone() {
-        if let Some(acc) = account::find_account(&id) {
-            active_account_name = Some(account::account_display_name(&acc));
-        } else {
-            active_account_id = None;
-        }
-    }
+    let (active_account_id, active_account_name, detected_from) =
+        resolve_active_account(&scan_secret_account(), state_account());
 
     let unmapped = unmapped_running(&running);
     json!({
@@ -247,7 +287,7 @@ pub fn status() -> Value {
         "targets": targets.iter().map(|t| t.to_status_json(&running_dirs)).collect::<Vec<_>>(),
         "activeAccountId": active_account_id,
         "activeAccountName": active_account_name,
-        "detectedFrom": "secret-storage",
+        "detectedFrom": detected_from,
         "statePath": state_path().to_string_lossy(),
         "unmappedRunning": unmapped_running_json(&running),
         "unmappedRunningHint": if unmapped.is_empty() {
