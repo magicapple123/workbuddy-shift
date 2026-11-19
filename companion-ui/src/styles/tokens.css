@@ -1,0 +1,230 @@
+/*
+ * WorkBuddy Shift 悬浮窗（companion-ui）语义颜色 token —— 唯一色源。
+ *
+ * 三层结构：
+ *   tokens.css（本文件）  :root 浅色 / html.dark 深色，只放语义变量
+ *     ↑
+ *   组件 CSS             只引用 var(--wb-*)，不再出现字面色值
+ *     ↑
+ *   tailwind.css @theme  --color-*: var(--wb-*)，shadcn 组件自动跟随
+ *
+ * 深色取值直接对齐主应用 src/index.css 的 `.dark`（同一套 oklch 底色与品牌蓝
+ * #6fa6f2），不另创一套色，保证主窗口与悬浮窗同屏时不打架。
+ *
+ * 主题判定只认 `html.dark`（由 src/desktop/theme.ts 按
+ * localStorage["workbuddy-shift.theme"] 三态写入），不使用
+ * `@media (prefers-color-scheme)` 做补丁式覆盖：系统跟随由 theme.ts 解析后
+ * 落到同一个 class 上，颜色只在一个地方定义。
+ *
+ * 命名约定：`--wb-<角色>[-<修饰>]`。新增色前先确认现有 token 不能表达，
+ * 不要再引入“只在某一处出现一次”的近色。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* 背景层次：页面底 / 卡片面 / 更浅的面 / 井与徽章底 / 次级悬停底 / 遮罩 */
+  --wb-bg: #f5f7fa;
+  --wb-surface: #ffffff;
+  --wb-surface-muted: #f9fbfd;
+  --wb-surface-sunken: #e8eef6;
+  --wb-surface-hover: #e6edf3;
+  /* 二级悬停（列表项再压一层），与 surface-hover 分开才能保留按压反馈。 */
+  --wb-surface-hover-strong: #d9e5ef;
+  /* 分组卡片的极浅底：比 surface 更像“浮在页面上的玻璃”，不用投影。 */
+  --wb-surface-tint: rgba(255, 255, 255, 0.22);
+  --wb-overlay: rgba(28, 35, 43, 0.22);
+
+  /* 文本层次 */
+  --wb-text: #26303d;
+  --wb-text-secondary: #5b6b7f;
+  --wb-text-muted: #7c8da3;
+  --wb-text-faint: #8a99ab;
+  --wb-heading-muted: #6b7f96;
+
+  /* 描边 */
+  --wb-border: #e2e8f0;
+  --wb-border-strong: #dbe4ee;
+  --wb-border-soft: #e8eef6;
+  --wb-input: #d5dfec;
+
+  /* 品牌蓝（主色只给 CTA、选中态与品牌标记） */
+  --wb-accent: #2b7fea;
+  --wb-accent-foreground: #ffffff;
+  --wb-accent-strong: #1c5bb8;
+  --wb-accent-soft: #eef4fd;
+  --wb-accent-soft-strong: #e4eefd;
+  --wb-accent-border: #dbe8fd;
+  --wb-ring: #2b7fea;
+  /* 键盘焦点环与品牌蓝刻意分开：焦点是可用性信号，不跟品牌色联动。 */
+  --wb-focus-ring: #698fc2;
+
+  /* 语义色：错误 / 警告 */
+  --wb-danger: #d9483f;
+  --wb-warning: #9a6438;
+  --wb-warning-soft: #f5ecd9;
+
+  /* 会话栏玻璃（只给 rail 用，设置窗不要引用，避免把窗口做成半透明） */
+  --wb-glass-from: #fcfdfff5;
+  --wb-glass-to: #eff4f8f5;
+  --wb-glass-border: #ffffffed;
+  --wb-glass-inner: #ffffff;
+  --wb-glass-shadow: #233e5920;
+  --wb-grip: #c5d0da;
+  /* 提示卡片（比会话栏略实一些，保证小字号可读） */
+  --wb-card-from: #fcfdfffa;
+  --wb-card-to: #f0f5f9fa;
+  --wb-card-arrow: #f3f7fa;
+  --wb-shadow: #233e5920;
+  --wb-shadow-strong: #233e5926;
+
+  /* 欢迎动画的光晕（rail 的 living line）：1px 白描边 + 三层通道光。
+     通道光用 `R G B` 三元组，配合 `rgb(var(--x) / <alpha-var>)` 让动画继续
+     控制透明度，不需要 color-mix 之类的较新语法。 */
+  --wb-welcome-glow-border: #ffffffed;
+  --wb-welcome-glow-core-rgb: 190 190 190;
+  --wb-welcome-halo-rgb: 255 255 255;
+  --wb-welcome-halo-outer-rgb: 90 90 90;
+
+  /* 头像圆环与底盘 */
+  --wb-avatar-ring: #ffffff;
+  --wb-avatar-bg-from: #e0e4e5;
+  --wb-avatar-bg-to: #eef2f7;
+  --wb-avatar-bg-hover: #dbe8ec;
+  --wb-avatar-ring-hover: #c9dce8;
+  --wb-avatar-face-bg: #f4f7fb;
+  /* 头像插画的墨线：插画本身不跟随主题，因此两种模式取同一个值。 */
+  --wb-avatar-ink: #24313f;
+  --wb-chip-bg: rgb(255 255 255 / 80%);
+
+  /* 会话状态点 */
+  --wb-dot-idle: #a9b7c0;
+  --wb-dot-border: #ffffff;
+  --wb-dot-face: #f5f9ff;
+  --wb-dot-run-ring: #bfd8fb;
+  --wb-dot-run-halo: #bcd8fb80;
+  --wb-dot-done-ring: #c3dcf6;
+  --wb-dot-wait: #f3a31c;
+  --wb-dot-error: #f36968;
+  /* 状态点上的字形（对勾 / 叉 / 内点）：底色始终是饱和色，所以两种模式同值。 */
+  --wb-dot-glyph: #ffffff;
+
+  /* 表单控件 */
+  --wb-track: #d5dfec;
+  --wb-track-on: #2b7fea;
+  --wb-control-thumb: #ffffff;
+  --wb-control-thumb-shadow: #26303d25;
+  --wb-outline: #b9d3f4;
+  --wb-strong: #26303d;
+  --wb-soft: #a8b8cc;
+  --wb-pressed: #3d8bef;
+  --wb-line: #dbe4ee;
+  --wb-muted-bg: #eef2f8;
+
+  /* 右键菜单 */
+  --wb-menu-bg: #ffffff;
+  --wb-menu-border: #dce5ed;
+  --wb-menu-text: #314e65;
+  --wb-menu-hover-bg: #e6f0f7;
+  --wb-menu-hover-text: #235d80;
+  --wb-menu-hover-ring: #cde0ef;
+
+  /* 骨架屏 */
+  --wb-skeleton: #dbe4ee;
+  --wb-skeleton-card: #e8eef6;
+}
+
+html.dark {
+  color-scheme: dark;
+
+  --wb-bg: oklch(0.208 0.042 265.755);
+  --wb-surface: oklch(0.279 0.041 260.031);
+  --wb-surface-muted: oklch(0.279 0.041 260.031);
+  --wb-surface-sunken: oklch(0.33 0.041 260.031);
+  --wb-surface-hover: oklch(1 0 0 / 8%);
+  --wb-surface-hover-strong: oklch(1 0 0 / 12%);
+  --wb-surface-tint: rgba(255, 255, 255, 0.04);
+  --wb-overlay: rgba(0, 0, 0, 0.55);
+
+  --wb-text: oklch(0.929 0.013 255.508);
+  --wb-text-secondary: #c3ccda;
+  --wb-text-muted: oklch(0.704 0.04 256.788);
+  --wb-text-faint: oklch(0.704 0.04 256.788);
+  --wb-heading-muted: #9aa6b8;
+
+  --wb-border: oklch(1 0 0 / 10%);
+  --wb-border-strong: oklch(1 0 0 / 16%);
+  --wb-border-soft: oklch(1 0 0 / 8%);
+  --wb-input: oklch(1 0 0 / 15%);
+
+  --wb-accent: #6fa6f2;
+  /* 深色主色是亮蓝，前景必须用深 navy 才有对比度（不要改成白色）。 */
+  --wb-accent-foreground: oklch(0.208 0.042 265.755);
+  --wb-accent-strong: #8cbbf7;
+  --wb-accent-soft: rgba(111, 166, 242, 0.14);
+  --wb-accent-soft-strong: rgba(111, 166, 242, 0.22);
+  --wb-accent-border: rgba(111, 166, 242, 0.32);
+  --wb-ring: #6fa6f2;
+  --wb-focus-ring: #8cbbf7;
+
+  --wb-danger: #e8928a;
+  --wb-warning: #d8ae6a;
+  --wb-warning-soft: rgba(216, 174, 106, 0.12);
+
+  --wb-glass-from: rgba(28, 36, 49, 0.92);
+  --wb-glass-to: rgba(22, 29, 40, 0.88);
+  --wb-glass-border: rgba(255, 255, 255, 0.12);
+  --wb-glass-inner: rgba(255, 255, 255, 0.1);
+  --wb-glass-shadow: rgba(0, 0, 0, 0.45);
+  --wb-grip: rgba(255, 255, 255, 0.28);
+  --wb-card-from: rgba(30, 39, 52, 0.94);
+  --wb-card-to: rgba(24, 31, 42, 0.9);
+  --wb-card-arrow: oklch(0.279 0.041 260.031);
+  --wb-shadow: rgba(0, 0, 0, 0.45);
+  --wb-shadow-strong: rgba(0, 0, 0, 0.55);
+
+  --wb-welcome-glow-border: rgba(255, 255, 255, 0.35);
+  --wb-welcome-glow-core-rgb: 143 163 189;
+  --wb-welcome-halo-rgb: 220 233 255;
+  --wb-welcome-halo-outer-rgb: 5 8 12;
+
+  --wb-avatar-ring: rgba(255, 255, 255, 0.14);
+  --wb-avatar-bg-from: oklch(0.33 0.041 260.031);
+  --wb-avatar-bg-to: oklch(0.279 0.041 260.031);
+  --wb-avatar-bg-hover: oklch(0.36 0.041 260.031);
+  --wb-avatar-ring-hover: rgba(111, 166, 242, 0.45);
+  --wb-avatar-face-bg: oklch(0.33 0.041 260.031);
+  --wb-avatar-ink: #24313f;
+  --wb-chip-bg: rgba(20, 27, 37, 0.72);
+
+  --wb-dot-idle: #6b7788;
+  --wb-dot-border: oklch(0.279 0.041 260.031);
+  --wb-dot-face: oklch(0.279 0.041 260.031);
+  --wb-dot-run-ring: rgba(111, 166, 242, 0.5);
+  --wb-dot-run-halo: rgba(111, 166, 242, 0.35);
+  --wb-dot-done-ring: rgba(111, 166, 242, 0.4);
+  --wb-dot-wait: #f3a31c;
+  --wb-dot-error: #f36968;
+  --wb-dot-glyph: #ffffff;
+
+  --wb-track: oklch(1 0 0 / 18%);
+  --wb-track-on: #6fa6f2;
+  --wb-control-thumb: #eaf1fb;
+  --wb-control-thumb-shadow: rgba(0, 0, 0, 0.45);
+  --wb-outline: rgba(111, 166, 242, 0.45);
+  --wb-strong: oklch(0.929 0.013 255.508);
+  --wb-soft: #7f8da1;
+  --wb-pressed: #8cbbf7;
+  --wb-line: oklch(1 0 0 / 16%);
+  --wb-muted-bg: oklch(0.33 0.041 260.031);
+
+  --wb-menu-bg: oklch(0.279 0.041 260.031);
+  --wb-menu-border: oklch(1 0 0 / 12%);
+  --wb-menu-text: #cfdae8;
+  --wb-menu-hover-bg: rgba(111, 166, 242, 0.18);
+  --wb-menu-hover-text: #cfe1fb;
+  --wb-menu-hover-ring: rgba(111, 166, 242, 0.32);
+
+  --wb-skeleton: oklch(1 0 0 / 12%);
+  --wb-skeleton-card: oklch(0.33 0.041 260.031);
+}

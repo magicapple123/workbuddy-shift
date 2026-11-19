@@ -1,3 +1,6 @@
+// 主题最先执行（见 settings.tsx 的同样原因）：theme.ts 在求值时就切好
+// <html> 的 dark class，rail.css 随后才注入，避免先闪一帧浅色。
+import { watchTheme } from './theme';
 import { createRoot } from 'react-dom/client';
 import { RailApp } from './components/Rail';
 import { createRailController } from './rail-controller';
@@ -6,6 +9,13 @@ import './rail.css';
 
 // A rail is a window, not a document: nothing in it may start a native drag.
 disableNativeContentDrag();
+
+/**
+ * 主应用改主题时，已打开的会话栏要立即跟着变（同一份 localStorage）。
+ * 悬浮窗是独立窗口，`storage` 事件不一定跨窗口派发，theme.ts 内还补了
+ * focus / visibilitychange 重读，这里只负责在窗口销毁时退订。
+ */
+const stopThemeWatch = watchTheme();
 
 const container = document.getElementById('desktop-rail');
 if (container) void boot(container);
@@ -27,6 +37,9 @@ async function boot(target: HTMLElement) {
   // window as a whole (inactive, motion-paused, welcome phase).
   controller.attach.container(target);
   createRoot(target).render(<RailApp controller={controller} container={target} />);
-  window.addEventListener('pagehide', () => controller.dispose(), {once: true});
+  window.addEventListener('pagehide', () => {
+    controller.dispose();
+    stopThemeWatch();
+  }, {once: true});
   controller.start();
 }

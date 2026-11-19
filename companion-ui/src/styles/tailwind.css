@@ -15,6 +15,20 @@
 @source "../**/*.{ts,tsx}";
 
 /*
+ * Color tokens are **not** declared here: `src/styles/tokens.css` is the single
+ * source (light in `:root`, dark in `html.dark`) and both HTML entries link it
+ * before any component stylesheet, so the pre-React skeleton is coloured too.
+ * Everything below only maps a utility name onto a semantic token, which is why
+ * `bg-secondary` / `text-strong` / `border-input` follow the theme by
+ * themselves — including inside Radix poppers, which render outside the
+ * settings root but still inherit the `html` class.
+ *
+ * `dark:` utilities work through the `custom-variant` below; component CSS
+ * should not need them, since every token already has a dark value.
+ */
+@custom-variant dark (&:is(.dark *));
+
+/*
  * Preflight is a broad reset and it sits *below* the stylesheets that predate
  * this migration, so wherever those stylesheets stay quiet, the user-agent
  * default they were written against is silently replaced. This block puts the
@@ -66,33 +80,37 @@
 }
 
 @theme {
-  --color-background: #f5f7fa;
-  --color-foreground: #26303d;
-  --color-primary: #2b7fea;
-  --color-primary-foreground: #ffffff;
-  --color-primary-hover: #1c6dd4;
-  --color-secondary: #ffffff;
-  --color-secondary-foreground: #26303d;
-  --color-accent: #eef4fd;
-  --color-accent-foreground: #26303d;
-  --color-muted: #eef2f8;
-  --color-muted-foreground: #8a99ab;
-  --color-border: #e2e8f0;
-  --color-input: #d5dfec;
-  --color-ring: #2b7fea;
+  /* shadcn-style semantic names, each pointing at a tokens.css variable. */
+  --color-background: var(--wb-bg);
+  --color-foreground: var(--wb-text);
+  --color-primary: var(--wb-accent);
+  --color-primary-foreground: var(--wb-accent-foreground);
+  --color-primary-hover: var(--wb-accent-strong);
+  --color-secondary: var(--wb-surface);
+  --color-secondary-foreground: var(--wb-text);
+  --color-accent: var(--wb-accent-soft);
+  --color-accent-foreground: var(--wb-text);
+  --color-muted: var(--wb-muted-bg);
+  --color-muted-foreground: var(--wb-text-faint);
+  --color-border: var(--wb-border);
+  --color-input: var(--wb-input);
+  --color-ring: var(--wb-ring);
+  --color-danger: var(--wb-danger);
+  --color-warning: var(--wb-warning);
 
   /* Controls carried over from settings.css. */
-  --color-track: #d5dfec;
-  --color-track-on: #2b7fea;
-  --color-outline: #b9d3f4;
-  --color-strong: #26303d;
-  --color-soft: #a8b8cc;
-  --color-pressed: #3d8bef;
-  --color-line: #dbe4ee;
-  --color-eyebrow: #6b7f96;
-  --color-hint: #8a99ab;
-  --color-caption: #8a99ab;
-  --color-status: #7c8da3;
+  --color-track: var(--wb-track);
+  --color-track-on: var(--wb-track-on);
+  --color-control-thumb: var(--wb-control-thumb);
+  --color-outline: var(--wb-outline);
+  --color-strong: var(--wb-strong);
+  --color-soft: var(--wb-soft);
+  --color-pressed: var(--wb-pressed);
+  --color-line: var(--wb-line);
+  --color-eyebrow: var(--wb-heading-muted);
+  --color-hint: var(--wb-text-faint);
+  --color-caption: var(--wb-text-faint);
+  --color-status: var(--wb-text-muted);
 
   --radius-sm: 8px;
   --radius-md: 10px;

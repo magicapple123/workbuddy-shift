@@ -1,8 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WorkBuddy Shift · 悬浮窗设置</title><link rel="icon" type="image/png" sizes="32x32" href="./icon.png"><link rel="apple-touch-icon" href="./icon.png"><link rel="stylesheet" href="/src/desktop/settings.css"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WorkBuddy Shift · 悬浮窗设置</title><link rel="icon" type="image/png" sizes="32x32" href="./icon.png"><link rel="apple-touch-icon" href="./icon.png"><script type="module" src="/src/desktop/theme.ts"></script><link rel="stylesheet" href="/src/desktop/settings.css"></head>
 <body>
-  <!-- Outside React's root: visible before the module graph has loaded. -->
+  <!-- Outside React's root: visible before the module graph has loaded. It is
+       coloured by the same tokens as the app (settings.css imports
+       src/styles/tokens.css), and theme.ts above sets `html.dark` as the first
+       module so the skeleton is not painted light first. -->
   <main id="settings-loading" class="rail-settings" aria-busy="true" aria-label="正在读取设置">
     <header><span class="eyebrow">WORKBUDDY SHIFT</span><h1>悬浮窗设置</h1><p>让桌面上的小伙伴，按你的习惯陪伴。</p></header>
     <div class="settings-skeleton" aria-hidden="true">
