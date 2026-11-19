@@ -174,7 +174,7 @@ describe("ledgerToOfficialUsage", () => {
   it("具体客户端：用 byClient 分组，找不到时返回 null（不能假装 0）", () => {
     const jetbrains = ledgerToOfficialUsage(ledger, "jetbrains");
     expect(jetbrains?.summary.usageThisMonth).toBe(10);
-    expect(jetbrains?.models[0].requestCount).toBe(4);
+    expect(jetbrains?.models?.[0].requestCount).toBe(4);
     expect(ledgerToOfficialUsage(ledger, "vscode")).toBeNull();
   });
 
