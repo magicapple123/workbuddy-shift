@@ -44,6 +44,9 @@ export function updateState(): Promise<UpdateSnapshot> {
       percent: null,
       message: null,
       checkedAt: null,
+      busyKind: null,
+      busySince: null,
+      manualInstallRequired: false,
     });
   }
   if (isWebui()) {
@@ -53,16 +56,23 @@ export function updateState(): Promise<UpdateSnapshot> {
       percent: null,
       message: null,
       checkedAt: null,
+      busyKind: null,
+      busySince: null,
+      manualInstallRequired: false,
     });
   }
   return call("update_state");
 }
 
-/** 启动更新包下载（异步，立即返回；进度走 `update-state` 事件与托盘）。 */
-export function updateDownload(): Promise<void> {
+/** 启动更新包下载（异步，立即返回；进度走 `update-state` 事件与托盘）。
+ *
+ * `proxy` 传设置页输入框当前值：下载与检查共用同一代理源，避免「只填未保存」时
+ * 检查通过、下载却读不到代理（第三轮第 1 条）。
+ */
+export function updateDownload(proxy?: string): Promise<void> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   if (isWebui()) return Promise.reject(new Error(UPDATE_UNSUPPORTED_MESSAGE));
-  return call<unknown>("update_download").then(() => undefined);
+  return call<unknown>("update_download", { proxy: proxy?.trim() || null }).then(() => undefined);
 }
 
 /** 安装已下载的更新包并重启（用户点「重启以完成升级」时调用）。 */

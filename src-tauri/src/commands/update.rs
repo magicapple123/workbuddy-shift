@@ -40,10 +40,12 @@ pub fn update_state() -> crate::update_service::UpdateSnapshot {
 
 /// POST /api/update/download —— 启动更新包下载。
 ///
+/// `proxy` 为设置页输入框当前值（可能尚未保存）：检查与下载用同一个代理源，
+/// 避免「填了代理但没点保存 → 检查通过、下载失败」（第三轮第 1 条）。
 /// 异步：立即返回，进度与阶段经 `update-state` 事件推送、托盘 tooltip 实时显示。
 #[tauri::command]
-pub fn update_download(app: tauri::AppHandle) -> Result<(), String> {
-    crate::update_service::start_download(&app)
+pub fn update_download(app: tauri::AppHandle, proxy: Option<String>) -> Result<(), String> {
+    crate::update_service::start_download(&app, proxy)
 }
 
 /// POST /api/update/restart —— 安装已下载的更新包并重启应用。

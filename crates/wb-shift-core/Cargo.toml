@@ -13,7 +13,11 @@ workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# system-proxy：GUI 进程没有 HTTP(S)_PROXY 环境变量时也要走系统代理，
+# 否则受限网络下更新检查/下载直接失败（第三轮第 1 条）。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+# semver：预发布版本比较（0.2.1-rc.1 < 0.2.1），不能再用「取数字前缀」（第三轮第 19 条）。
+semver = "1"
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 uuid = { workspace = true, features = ["v4"] }
 dirs = "5"

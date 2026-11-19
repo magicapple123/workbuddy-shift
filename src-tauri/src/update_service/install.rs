@@ -25,9 +25,9 @@ pub async fn restart<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     }
     // 无包时返回可读错误（不 panic）。
     let package = take_package_for_install()?;
-    let Some(_busy) = BusyGuard::acquire() else {
+    let Some(_busy) = BusyGuard::acquire(BusyKind::Install) else {
         store_package(package);
-        return Err(BUSY_MESSAGE.to_string());
+        return Err(busy_message());
     };
 
     let DownloadedPackage {

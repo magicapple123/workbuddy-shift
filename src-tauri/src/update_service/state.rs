@@ -35,6 +35,16 @@ pub struct UpdateSnapshot {
     pub message: Option<String>,
     /// 最近一次检查完成时刻（秒）。
     pub checked_at: Option<i64>,
+    /// 当前占用更新互斥的任务类型（`download` / `install`），空闲为 None。
+    ///
+    /// 检查不再占用互斥（single-flight），因此这里不会出现 `check`；
+    /// 字段用于前端说明「后台正在下载/安装，已 Xs」，而不是弹无信息的 BUSY 错误。
+    pub busy_kind: Option<String>,
+    /// 互斥被占用的起始时刻（秒）。
+    pub busy_since: Option<i64>,
+    /// 当前版本无法自动验证更新包签名（密钥轮换 / 旧客户端）：
+    /// 主按钮改为「打开 Releases 手动下载」，重试降为次要（第三轮第 1 条 P0-4）。
+    pub manual_install_required: bool,
 }
 
 impl UpdateSnapshot {
@@ -45,14 +55,26 @@ impl UpdateSnapshot {
             percent: None,
             message: None,
             checked_at: None,
+            busy_kind: None,
+            busy_since: None,
+            manual_install_required: false,
         }
     }
 }
 
 pub(crate) static SNAPSHOT: OnceLock<Mutex<UpdateSnapshot>> = OnceLock::new();
 
-/// 「检查 / 下载 / 安装」共用互斥：任一任务在跑时重复点击直接拒绝。
+/// 「下载 / 安装」互斥：这两类任务会写同一个更新包槽位，必须串行。
+///
+/// 检查**不**占用这把锁：检查是幂等的，并发检查走 single-flight 合并
+/// （第三轮第 2 条：后台检查进行中点下载/重启不应收到 BUSY）。
 pub(crate) static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 互斥占用起始时刻（秒）；0 表示空闲。看门狗据此强制释放陈旧锁。
+pub(crate) static BUSY_SINCE: AtomicI64 = AtomicI64::new(0);
+
+/// 互斥占用者类型（[`BusyKind`] 的 u8 编码）；0 表示空闲。
+pub(crate) static BUSY_KIND: AtomicU8 = AtomicU8::new(0);
 
 /// 托盘菜单重建档位（每 10% 一档）；`u8::MAX` 表示当前无下载进度。
 pub(crate) static MENU_PROGRESS_BUCKET: AtomicU8 = AtomicU8::new(u8::MAX);
@@ -60,21 +82,99 @@ pub(crate) static MENU_PROGRESS_BUCKET: AtomicU8 = AtomicU8::new(u8::MAX);
 /// 本轮下载是否已打过「进度开始上报」日志（排障用，一次下载只打一行）。
 pub(crate) static PROGRESS_REPORTED: AtomicBool = AtomicBool::new(false);
 
-/// 更新任务互斥 guard：覆盖「检查 / 下载 / 安装」全过程，drop 即释放。
-pub(crate) struct BusyGuard;
+/// 陈旧互斥的强制释放阈值：超过 3 分钟视为挂死（下载 read_timeout 60s，正常不会触发）。
+pub(crate) const BUSY_STALE_SECS: i64 = 3 * 60;
+
+/// 占用互斥的任务类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BusyKind {
+    Download,
+    Install,
+}
+
+impl BusyKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Download => "download",
+            Self::Install => "install",
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Download => 1,
+            Self::Install => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Download),
+            2 => Some(Self::Install),
+            _ => None,
+        }
+    }
+}
+
+/// 当前互斥占用信息：`(类型, 起始秒)`；空闲返回 `(None, None)`。
+pub(crate) fn busy_info() -> (Option<&'static str>, Option<i64>) {
+    if !BUSY.load(Ordering::Acquire) {
+        return (None, None);
+    }
+    let kind = BusyKind::from_code(BUSY_KIND.load(Ordering::Acquire)).map(BusyKind::as_str);
+    let since = BUSY_SINCE.load(Ordering::Acquire);
+    (kind, (since > 0).then_some(since))
+}
+
+/// 更新任务互斥 guard：只覆盖「下载 / 安装」，drop 即释放。
+pub(crate) struct BusyGuard {
+    kind: BusyKind,
+}
 
 impl BusyGuard {
     /// 抢占更新任务；已有任务在跑时返回 None（调用方按各自契约拒绝）。
-    pub(crate) fn acquire() -> Option<Self> {
+    ///
+    /// 看门狗：持锁超过 [`BUSY_STALE_SECS`] 时强制释放并写 error.log。
+    /// 没有这个兜底，一次挂死的下载会让所有后续检查/下载永久 BUSY，只能重启进程。
+    pub(crate) fn acquire(kind: BusyKind) -> Option<Self> {
+        if BUSY.load(Ordering::Acquire) {
+            let since = BUSY_SINCE.load(Ordering::Acquire);
+            let stale = since > 0 && now_secs() - since > BUSY_STALE_SECS;
+            if stale {
+                let holder = BusyKind::from_code(BUSY_KIND.load(Ordering::Acquire))
+                    .map(BusyKind::as_str)
+                    .unwrap_or("unknown");
+                error_log::record(
+                    "backend",
+                    "更新互斥超时已强制释放",
+                    &format!(
+                        "holder={holder} since={since} now={} threshold={BUSY_STALE_SECS}s",
+                        now_secs()
+                    ),
+                );
+                BUSY.store(false, Ordering::Release);
+                BUSY_SINCE.store(0, Ordering::Release);
+                BUSY_KIND.store(0, Ordering::Release);
+            }
+        }
         BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Self)
+            .map(|_| {
+                BUSY_SINCE.store(now_secs(), Ordering::Release);
+                BUSY_KIND.store(kind.code(), Ordering::Release);
+                Self { kind }
+            })
     }
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        BUSY.store(false, Ordering::Release);
+        // 只清自己这一类：看门狗可能已把锁释放给别的任务。
+        if BusyKind::from_code(BUSY_KIND.load(Ordering::Acquire)) == Some(self.kind) {
+            BUSY_SINCE.store(0, Ordering::Release);
+            BUSY_KIND.store(0, Ordering::Release);
+            BUSY.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -90,8 +190,15 @@ pub(crate) fn with_snapshot<T>(edit: impl FnOnce(&mut UpdateSnapshot) -> T) -> T
 }
 
 /// 读当前快照（`update_state` 命令与托盘菜单共用）。
+///
+/// `busyKind` / `busySince` 在读取时从互斥原子量填充，避免每个写快照的路径都要
+/// 记得同步它们（写路径只关心 phase / percent / message）。
 pub fn snapshot() -> UpdateSnapshot {
-    with_snapshot(|snapshot| snapshot.clone())
+    let mut snapshot = with_snapshot(|snapshot| snapshot.clone());
+    let (kind, since) = busy_info();
+    snapshot.busy_kind = kind.map(str::to_string);
+    snapshot.busy_since = since;
+    snapshot
 }
 
 /// 进入检查阶段。
@@ -109,6 +216,7 @@ pub(crate) fn begin_check() -> UpdateSnapshot {
         snapshot.phase = UpdatePhase::Checking;
         snapshot.percent = None;
         snapshot.message = None;
+        snapshot.manual_install_required = false;
         snapshot.clone()
     })
 }
@@ -123,6 +231,7 @@ pub(crate) fn apply_check_result(result: &Value) -> UpdateSnapshot {
             return snapshot.clone();
         }
         snapshot.percent = None;
+        snapshot.manual_install_required = false;
         if result.get("ok").and_then(Value::as_bool) != Some(true) {
             // 已有明确目标版本时（Available 被后台复查带进 Checking、或下载失败后
             // 再检查），失败不得清掉升级入口：否则 30 分钟后台检查一旦网络失败，
@@ -201,6 +310,19 @@ pub(crate) fn fail(message: String) -> UpdateSnapshot {
         snapshot.phase = UpdatePhase::Error;
         snapshot.percent = None;
         snapshot.message = Some(message);
+        snapshot.manual_install_required = false;
+        snapshot.clone()
+    })
+}
+
+/// 签名校验失败：置 Error 并要求手动安装一次（不引导反复重试）。
+pub(crate) fn fail_signature(message: String) -> UpdateSnapshot {
+    MENU_PROGRESS_BUCKET.store(u8::MAX, Ordering::Release);
+    with_snapshot(|snapshot| {
+        snapshot.phase = UpdatePhase::Error;
+        snapshot.percent = None;
+        snapshot.message = Some(message);
+        snapshot.manual_install_required = true;
         snapshot.clone()
     })
 }

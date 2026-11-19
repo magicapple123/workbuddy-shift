@@ -13,6 +13,7 @@ import type {
 import { GITHUB_RELEASE_URL, GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib/update";
 import { useUpdateState } from "@/hooks/use-update-state";
 import { cn } from "@/lib/utils";
+import { formatDate } from "@/lib/format";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { DemoAction } from "@/components/demo-action";
 import { useAccountsStore } from "@/stores/accounts";
@@ -20,6 +21,40 @@ import { SettingsFieldRow, SettingsGroup } from "./rows";
 
 export function useAuthFile(): string | undefined {
   return useAccountsStore((s) => s.status?.authFile);
+}
+
+/**
+ * 每秒刷新的「已持续秒数」：后台检查 / 下载没有进度条，至少让用户看到在动。
+ * `since` 为 null 时停止计时。
+ */
+function useElapsedSeconds(since: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since === null) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  if (since === null) return 0;
+  return Math.max(0, Math.floor((now - since) / 1000));
+}
+
+/** 发布标题与版本号重复时不显示（第 3 条：`v0.2.0 · v0.2.0`）。 */
+function usableReleaseName(info: UpdateInfo | null): string | undefined {
+  const name = info?.releaseName?.trim();
+  if (!name || !info) return undefined;
+  const duplicates = [info.latest, info.current].flatMap((version) =>
+    version ? [version, `v${version}`] : [],
+  );
+  return duplicates.includes(name) ? undefined : name;
+}
+
+/** 发行日期副标题；没有合法时间就不显示（不回退成 tag）。 */
+function publishedLabel(info: UpdateInfo | null): string | undefined {
+  if (!info?.publishedAt) return undefined;
+  const parsed = Date.parse(info.publishedAt);
+  if (Number.isNaN(parsed)) return undefined;
+  return `发布于 ${formatDate(parsed)}`;
 }
 
 /** 自动更新：检查公开 GitHub Releases 源 + 安装签名更新。 */
@@ -34,6 +69,28 @@ export function UpdateCard() {
   const [githubConfig, setGithubConfig] = useState<GithubConfig>({});
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxySaving, setProxySaving] = useState(false);
+  // 后台检查没有本地起点：观察到 checking 的那一刻开始计时。
+  const [checkingSince, setCheckingSince] = useState<number | null>(null);
+  const [busySince, setBusySince] = useState<number | null>(null);
+
+  const backgroundChecking = snapshot.phase === "checking";
+  const downloading = snapshot.phase === "downloading";
+  const checkBusy = checking || backgroundChecking || downloading;
+  const checkingElapsed = useElapsedSeconds(checkingSince);
+  const busyElapsed = useElapsedSeconds(busySince);
+
+  useEffect(() => {
+    if (snapshot.phase === "checking") {
+      setCheckingSince((current) => current ?? Date.now());
+    } else {
+      setCheckingSince(null);
+    }
+    if (snapshot.busyKind && snapshot.busySince) {
+      setBusySince(snapshot.busySince * 1000);
+    } else if (!snapshot.busyKind) {
+      setBusySince(null);
+    }
+  }, [snapshot.phase, snapshot.busyKind, snapshot.busySince]);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,10 +112,21 @@ export function UpdateCard() {
   async function check() {
     setChecking(true);
     try {
+      // 单一真相源：检查前把输入框的代理落盘，避免「只填未保存」时
+      // 检查走输入框、下载读旧配置而失败（第 1 条 P0-2）。
+      const value = proxyUrl.trim();
+      if (value !== (githubConfig.proxy ?? "")) {
+        const saved = await api.saveGithubConfig({ ...githubConfig, proxy: value });
+        setGithubConfig(saved);
+        setProxyUrl(saved.proxy ?? "");
+      }
       const r = await api.checkUpdate(proxyUrl, true);
       setInfo(r);
       if (!r.ok) {
-        toast.error("检查更新失败", { description: r.message || r.error });
+        // BUSY 是「有任务在跑」而不是失败：用 info 级别的提示，不吓用户。
+        const busy = /正在进行|请稍候/.test(r.message ?? r.error ?? "");
+        const notify = busy ? toast.info : toast.error;
+        notify("检查更新失败", { description: r.message || r.error });
       }
     } catch (e) {
       toast.error("检查更新失败", { description: api.asError(e) });
@@ -155,11 +223,18 @@ export function UpdateCard() {
           </Button></DemoAction>
         </div>
 
-        <div className="flex flex-wrap gap-2 border-b-0 border-border/60 px-4 py-3 sm:px-5">
-          <DemoAction><Button size="sm" variant="outline" onClick={check} disabled={checking}>
-            {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            检查更新
+        <div className="flex flex-wrap items-center gap-2 border-b-0 border-border/60 px-4 py-3 sm:px-5">
+          <DemoAction><Button size="sm" variant="outline" onClick={check} disabled={checkBusy}>
+            {checkBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {downloading
+              ? `正在下载更新（已 ${busyElapsed}s）`
+              : backgroundChecking || checking
+                ? `正在检查更新（已 ${checkingElapsed}s）`
+                : "检查更新"}
           </Button></DemoAction>
+          {backgroundChecking && (
+            <span className="text-xs text-muted-foreground">后台正在检查，无需重复点击</span>
+          )}
         </div>
 
         {info?.ok && (
@@ -171,8 +246,18 @@ export function UpdateCard() {
                 {info.hasUpdate
                   ? `发现新版本 v${info.latest}（当前 v${info.current}）`
                   : `已是最新版本 v${info.current}`}
-                {info.releaseName && <span className="text-muted-foreground"> · {info.releaseName}</span>}
+                {usableReleaseName(info) && (
+                  <span className="text-muted-foreground"> · {usableReleaseName(info)}</span>
+                )}
+                {publishedLabel(info) && (
+                  <span className="text-muted-foreground"> · {publishedLabel(info)}</span>
+                )}
               </div>
+              {info.hasUpdate && info.manifestAvailable === false && (
+                <div className="text-sm text-destructive">
+                  更新清单不可达，下载可能失败：请先填写并保存更新代理后重试。
+                </div>
+              )}
               {info.hasUpdate && (
                 <DemoAction>
                   {snapshot.phase === "readyToRestart" ? (
@@ -201,7 +286,7 @@ export function UpdateCard() {
             </AlertDescription>
           </Alert>
         )}
-        <UpdateInstallDialog open={installOpen} onOpenChange={setInstallOpen} />
+        <UpdateInstallDialog open={installOpen} onOpenChange={setInstallOpen} proxy={proxyUrl} />
       </CardContent>
     </SettingsGroup>
   );

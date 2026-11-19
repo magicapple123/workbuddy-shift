@@ -347,6 +347,9 @@ fn update_menu_spec_maps_each_phase_to_its_entry() {
         percent,
         message: None,
         checked_at: None,
+        busy_kind: None,
+        busy_since: None,
+        manual_install_required: false,
     };
 
     assert_eq!(

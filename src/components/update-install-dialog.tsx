@@ -18,6 +18,8 @@ import { useUpdateState } from "@/hooks/use-update-state";
 interface UpdateInstallDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** 设置页输入框的代理值：下载与检查共用同一代理源（可能尚未保存）。 */
+  proxy?: string;
 }
 
 /**
@@ -27,7 +29,7 @@ interface UpdateInstallDialogProps {
  * 下载 / 重启都只是把动作交给后端（`updateDownload` / `updateRestart`），状态由后端
  * 持有——关掉弹窗再打开，看到的仍是同一阶段与进度。
  */
-export function UpdateInstallDialog({ open, onOpenChange }: UpdateInstallDialogProps) {
+export function UpdateInstallDialog({ open, onOpenChange, proxy }: UpdateInstallDialogProps) {
   const snapshot = useUpdateState();
   const [restarting, setRestarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -48,7 +50,7 @@ export function UpdateInstallDialog({ open, onOpenChange }: UpdateInstallDialogP
   async function startDownload() {
     setActionError(null);
     try {
-      await api.updateDownload();
+      await api.updateDownload(proxy);
     } catch (e) {
       setActionError(`下载更新失败：${api.asError(e)}`);
     }
@@ -117,7 +119,10 @@ export function UpdateInstallDialog({ open, onOpenChange }: UpdateInstallDialogP
             {phase === "available" &&
               `发现新版本 v${targetVersion}，下载后由你决定何时重启安装。`}
             {phase === "readyToRestart" && "更新包已下载，重启应用后完成安装并生效。"}
-            {phase === "error" && "自动更新未完成，你仍然可以从 GitHub Release 页面手动下载。"}
+            {phase === "error" &&
+              (snapshot.manualInstallRequired
+                ? "当前版本无法自动验证新包签名（通常是升级密钥轮换）。请手动下载安装一次，之后即可恢复自动更新。"
+                : "自动更新未完成，你仍然可以从 GitHub Release 页面手动下载。")}
           </DialogDescription>
         </DialogHeader>
 
@@ -194,7 +199,19 @@ export function UpdateInstallDialog({ open, onOpenChange }: UpdateInstallDialogP
               </DemoAction>
             </>
           )}
-          {phase === "error" && (
+          {phase === "error" && snapshot.manualInstallRequired && (
+            <>
+              <Button variant="ghost" onClick={() => void retry()}>
+                <RefreshCw />
+                重试
+              </Button>
+              <Button onClick={() => void openRelease()}>
+                <ExternalLink />
+                打开 Releases 手动下载
+              </Button>
+            </>
+          )}
+          {phase === "error" && !snapshot.manualInstallRequired && (
             <>
               <Button variant="outline" onClick={() => void openRelease()}>
                 <ExternalLink />

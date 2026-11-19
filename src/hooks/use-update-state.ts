@@ -21,6 +21,9 @@ const IDLE_SNAPSHOT: UpdateSnapshot = {
   percent: null,
   message: null,
   checkedAt: null,
+  busyKind: null,
+  busySince: null,
+  manualInstallRequired: false,
 };
 
 let snapshot: UpdateSnapshot = IDLE_SNAPSHOT;

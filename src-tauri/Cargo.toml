@@ -35,6 +35,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
+# 只为打开 `system-proxy` 特性：tauri-plugin-updater 内部的 reqwest(0.13) 默认不读
+# Windows/macOS 系统代理，受限网络下更新下载会直接 `error sending request`（第三轮第 1 条）。
+# 本包不直接使用 reqwest，靠 Cargo 特性合并作用到插件那份客户端。
+reqwest = { version = "0.13", default-features = false, features = ["system-proxy"] }
 wb-shift-core = { path = "../crates/wb-shift-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

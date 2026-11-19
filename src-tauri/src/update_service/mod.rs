@@ -12,7 +12,7 @@
 //! 安装。Windows NSIS 安装器要求应用退出后才能完成安装，下载即安装等于强制自动重启；
 //! macOS 安装可能触发 `/Applications` 写授权，放在用户主动动作时语义才自然。
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
 use wb_shift_core::modules::config::now_secs;
+use wb_shift_core::modules::error_log;
 use wb_shift_core::modules::update;
 
 mod download;
@@ -57,37 +58,112 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 const BUSY_MESSAGE: &str = "更新任务正在进行中，请稍候";
 
+/// 检查总预算：core 内部最坏 16s（三条清单并行 8s + 302 兜底 8s），再留 4s 余量。
+const CHECK_BUDGET: Duration = Duration::from_secs(20);
+
+/// 并发检查的去重窗口：后到的调用直接复用同一结果，不再发第二次网络请求。
+const CHECK_DEDUPE_SECS: i64 = 5;
+
+const CHECK_TIMEOUT_MESSAGE: &str =
+    "检查更新超时（20 秒），请检查网络或更新代理后重试";
+
 const NO_PACKAGE_MESSAGE: &str = "没有可安装的更新包，请先下载更新包";
 
 const DEMO_DOWNLOAD_MESSAGE: &str = "演示模式已跳过更新下载";
 
 const DEMO_RESTART_MESSAGE: &str = "演示模式已跳过更新安装";
 
+/// 检查的 single-flight 闸门：同一时刻只允许一个检查在跑，后到者排队后复用结果。
+///
+/// 检查是幂等的，不能因为「后台 15 秒检查」正在跑就拒绝用户的手动检查（第 2 条）。
+static CHECK_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 最近一次检查结果 `(完成时刻, 返回值)`，用于并发去重。
+static LAST_CHECK: Mutex<Option<(i64, Value)>> = Mutex::new(None);
+
 /// 检查更新：走状态机（Checking → Available / UpToDate / Error），返回与旧
 /// `check_update` 完全同形的结果（前端展示与 webui 侧契约不变）。
 ///
-/// 已有更新任务在跑时直接返回忙碌错误，不并发触发第二次检查。
+/// - **single-flight**：并发调用排队，5 秒内复用同一结果，只发一次网络请求；
+/// - **总预算 20s**：超时返回明确文案，不再无限转圈；
+/// - 不占用下载/安装互斥：后台检查进行中仍可点「下载」或「重启」。
 pub async fn check<R: Runtime>(app: &AppHandle<R>, proxy: Option<&str>, force: bool) -> Value {
-    let Some(_busy) = BusyGuard::acquire() else {
-        // 互斥拒绝不写日志到 stderr 之外：托盘文案已表达同一件事。
-        eprintln!("[更新] 已有任务在跑，跳过本次检查");
-        let mut value = json!({
-            "ok": false,
-            "error": BUSY_MESSAGE,
-            "message": BUSY_MESSAGE,
-        });
-        value["releaseUrl"] = json!(release_url());
+    let _gate = CHECK_GATE.lock().await;
+
+    if let Some((at, value)) = last_check_within(CHECK_DEDUPE_SECS) {
+        eprintln!("[更新] 复用 {}s 内的检查结果", now_secs() - at);
         return value;
-    };
+    }
+
     eprintln!("[更新] 检查更新（force={force}）");
     set_phase(app, begin_check());
-    let result = update::update_check(proxy, force).await;
+    let result = match tokio::time::timeout(CHECK_BUDGET, update::update_check(proxy, force)).await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            error_log::record(
+                "backend",
+                "检查更新超时",
+                &format!("budget={}s", CHECK_BUDGET.as_secs()),
+            );
+            json!({
+                "ok": false,
+                "error": CHECK_TIMEOUT_MESSAGE,
+                "message": CHECK_TIMEOUT_MESSAGE,
+                "releaseUrl": release_url(),
+            })
+        }
+    };
+    remember_check_result(&result);
     let snapshot = set_phase(app, apply_check_result(&result));
     eprintln!(
         "[更新] 检查结果：{:?} latest={:?}",
         snapshot.phase, snapshot.latest
     );
+
+    // 有新版时后台预热 updater 句柄：下载阶段直接复用，避免「检查通过、下载再 check 失败」。
+    // 异步进行且失败只记日志——预热失败不应让检查结果变成错误。
+    if result.get("ok").and_then(Value::as_bool) == Some(true)
+        && result.get("hasUpdate").and_then(Value::as_bool) == Some(true)
+    {
+        let app = app.clone();
+        let proxy = proxy.map(str::to_string);
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = prefetch_update_handle(&app, proxy.as_deref()).await {
+                error_log::record("backend", "更新句柄预热失败", &error);
+            }
+        });
+    }
     result
+}
+
+fn last_check_within(seconds: i64) -> Option<(i64, Value)> {
+    let guard = LAST_CHECK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (at, value) = guard.as_ref()?;
+    (now_secs() - at < seconds).then(|| (*at, value.clone()))
+}
+
+fn remember_check_result(value: &Value) {
+    let mut guard = LAST_CHECK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((now_secs(), value.clone()));
+}
+
+/// BUSY 的可读文案：带上占用类型与已持续时间，避免「更新任务正在进行中」这种无信息提示。
+pub(crate) fn busy_message() -> String {
+    match busy_info() {
+        (Some(kind), Some(since)) => {
+            let label = if kind == "install" { "安装" } else { "下载" };
+            format!(
+                "已有更新{label}任务正在进行（已 {}s），请稍候",
+                (now_secs() - since).max(0)
+            )
+        }
+        _ => BUSY_MESSAGE.to_string(),
+    }
 }
 
 /// 后台定时检查：首次延迟 [`FIRST_CHECK_DELAY`]，之后每 [`CHECK_INTERVAL`] 一次。
@@ -123,6 +199,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = UpdateSnapshot::idle();
         BUSY.store(false, Ordering::Release);
+        BUSY_SINCE.store(0, Ordering::Release);
+        BUSY_KIND.store(0, Ordering::Release);
+        *LAST_CHECK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     #[test]
@@ -256,13 +337,45 @@ mod tests {
     fn busy_guard_rejects_second_entry_until_released() {
         let _guard = lock();
         reset();
-        let first = BusyGuard::acquire();
+        let first = BusyGuard::acquire(BusyKind::Download);
         assert!(first.is_some(), "首次进入应拿到互斥");
-        assert!(BusyGuard::acquire().is_none(), "并发进入必须被拒");
+        assert!(
+            BusyGuard::acquire(BusyKind::Install).is_none(),
+            "并发进入必须被拒"
+        );
         drop(first);
-        let second = BusyGuard::acquire();
+        let second = BusyGuard::acquire(BusyKind::Install);
         assert!(second.is_some(), "释放后应重新可进入");
         drop(second);
+    }
+
+    /// 看门狗：持锁超过阈值后，下一次抢占强制释放并记录，不让进程永久 BUSY。
+    #[test]
+    fn stale_busy_guard_is_force_released() {
+        let _guard = lock();
+        reset();
+        let first = BusyGuard::acquire(BusyKind::Download).expect("首次应拿到互斥");
+        // 模拟挂死：把起始时刻推到阈值之前。
+        BUSY_SINCE.store(now_secs() - BUSY_STALE_SECS - 1, Ordering::Release);
+        let second = BusyGuard::acquire(BusyKind::Install);
+        assert!(second.is_some(), "陈旧互斥必须被强制释放");
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn busy_message_names_task_and_elapsed() {
+        let _guard = lock();
+        reset();
+        let held = BusyGuard::acquire(BusyKind::Download).expect("应拿到互斥");
+        BUSY_SINCE.store(now_secs() - 7, Ordering::Release);
+        let message = busy_message();
+        assert!(message.contains("下载"), "{message}");
+        assert!(message.contains("7s"), "{message}");
+        let held_snapshot = snapshot();
+        assert_eq!(held_snapshot.busy_kind.as_deref(), Some("download"));
+        drop(held);
+        assert!(snapshot().busy_kind.is_none());
     }
 
     #[test]
@@ -327,6 +440,8 @@ mod tests {
         assert_eq!(value["percent"], json!(null));
         assert_eq!(value["message"], json!(null));
         assert_eq!(value["checkedAt"], json!(null));
+        assert_eq!(value["busyKind"], json!(null));
+        assert_eq!(value["busySince"], json!(null));
 
         let value = serde_json::to_value(mark_ready_to_restart("1.2.3")).unwrap();
         assert_eq!(value["phase"], json!("readyToRestart"));

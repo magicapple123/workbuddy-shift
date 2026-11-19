@@ -30,6 +30,8 @@ export interface UpdateInfo {
   latest?: string;
   latestTag?: string;
   hasUpdate?: boolean;
+  /** 更新清单是否真正可达；false 时只靠 tag 判断出有新版，下载大概率仍需代理。 */
+  manifestAvailable?: boolean;
   releaseName?: string;
   releaseUrl?: string;
   publishedAt?: string;
@@ -58,4 +60,10 @@ export interface UpdateSnapshot {
   percent: number | null;
   message: string | null;
   checkedAt: number | null;
+  /** 占用更新互斥的任务类型（下载 / 安装）；检查不占锁，因此不会是 check。 */
+  busyKind: "download" | "install" | null;
+  /** 互斥占用起始时刻（秒），用于显示「已 Xs」。 */
+  busySince: number | null;
+  /** 当前版本无法自动验证更新包签名：弹窗应把「手动下载」作为主操作。 */
+  manualInstallRequired: boolean;
 }

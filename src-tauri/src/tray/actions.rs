@@ -126,7 +126,7 @@ pub(crate) fn start_update_download<R: Runtime>(app: &AppHandle<R>) {
         set_tray_tooltip(app, "README 截图演示模式");
         return;
     }
-    let _ = crate::update_service::start_download(app);
+    let _ = crate::update_service::start_download(app, None);
 }
 
 /// 托盘「重启以完成升级」：安装已下载的包并重启。

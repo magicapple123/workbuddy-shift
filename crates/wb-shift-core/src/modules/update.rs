@@ -4,18 +4,25 @@
 //! `compare_versions` / `update_check`。下载安装走 tauri-plugin-updater（整包更新）。
 //!
 //! 版本检查不走 GitHub API（避免 60 次/小时/IP 限流）：
-//! 1. 主端点：release 资产的 updater manifest（下载不计 API 配额）；
+//! 1. 主端点：release 资产的 updater manifest（下载不计 API 配额），三条候选 **并行** 请求；
 //! 2. 兜底端点：`/releases/latest` 的 302 `Location` 头解析 tag；
-//! 3. 成功结果进程级缓存 6 小时，缓存命中不发网络请求。
+//! 3. 成功结果进程级缓存 6 小时，缓存命中不发网络请求；
+//! 4. 失败结果按 10 分钟起指数退避（上限 6 小时）负缓存，`force=true` 绕过。
+//!
+//! 单次检查预算：三条候选各 8s（并行）+ 302 兜底 8s = 最坏 16s；宿主层另有 20s 总预算。
 
+use semver::Version;
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::modules::config::{
     atomic_write, http_request_raw, http_request_with_proxy, now_secs, store_dir,
 };
+use crate::modules::error_log;
 use crate::modules::locks;
 
 /// 应用当前版本（来自 Cargo.toml package.version）。
@@ -32,6 +39,15 @@ pub const GITHUB_REPO: &str = "workbuddy-shift";
 /// 设置页手动检查传 force=true 绕过缓存强制刷新。
 const CACHE_TTL_SECS: i64 = 6 * 60 * 60;
 
+/// 单条 manifest 请求超时（三条候选并行，总耗时约等于单条）。
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(8);
+/// 302 兜底请求超时。
+const FALLBACK_TIMEOUT: Duration = Duration::from_secs(8);
+/// 失败负缓存起点（10 分钟），按尝试次数指数退避。
+const FAILURE_BASE_BACKOFF_SECS: i64 = 10 * 60;
+/// 失败负缓存上限（6 小时）。
+const FAILURE_MAX_BACKOFF_SECS: i64 = 6 * 60 * 60;
+
 /// 进程级内存缓存，只缓存 ok=true 的结果；失败不写缓存。
 struct CachedCheck {
     checked_at: i64,
@@ -39,6 +55,23 @@ struct CachedCheck {
 }
 
 static CACHE: Mutex<Option<CachedCheck>> = Mutex::new(None);
+
+/// 失败负缓存：`(失败时刻, 连续失败次数, 上次错误结果)`。
+///
+/// 直连被重置时一次完整检查要花十几秒；没有负缓存的话，30 分钟轮询 + 用户反复点
+/// 会把同一份失败重跑很多遍，日志也会被刷满。
+struct FailureCheck {
+    failed_at: i64,
+    attempts: u32,
+    value: Value,
+}
+
+static FAILURE: Mutex<Option<FailureCheck>> = Mutex::new(None);
+
+fn failure_backoff_secs(attempts: u32) -> i64 {
+    let exponent = attempts.saturating_sub(1).min(10);
+    (FAILURE_BASE_BACKOFF_SECS * (1_i64 << exponent)).min(FAILURE_MAX_BACKOFF_SECS)
+}
 
 pub fn github_config_file() -> PathBuf {
     store_dir().join("github_config.json")
@@ -110,25 +143,23 @@ pub fn save_github_config(cfg: &Value) -> std::io::Result<()> {
     )
 }
 
-fn version_tuple(v: &str) -> Vec<i64> {
-    v.trim_start_matches('v')
-        .split('.')
-        .filter_map(|x| x.parse::<i64>().ok())
-        .collect()
+/// 解析版本号（允许 `v` 前缀，语义按 semver：`0.2.1-rc.1 < 0.2.1`）。
+///
+/// 解析失败**不得**退化成「取数字前缀」：那会让 `0.2.1-rc1` 与 `0.2.0` 比较为相等，
+/// 预发布版本对用户静默消失（第三轮第 19 条）。
+pub fn parse_version(raw: &str) -> Result<Version, String> {
+    let trimmed = raw.trim().trim_start_matches(['v', 'V']);
+    Version::parse(trimmed).map_err(|error| format!("版本号「{raw}」不是合法 semver：{error}"))
 }
 
-/// 版本比较：a > b 返回 1，a < b 返回 -1，相等返回 0。
-pub fn compare_versions(a: &str, b: &str) -> i64 {
-    let ta = version_tuple(a);
-    let tb = version_tuple(b);
-    for i in 0..ta.len().max(tb.len()) {
-        let x = ta.get(i).copied().unwrap_or(0);
-        let y = tb.get(i).copied().unwrap_or(0);
-        if x != y {
-            return if x > y { 1 } else { -1 };
-        }
-    }
-    0
+/// 版本比较（semver 规则）：`a > b` → Greater，相等 → Equal，`a < b` → Less。
+///
+/// 返回 `Err` 表示版本号不合法，调用方必须按「不可比较」处理（`hasUpdate=false`
+/// + 明确文案），不得当成相等或最新。
+pub fn compare_versions(a: &str, b: &str) -> Result<Ordering, String> {
+    let left = parse_version(a)?;
+    let right = parse_version(b)?;
+    Ok(left.cmp(&right))
 }
 
 /// updater manifest 候选 URL（按优先级）。
@@ -156,30 +187,71 @@ pub fn updater_manifest_urls(owner: &str, repo: &str, os: &str, arch: &str) -> V
     urls
 }
 
-/// 主端点：拉取 updater manifest。成功返回解析后的 JSON（含 version / pub_date），
-/// 失败返回可读错误信息。
-async fn fetch_manifest_version(
-    owner: &str,
-    repo: &str,
-    proxy: Option<&str>,
-) -> Result<Value, String> {
+fn manifest_headers() -> HashMap<String, String> {
     let mut headers = HashMap::new();
     headers.insert("Accept".to_string(), "application/json".to_string());
     headers.insert("User-Agent".to_string(), "workbuddy-shift".to_string());
-    let mut last_err = "更新清单解析失败".to_string();
-    for url in updater_manifest_urls(owner, repo, std::env::consts::OS, std::env::consts::ARCH) {
-        let resp = http_request_with_proxy(&url, "GET", None, Some(&headers), proxy).await;
-        let version = resp.get("version").and_then(|v| v.as_str()).unwrap_or("");
-        if !version.trim().is_empty() {
-            return Ok(resp);
-        }
-        last_err = resp
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("更新清单解析失败")
-            .to_string();
+    headers
+}
+
+/// 单条 manifest 请求：8s 超时 + 失败写入 error.log（耗时 / 错误链）。
+async fn fetch_manifest_at(url: String, proxy: Option<String>) -> Option<Value> {
+    if url.is_empty() {
+        return None;
     }
-    Err(last_err)
+    let started = Instant::now();
+    let headers = manifest_headers();
+    let request = http_request_with_proxy(&url, "GET", None, Some(&headers), proxy.as_deref());
+    match tokio::time::timeout(MANIFEST_TIMEOUT, request).await {
+        Ok(resp) => {
+            let version = resp.get("version").and_then(|v| v.as_str()).unwrap_or("");
+            if !version.trim().is_empty() {
+                return Some(resp);
+            }
+            let message = resp
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("更新清单解析失败");
+            error_log::record(
+                "backend",
+                "更新清单不可用",
+                &format!(
+                    "url={url} 耗时={}ms 原因={message}",
+                    started.elapsed().as_millis()
+                ),
+            );
+            None
+        }
+        Err(_) => {
+            error_log::record(
+                "backend",
+                "更新清单请求超时",
+                &format!(
+                    "url={url} 超时={}s 实际耗时={}ms",
+                    MANIFEST_TIMEOUT.as_secs(),
+                    started.elapsed().as_millis()
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// 并行拉取三条候选清单，按优先级返回第一个成功结果。
+///
+/// 并行是第 2 条的核心：串行时 3 × 30s 会把「一次检查」放大到 90s 以上。
+async fn fetch_manifest_version(owner: &str, repo: &str, proxy: Option<&str>) -> Result<Value, String> {
+    let urls = updater_manifest_urls(owner, repo, std::env::consts::OS, std::env::consts::ARCH);
+    let proxy = proxy.map(str::to_string);
+    let first = urls.first().cloned().unwrap_or_default();
+    let second = urls.get(1).cloned().unwrap_or_default();
+    let third = urls.get(2).cloned().unwrap_or_default();
+    let (a, b, c) = tokio::join!(
+        fetch_manifest_at(first, proxy.clone()),
+        fetch_manifest_at(second, proxy.clone()),
+        fetch_manifest_at(third, proxy),
+    );
+    a.or(b).or(c).ok_or_else(|| "更新清单不可达（候选地址全部失败）".to_string())
 }
 
 /// 兜底端点：请求 `/releases/latest`，读 302 `Location` 头（形如
@@ -194,8 +266,24 @@ async fn fetch_latest_tag(
     let mut headers = HashMap::new();
     headers.insert("Accept".to_string(), "text/html".to_string());
     headers.insert("User-Agent".to_string(), "workbuddy-shift".to_string());
-    let (status, resp_headers, body) =
-        http_request_raw(&url, "GET", None, Some(&headers), proxy, false).await;
+    let started = Instant::now();
+    let request = http_request_raw(&url, "GET", None, Some(&headers), proxy, false);
+    let (status, resp_headers, body) = match tokio::time::timeout(FALLBACK_TIMEOUT, request).await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            error_log::record(
+                "backend",
+                "更新兜底请求超时",
+                &format!(
+                    "url={url} 超时={}s 实际耗时={}ms",
+                    FALLBACK_TIMEOUT.as_secs(),
+                    started.elapsed().as_millis()
+                ),
+            );
+            return Err(("检查更新超时，请检查网络或更新代理".to_string(), -1));
+        }
+    };
 
     if status == 0 {
         let msg = if body.trim().is_empty() {
@@ -203,6 +291,11 @@ async fn fetch_latest_tag(
         } else {
             body
         };
+        error_log::record(
+            "backend",
+            "更新兜底请求失败",
+            &format!("url={url} 耗时={}ms 原因={msg}", started.elapsed().as_millis()),
+        );
         return Err((msg, -1));
     }
     if status == 404 {
@@ -229,16 +322,52 @@ async fn fetch_latest_tag(
     Ok(tag)
 }
 
+/// 清单里的 `name` 只有在「确实是发布标题」时才返回：
+/// 等于 tag / latest / `v{latest}` 的值没有信息量，前端会渲染成重复版本号（第 3 条）。
+fn meaningful_release_name(manifest: &Value, tag: &str, latest: &str) -> Option<String> {
+    let name = manifest
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    let prefixed = format!("v{latest}");
+    if name == tag || name == latest || name == prefixed {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// 记录一次失败（负缓存），返回对外的错误结果。
+fn remember_failure(value: Value) -> Value {
+    let now = now_secs();
+    // 负缓存只是省流量的优化，锁中毒时丢掉旧记录继续返回本次错误即可。
+    let mut guard = locks::recover(&FAILURE);
+    let attempts = guard.as_ref().map(|entry| entry.attempts + 1).unwrap_or(1);
+    *guard = Some(FailureCheck {
+        failed_at: now,
+        attempts,
+        value: value.clone(),
+    });
+    value
+}
+
 /// 查询最新 Release，与本地版本对比。对照 server.py `update_check`。
 ///
-/// `force=true` 绕过缓存强制刷新（设置页手动检查）；否则 6 小时内成功结果直接返回，
-/// 不发网络请求。主端点 manifest 失败时自动走 302 兜底；两个端点都失败返回可读错误。
+/// `force=true` 绕过成功缓存与失败负缓存（设置页手动检查）；否则：
+/// - 6 小时内的成功结果直接返回，不发网络请求；
+/// - 10 分钟起指数退避（上限 6 小时）内直接返回上次错误，不重跑完整链路。
 pub async fn update_check(proxy: Option<&str>, force: bool) -> Value {
+    let now = now_secs();
     if !force {
         // 版本查询缓存：下一次请求会整体覆盖，锁中毒时取回旧值继续即可。
         if let Some(cached) = locks::recover(&CACHE).as_ref() {
-            if now_secs() - cached.checked_at < CACHE_TTL_SECS {
+            if now - cached.checked_at < CACHE_TTL_SECS {
                 return cached.value.clone();
+            }
+        }
+        if let Some(failure) = locks::recover(&FAILURE).as_ref() {
+            if now - failure.failed_at < failure_backoff_secs(failure.attempts) {
+                return failure.value.clone();
             }
         }
     }
@@ -259,72 +388,132 @@ pub async fn update_check(proxy: Option<&str>, force: bool) -> Value {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty());
-    let proxy = proxy.or(configured_proxy);
+    let proxy = proxy.map(str::trim).filter(|v| !v.is_empty()).or(configured_proxy);
     let release_url = format!("https://github.com/{owner}/{repo}/releases/latest");
     let current = APP_VERSION.to_string();
 
     // 主端点：updater manifest（release 资产下载，不计 GitHub API 配额）。
-    if let Ok(manifest) = fetch_manifest_version(&owner, &repo, proxy).await {
-        let version = manifest
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        let latest = version.strip_prefix('v').unwrap_or(version).to_string();
-        let tag = format!("v{latest}");
-        let release_name = manifest
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&tag)
-            .to_string();
-        let published_at = manifest
-            .get("pub_date")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let value = json!({
-            "ok": true,
-            "current": current,
-            "latest": latest,
-            "latestTag": tag,
-            "hasUpdate": compare_versions(&latest, &current) > 0,
-            "releaseName": release_name,
-            "releaseUrl": release_url,
-            "publishedAt": published_at,
-            "checkedAt": now_secs(),
-        });
-        *locks::recover(&CACHE) = Some(CachedCheck {
-            checked_at: now_secs(),
-            value: value.clone(),
-        });
-        return value;
-    }
-
-    // 兜底端点：`/releases/latest` 的 302 Location 头解析 tag（仅 manifest 失败时）。
-    match fetch_latest_tag(&owner, &repo, proxy).await {
-        Ok(tag) => {
-            let latest = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-            let value = json!({
+    match fetch_manifest_version(&owner, &repo, proxy).await {
+        Ok(manifest) => {
+            let version = manifest
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let latest = version.strip_prefix('v').unwrap_or(version).to_string();
+            let tag = format!("v{latest}");
+            let release_name = meaningful_release_name(&manifest, &tag, &latest);
+            let published_at = manifest
+                .get("pub_date")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // 版本号不合法时不得猜：明确报「无法比较」，不给出可下载按钮。
+            let has_update = match compare_versions(&latest, &current) {
+                Ok(ordering) => ordering == Ordering::Greater,
+                Err(error) => {
+                    error_log::record("backend", "更新版本号无法比较", &error);
+                    let value = json!({
+                        "ok": false,
+                        "current": current,
+                        "latest": latest,
+                        "latestTag": tag,
+                        "hasUpdate": false,
+                        "manifestAvailable": true,
+                        "releaseUrl": release_url,
+                        "checkedAt": now_secs(),
+                        "error": error,
+                        "message": format!("无法比较版本号：{error}"),
+                    });
+                    return remember_failure(value);
+                }
+            };
+            let mut value = json!({
                 "ok": true,
                 "current": current,
                 "latest": latest,
                 "latestTag": tag,
-                "hasUpdate": compare_versions(&latest, &current) > 0,
-                "releaseName": tag.clone(),
+                "hasUpdate": has_update,
+                "manifestAvailable": true,
                 "releaseUrl": release_url,
+                "publishedAt": published_at,
                 "checkedAt": now_secs(),
             });
+            if let Some(name) = release_name {
+                value["releaseName"] = json!(name);
+            }
             *locks::recover(&CACHE) = Some(CachedCheck {
                 checked_at: now_secs(),
                 value: value.clone(),
             });
+            *locks::recover(&FAILURE) = None;
             value
         }
-        Err((msg, code)) => json!({
-            "ok": false,
-            "error": msg,
-            "message": format!("{msg}（code={code}）"),
-            "releaseUrl": release_url,
-        }),
+        Err(manifest_error) => {
+            // 兜底端点：`/releases/latest` 的 302 Location 头解析 tag（仅 manifest 失败时）。
+            match fetch_latest_tag(&owner, &repo, proxy).await {
+                Ok(tag) => {
+                    let latest = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+                    let has_update = match compare_versions(&latest, &current) {
+                        Ok(ordering) => ordering == Ordering::Greater,
+                        Err(error) => {
+                            let value = json!({
+                                "ok": false,
+                                "current": current,
+                                "latest": latest,
+                                "latestTag": tag,
+                                "hasUpdate": false,
+                                "manifestAvailable": false,
+                                "releaseUrl": release_url,
+                                "checkedAt": now_secs(),
+                                "error": error,
+                                "message": format!("无法比较版本号：{error}"),
+                            });
+                            return remember_failure(value);
+                        }
+                    };
+                    // manifest 不可达时只凭 tag 判断版本：能提示「有新版本」，
+                    // 但下载大概率也会失败，前端据此提示先配代理。
+                    let message = if has_update {
+                        Some("已发现新版本，但更新清单不可达，请配置并保存更新代理后重试")
+                    } else {
+                        None
+                    };
+                    let mut value = json!({
+                        "ok": true,
+                        "current": current,
+                        "latest": latest,
+                        "latestTag": tag,
+                        "hasUpdate": has_update,
+                        "manifestAvailable": false,
+                        "releaseUrl": release_url,
+                        "checkedAt": now_secs(),
+                    });
+                    if let Some(message) = message {
+                        value["message"] = json!(message);
+                    }
+                    *locks::recover(&CACHE) = Some(CachedCheck {
+                        checked_at: now_secs(),
+                        value: value.clone(),
+                    });
+                    value
+                }
+                Err((msg, code)) => {
+                    let value = json!({
+                        "ok": false,
+                        "error": msg,
+                        "message": format!("{msg}（code={code}）"),
+                        "manifestAvailable": false,
+                        "releaseUrl": release_url,
+                    });
+                    error_log::record(
+                        "backend",
+                        "检查更新失败",
+                        &format!("manifest={manifest_error} fallback={msg} code={code}"),
+                    );
+                    remember_failure(value)
+                }
+            }
+        }
     }
 }
 
@@ -424,8 +613,61 @@ mod tests {
 
     #[test]
     fn compare_versions_orders_semver() {
-        assert_eq!(compare_versions("0.1.18", "0.1.18"), 0);
-        assert_eq!(compare_versions("0.1.19", "0.1.18"), 1);
-        assert_eq!(compare_versions("v0.1.17", "0.1.18"), -1);
+        assert_eq!(compare_versions("0.1.18", "0.1.18"), Ok(Ordering::Equal));
+        assert_eq!(compare_versions("0.1.19", "0.1.18"), Ok(Ordering::Greater));
+        assert_eq!(compare_versions("v0.1.17", "0.1.18"), Ok(Ordering::Less));
+        assert_eq!(compare_versions("0.10.0", "0.9.0"), Ok(Ordering::Greater));
+    }
+
+    /// 第 19 条的三种预发布场景：旧实现把非数字段整段丢弃，导致比较结果错误。
+    #[test]
+    fn compare_versions_handles_prerelease() {
+        assert_eq!(compare_versions("0.2.1-rc1", "0.2.0"), Ok(Ordering::Greater));
+        assert_eq!(compare_versions("0.2.0-rc1", "0.2.0"), Ok(Ordering::Less));
+        assert_eq!(
+            compare_versions("1.0.0-beta.1", "1.0.0"),
+            Ok(Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("0.2.1-rc.1", "0.2.1"),
+            Ok(Ordering::Less),
+            "预发布必须小于同号正式版"
+        );
+        assert_eq!(
+            compare_versions("0.2.1-rc.2", "0.2.1-rc.1"),
+            Ok(Ordering::Greater)
+        );
+    }
+
+    /// 非法版本号必须返回 Err，不能静默退化成数字前缀比较。
+    #[test]
+    fn compare_versions_rejects_invalid_versions() {
+        let error = compare_versions("not-a-version", "0.2.0").unwrap_err();
+        assert!(error.contains("不是合法 semver"), "{error}");
+        assert!(compare_versions("0.2", "0.2.0").is_err(), "两段式版本不可比较");
+    }
+
+    /// 发布标题与 tag / 版本号相同时不应输出（否则前端渲染成 `v0.2.0 · v0.2.0`）。
+    #[test]
+    fn release_name_is_dropped_when_it_duplicates_version() {
+        let manifest = json!({"version": "0.2.0", "name": "v0.2.0"});
+        assert_eq!(meaningful_release_name(&manifest, "v0.2.0", "0.2.0"), None);
+        let manifest = json!({"version": "0.2.0", "name": "0.2.0"});
+        assert_eq!(meaningful_release_name(&manifest, "v0.2.0", "0.2.0"), None);
+        let manifest = json!({"version": "0.2.0"});
+        assert_eq!(meaningful_release_name(&manifest, "v0.2.0", "0.2.0"), None);
+        let manifest = json!({"version": "0.2.0", "name": "第三轮修复"});
+        assert_eq!(
+            meaningful_release_name(&manifest, "v0.2.0", "0.2.0").as_deref(),
+            Some("第三轮修复")
+        );
+    }
+
+    #[test]
+    fn failure_backoff_grows_and_caps() {
+        assert_eq!(failure_backoff_secs(1), 600);
+        assert_eq!(failure_backoff_secs(2), 1200);
+        assert_eq!(failure_backoff_secs(3), 2400);
+        assert_eq!(failure_backoff_secs(99), FAILURE_MAX_BACKOFF_SECS);
     }
 }

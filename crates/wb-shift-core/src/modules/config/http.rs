@@ -29,6 +29,27 @@ pub fn is_route_missing(response: &Value) -> bool {
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// 把 `reqwest::Error` 的 `source()` 链拼成一行可诊断文案。
+///
+/// 裸 `error sending request` 无法区分 DNS、连接重置、TLS、代理拒绝；用户按提示
+/// 换代理只能靠猜（第三轮第 1/2 条）。这里把每一层原因都带出来，形如
+/// `error sending request for url (...) <- connection closed before message completed`。
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut cursor = error.source();
+    let mut depth = 0;
+    while let Some(cause) = cursor {
+        if depth >= 6 {
+            break;
+        }
+        text.push_str(" <- ");
+        text.push_str(&cause.to_string());
+        cursor = cause.source();
+        depth += 1;
+    }
+    text
+}
+
 pub(super) fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -105,7 +126,7 @@ pub async fn http_request_with_proxy(
                 })
             }
         }
-        Err(e) => json!({"code": -1, "message": e.to_string()}),
+        Err(e) => json!({"code": -1, "message": error_chain(&e)}),
     }
 }
 
@@ -192,7 +213,7 @@ pub async fn http_request_raw(
             let text = resp.text().await.unwrap_or_default();
             (status, resp_headers, text)
         }
-        Err(e) => (0, HashMap::new(), e.to_string()),
+        Err(e) => (0, HashMap::new(), error_chain(&e)),
     }
 }
 
