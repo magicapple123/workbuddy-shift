@@ -21,7 +21,70 @@ interface Props extends AccountCardProps {
   statusChips: ReactNode;
 }
 
+/** 同时在线多端时水印的扇位（第三轮第 14 条）。 */
+type WatermarkKind = "workbuddy" | "codebuddyIde" | "vscodeExt" | "jetbrains" | "codebuddyCli";
+
+/**
+ * 水印槽位：固定坐标，不做 DOM 测量（纯 CSS 定位）。
+ *
+ * 三个槽位的 size 与不透明度递减，避免「三个 56px 全叠在右侧」再次糊成一片；
+ * 横向占用 16–114px，与文本区的 `pr-[112px]` 对得上，也不碰右上角的「…」按钮。
+ * 之前按「CLI 是否在线」写死 `right-[68px]` / `right-1`，一旦「支持工具」开关
+ * 增减入口就会失配，所以这里只按索引定位。
+ */
+const WATERMARK_SLOTS = [
+  { position: "right-4 top-[68%] rotate-[7deg]", size: 56, opacity: "opacity-[0.075]" },
+  { position: "right-[46px] top-[54%] -rotate-[10deg]", size: 42, opacity: "opacity-[0.06]" },
+  { position: "right-[80px] top-[70%] rotate-[14deg]", size: 34, opacity: "opacity-[0.05]" },
+] as const;
+
+/** 水印里最多画 3 个：第 4、5 个不增加信息量，图标行已经完整表达。 */
+const MAX_WATERMARKS = WATERMARK_SLOTS.length;
+
+/**
+ * 水印字形。`codebuddyIde` 复用 WorkBuddy 的 SVG（`CodeBuddyCnIdeMark` 是位图 app
+ * 图标，放大到水印尺寸会是一块模糊方块），而 VS Code / JetBrains 的标记是
+ * `currentColor` 字形，需要外层显式给品牌色。
+ */
+function WatermarkMark({ kind, size }: { kind: WatermarkKind; size: number }) {
+  switch (kind) {
+    case "workbuddy":
+    case "codebuddyIde":
+      return <WorkBuddyMark size={size} />;
+    case "vscodeExt":
+      return <VscodeExtMark size={size} />;
+    case "jetbrains":
+      return <JetbrainsMark size={size} />;
+    case "codebuddyCli":
+      return <CodeBuddyMark size={size} />;
+  }
+}
+
+/** 只有 `currentColor` 字形需要外层染色；两个 SVG 标记自带填充色。 */
+function watermarkTint(kind: WatermarkKind): string | undefined {
+  return kind === "vscodeExt" || kind === "jetbrains" ? "text-primary" : undefined;
+}
+
 export function AccountCardHeader({ account, compact = false, codebuddyCliActive, codebuddyCliBusy, codebuddyCliConfigured, codebuddyCliLoading, codebuddyCnIdeActive, codebuddyCnIdeAvailable, codebuddyCnIdeBusy, codebuddyCnIdeLoading, enabledTools, featuresDisabled, jetbrainsActive, jetbrainsAvailable, jetbrainsBusy, jetbrainsInstalled, jetbrainsLoading, jetbrainsPluginInstalled, name, onCheckin, onDelete, onRefresh, onShowInfo, onSwitch, onSwitchCodebuddyCli, onSwitchCodebuddyCnIde, onSwitchJetbrains, onSwitchVscodeExt, statusChips, avatarClass, todayCheckedIn, vscodeExtActive, vscodeExtAvailable, vscodeExtBusy, vscodeExtExtensionInstalled, vscodeExtInstalled, vscodeExtLoading, workbuddyActive }: Props) {
+  /**
+   * 活跃端按固定优先级收集：workbuddy > codebuddyIde > vscodeExt > jetbrains > codebuddyCli。
+   *
+   * 同字形去重：`codebuddyIde` 与 `workbuddy` 是同一张剪影，WorkBuddy 在线时跳过前者，
+   * 否则会出现两个一模一样的剪影并排。取前 3 个按索引落槽（见 WATERMARK_SLOTS）。
+   */
+  const activeWatermarks: WatermarkKind[] = (
+    [
+      workbuddyActive ? "workbuddy" : null,
+      codebuddyCnIdeActive ? "codebuddyIde" : null,
+      vscodeExtActive ? "vscodeExt" : null,
+      jetbrainsActive ? "jetbrains" : null,
+      codebuddyCliActive ? "codebuddyCli" : null,
+    ] as (WatermarkKind | null)[]
+  )
+    .filter((kind): kind is WatermarkKind => kind !== null)
+    .filter((kind) => !(kind === "codebuddyIde" && workbuddyActive))
+    .slice(0, MAX_WATERMARKS);
+
   return (
       <header
         className={cn(
@@ -42,38 +105,28 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
               workbuddyActive || vscodeExtActive || codebuddyCnIdeActive ? "bg-primary-soft" : codebuddyCliActive ? "bg-muted/50" : "bg-muted/30",
             )}
           />
-          {workbuddyActive && (
-            <div className={cn("absolute top-[64%] -translate-y-1/2 opacity-[0.075] saturate-50 grayscale-[10%]", codebuddyCliActive ? "right-[68px] rotate-[8deg]" : "right-5 rotate-[7deg]")}>
-              <WorkBuddyMark size={compact ? 40 : 56} />
-            </div>
-          )}
-          {codebuddyCliActive && (
-            <div className={cn("absolute top-[63%] -translate-y-1/2 opacity-[0.065] saturate-50 grayscale-[18%]", workbuddyActive ? "right-1 -rotate-[8deg]" : "right-5 -rotate-[7deg]")}>
-              <CodeBuddyMark size={compact ? 38 : 54} />
-            </div>
-          )}
-          {codebuddyCnIdeActive && (
-            /* 复用 WorkBuddy 的 SVG：两个产品的标记同形；CodeBuddyCnIdeMark 是位图 app 图标，
-               放大到水印尺寸会是一块模糊方块。位置与旋转与 WorkBuddy 水印相同 —— 两者同时选中时
-               完全重合，因此无需再引入第三套偏移规则。 */
-            <div className={cn("absolute top-[64%] -translate-y-1/2 opacity-[0.075] saturate-50 grayscale-[10%]", codebuddyCliActive ? "right-[68px] rotate-[8deg]" : "right-5 rotate-[7deg]")}>
-              <WorkBuddyMark size={compact ? 40 : 56} />
-            </div>
-          )}
-          {vscodeExtActive && (
-            /* 插件标记是 currentColor 字形（无底块）：显式取品牌绿，与 WorkBuddy 水印同色系；
-               位置规则同 WorkBuddy / IDE，两者同时选中时重合（同样无需第三套偏移规则）。 */
-            <div className={cn("absolute top-[64%] -translate-y-1/2 text-primary opacity-[0.075] saturate-50 grayscale-[10%]", codebuddyCliActive ? "right-[68px] rotate-[8deg]" : "right-5 rotate-[7deg]")}>
-              <VscodeExtMark size={compact ? 40 : 56} />
-            </div>
-          )}
-          {jetbrainsActive && (
-            /* JetBrains 水印与 VS Code 同规则（深色字块 + 品牌色 tint），多产品同时
-               选中时按既有约定与 WorkBuddy 水印重合，不引入新的偏移规则。 */
-            <div className={cn("absolute top-[64%] -translate-y-1/2 text-primary opacity-[0.075] saturate-50 grayscale-[10%]", codebuddyCliActive ? "right-[68px] rotate-[8deg]" : "right-5 rotate-[7deg]")}>
-              <JetbrainsMark size={compact ? 40 : 56} />
-            </div>
-          )}
+          {/*
+            水印只在非紧凑卡渲染（第三轮第 14 条）：紧凑卡只有 52px 高，图标行与「…」
+            按钮就在右侧，任何水印都会压住可点区域。紧凑卡右上仍保留上面的 blur 光斑。
+            渲染顺序反转，让索引 0 画在最上层（扇心最清晰）。
+          */}
+          {!compact &&
+            [...activeWatermarks].reverse().map((kind) => {
+              const slot = WATERMARK_SLOTS[activeWatermarks.indexOf(kind)];
+              return (
+                <div
+                  key={kind}
+                  className={cn(
+                    "absolute -translate-y-1/2 saturate-50 grayscale-[10%]",
+                    slot.position,
+                    slot.opacity,
+                    watermarkTint(kind),
+                  )}
+                >
+                  <WatermarkMark kind={kind} size={slot.size} />
+                </div>
+              );
+            })}
         </div>
 
         <div className={cn("absolute z-20", compact ? "right-2.5 top-1/2 -translate-y-1/2" : "right-3.5 top-3.5")}>
@@ -208,7 +261,9 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
             </div>
           </div>
         ) : (
-          <div className={cn("relative z-10 flex w-full min-w-0 items-center gap-3", workbuddyActive || codebuddyCliActive ? "pr-[112px]" : "pr-10")}>
+          /* 文本让位按「有没有水印」而不是按产品：之前只有 VS Code / JetBrains 在线时
+             仍只留 pr-10，文字会压到扇形水印上。 */
+          <div className={cn("relative z-10 flex w-full min-w-0 items-center gap-3", activeWatermarks.length > 0 ? "pr-[112px]" : "pr-10")}>
             <div className={cn("flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold ring-4 ring-card/65", avatarClass)}>{name.charAt(0).toUpperCase()}</div>
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-sm font-semibold leading-5" title={name}>{name}</h3>
