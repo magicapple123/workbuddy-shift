@@ -20,6 +20,7 @@ export function AccountCard(props: AccountCardProps) {
     creditPriority,
     jetbrainsActive,
     rateLimits,
+    rateLimitBorrowed,
     todayCheckedIn,
     travelStatus,
     vscodeExtActive,
@@ -55,6 +56,7 @@ export function AccountCard(props: AccountCardProps) {
               creditPriority={creditPriority}
               now={now}
               rateLimits={rateLimits}
+              rateLimitBorrowed={rateLimitBorrowed}
               todayCheckedIn={todayCheckedIn}
               travelStatus={travelStatus}
             />

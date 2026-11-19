@@ -146,8 +146,7 @@ pub fn record_requests_at(path: &Path, requests: &[Value], at_ms: i64) -> Result
                     credit,
                     at_ms,
                 ])
-                .map_err(|error| format!("账本写入失败：{error}"))?
-                as usize;
+                .map_err(|error| format!("账本写入失败：{error}"))?;
         }
     }
     tx.commit()
