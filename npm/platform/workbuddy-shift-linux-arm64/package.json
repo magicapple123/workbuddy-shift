@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-shift-linux-arm64",
-  "version": "0.2.0",
+  "version": "0.2.1-rc.1",
   "description": "workbuddy-shift platform binary (linux-arm64)",
   "os": [
     "linux"
