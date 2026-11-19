@@ -14,10 +14,13 @@ export function AccountUsageShare({
   stats,
   officialUsage,
   variantByAccountId,
+  ledger = false,
 }: {
   stats: CreditStatistics;
   officialUsage?: CreditOfficialUsage;
   variantByAccountId: Map<string, WbVariant>;
+  /** 数据是否来自「全部」的本地账本（只影响口径文案）。 */
+  ledger?: boolean;
 }) {
   /** 本卡片独立的时间范围，不影响其他卡片 */
   const [range, setRange] = useState<RangeKey>("today");
@@ -78,7 +81,9 @@ export function AccountUsageShare({
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <CardDescription className="min-w-0 text-xs">
               {official
-                ? `来自 WorkBuddy 官方请求用量 · ${official.rangeStart} 至 ${official.rangeEnd}`
+                ? `${
+                    ledger ? "来自本地账本（自工具首次抓取起累计）" : "来自 WorkBuddy 官方请求用量"
+                  } · ${official.rangeStart} 至 ${official.rangeEnd}`
                 : "按本地观察口径；官方用量恢复后刷新即可切换。"}
             </CardDescription>
             <div

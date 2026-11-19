@@ -599,6 +599,7 @@ export default function CreditStatsPage() {
                 stats={filteredStats}
                 officialUsage={officialUsage}
                 variantByAccountId={variantByAccountId}
+                ledger={Boolean(ledgerOfficial)}
               />
 
               <TrendChart

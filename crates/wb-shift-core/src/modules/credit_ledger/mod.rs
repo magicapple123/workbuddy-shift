@@ -286,7 +286,7 @@ fn read_snapshot(path: &Path, now: i64) -> Result<Value, String> {
              FROM requests GROUP BY account_id ORDER BY 4 DESC, 3 DESC, 1",
         )
         .map_err(|error| format!("账本账号查询失败：{error}"))?;
-    let accounts = account_stmt
+    let mut accounts = account_stmt
         .query_map([], |row| {
             Ok(json!({
                 "accountId": row.get::<_, String>(0)?,
@@ -298,6 +298,33 @@ fn read_snapshot(path: &Path, now: i64) -> Result<Value, String> {
         .map_err(|error| format!("账本账号读取失败：{error}"))?
         .flatten()
         .collect::<Vec<Value>>();
+    // 每个账号补三个窗口值：「账号消耗构成」按账号分窗口展示，缺了会把有数据的账号
+    // 显示成「官方用量暂不可用」。
+    for account in &mut accounts {
+        let Some(account_id) = account.get("accountId").and_then(Value::as_str) else {
+            continue;
+        };
+        let account_id = account_id.to_string();
+        let window_sum = |sql: &str, parameters: &[&dyn rusqlite::ToSql]| -> f64 {
+            conn.query_row(sql, parameters, |row| row.get::<_, f64>(0))
+                .unwrap_or(0.0)
+        };
+        let today_sum = window_sum(
+            "SELECT COALESCE(SUM(credit), 0) FROM requests WHERE account_id = ?1 AND date = ?2",
+            &[&account_id, &today],
+        );
+        let week_sum = window_sum(
+            "SELECT COALESCE(SUM(credit), 0) FROM requests WHERE account_id = ?1 AND date >= ?2 AND date <= ?3",
+            &[&account_id, &week_start, &today],
+        );
+        let month_sum = window_sum(
+            "SELECT COALESCE(SUM(credit), 0) FROM requests WHERE account_id = ?1 AND date LIKE ?2",
+            &[&account_id, &format!("{month}-%")],
+        );
+        account["usageToday"] = json!(today_sum);
+        account["usage7Days"] = json!(week_sum);
+        account["usageThisMonth"] = json!(month_sum);
+    }
 
     // 按客户端分组：「全部」范围下选具体客户端时，四卡/趋势/模型都必须留在账本口径上。
     let mut client_groups: Vec<Value> = Vec::new();

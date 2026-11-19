@@ -388,7 +388,16 @@ export interface CreditLedgerSnapshot {
   models: CreditOfficialUsageModel[];
   clients: { client: string; requestCount: number; credit: number }[];
   byClient?: CreditLedgerClientGroup[];
-  accounts: { accountId: string; accountName: string; requestCount: number; credit: number }[];
+  accounts: {
+    accountId: string;
+    accountName: string;
+    requestCount: number;
+    credit: number;
+    /** 账号级三个窗口（第四轮 07 补；旧账本缺省）。 */
+    usageToday?: number;
+    usage7Days?: number;
+    usageThisMonth?: number;
+  }[];
 }
 
 export interface CreditStatistics {

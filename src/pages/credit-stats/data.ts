@@ -542,10 +542,10 @@ export function ledgerToOfficialUsage(
     ok: true,
     requestCount: account.requestCount,
     detailTruncated: false,
-    // 账本按账号只存了累计值，没有分窗口字段；置 null 让 UI 显示「—」而不是假 0。
-    usageToday: null,
-    usage7Days: null,
-    usageThisMonth: null,
+    // 账本按账号补了三个窗口值（见 credit_ledger）：缺字段的旧后端才退化成 null。
+    usageToday: (account as { usageToday?: number | null }).usageToday ?? null,
+    usage7Days: (account as { usage7Days?: number | null }).usage7Days ?? null,
+    usageThisMonth: (account as { usageThisMonth?: number | null }).usageThisMonth ?? null,
     models: [],
     daily: [],
   }));

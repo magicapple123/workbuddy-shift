@@ -194,20 +194,25 @@ export function rateLimitChip(
   // 13-B：VS Code 无自有记录时只给「兜底提示」，不把其它客户端的模型限额冒充成 VS Code 的。
   if (activeBorrowed) {
     const clock = formatRateLimitClock(activeBorrowed.resetAt, now);
-    return statusIconChip({
-      icon: <Gauge className="size-3.5" />,
-      label: `其它客户端限流至 ${clock}`,
-      tooltip: (
-        <span className="flex flex-col gap-0.5 text-[11px] leading-4">
-          <span>来自 {activeBorrowed.sourceLabel} 的记录；VS Code 用到同一账号/模型时可能同样受限。</span>
-          {lines.map((line) => (
-            <span key={line}>{line}</span>
-          ))}
-        </span>
-      ),
-      variant: "warning",
-      count: active.length || 1,
-    });
+    // 兜底提示必须是**可读文案**而不是只有图标：用户要一眼看出「这不是 VS Code 自己的记录」。
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="warning" className={cn(chipClass, "gap-1 px-1.5")}>
+            <Gauge className="size-3.5" aria-hidden="true" />
+            其它客户端限流至 {clock}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          <span className="flex flex-col gap-0.5 text-[11px] leading-4">
+            <span>来自 {activeBorrowed.sourceLabel} 的记录；VS Code 用到同一账号/模型时可能同样受限。</span>
+            {lines.map((line) => (
+              <span key={line}>{line}</span>
+            ))}
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    );
   }
   return statusIconChip({
     icon: <Gauge className="size-3.5" />,

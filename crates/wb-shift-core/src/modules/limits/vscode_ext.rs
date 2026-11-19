@@ -51,13 +51,25 @@ const SAMPLES_FILE: &str = "vscode_limit_samples.jsonl";
 /// 一次扫描最多追加多少条样本（诊断够用，避免刷爆文件）。
 const MAX_SAMPLES_PER_RUN: usize = 5;
 
-/// 强信号：只有这些才值得写样本。
+/// 强信号：只有「429 + 限额上下文」才算，避免把无关 429 当成限流证据。
+///
+/// 本机实测 VS Code 日志里确实有 7 条 `Status: 429`，但全部是
+/// `Unable to resolve optional EDU details. Status: 429`（EDU 资料接口的普通限频），
+/// 与模型额度无关。若只看状态码，探针会误报「VS Code 有 7 次限流」。
 fn is_strong_signal(line: &str) -> bool {
-    line.contains("RESOURCE_EXHAUSTED")
+    if line.contains("RESOURCE_EXHAUSTED")
         || line.contains("usage exceeds frequency limit")
         || line.contains("超出频率限制")
-        || (line.contains("429")
-            && (line.contains("Status: 429") || line.contains("[HTTP STATUS] 429")))
+    {
+        return true;
+    }
+    let is_429 = line.contains("Status: 429") || line.contains("[HTTP STATUS] 429");
+    if !is_429 {
+        return false;
+    }
+    ["frequency", "exceed", "quota", "limit", "超出", "限流", "额度"]
+        .iter()
+        .any(|marker| line.to_ascii_lowercase().contains(marker))
 }
 
 /// 脱敏：邮件、32 位以上十六进制 id、Bearer token。
@@ -451,7 +463,7 @@ mod tests {
             .append(true)
             .open(&file)
             .unwrap();
-        writeln!(handle, "[HTTP STATUS] 429 Too Many Requests").unwrap();
+        writeln!(handle, "[HTTP STATUS] 429 usage exceeds frequency limit").unwrap();
         drop(handle);
 
         let second = probe_at(std::slice::from_ref(&root), &state, &samples, now_ms());
@@ -469,6 +481,18 @@ mod tests {
         let text = std::fs::read_to_string(&samples).expect("样本文件");
         assert!(text.contains("429"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unrelated_429_is_not_a_quota_signal() {
+        // 本机真实样本：EDU 资料接口的 429，不是模型限流。
+        assert!(!is_strong_signal(
+            "2026-11-19 18:29:15.800 [info] Unable to resolve optional EDU details. Status: 429 "
+        ));
+        assert!(is_strong_signal(
+            "429 Too Many Requests: usage exceeds frequency limit"
+        ));
+        assert!(is_strong_signal("超出频率限制，将在 18:42 重置"));
     }
 
     #[test]
