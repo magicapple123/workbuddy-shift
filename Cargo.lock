@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "companion-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "companion-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "block2",
  "companion-runtime",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "companion-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "companion-core",
  "fs2",
@@ -5713,7 +5713,7 @@ dependencies = [
 
 [[package]]
 name = "wb-shift-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -5737,7 +5737,7 @@ dependencies = [
 
 [[package]]
 name = "wb-shift-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "rust-embed",
@@ -6485,7 +6485,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workbuddy-shift-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "companion-desktop",
