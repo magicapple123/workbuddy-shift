@@ -113,6 +113,8 @@ include!("content_repair_qa.rs");
 
 include!("content_repair_qa2.rs");
 
+include!("content_repair_qa3.rs");
+
 include!("link_store.rs");
 
 include!("operation_log.rs");

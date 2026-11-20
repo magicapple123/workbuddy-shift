@@ -304,3 +304,5 @@ include!("exec.rs");
 include!("recovery.rs");
 
 include!("copy_repair_qa.rs");
+
+include!("copy_repair_qa3.rs");

@@ -205,3 +205,170 @@ fn parse_failure_message_carries_position_and_tail_flag() {
     assert!(error.contains("文件末行"), "{error}");
     assert!(error.ends_with("），内容可能不完整"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// 第三类形态：裸 NUL 填充（issue #1 用户实测的第 1000 行：行首 8 974 个 NUL）
+// ---------------------------------------------------------------------------
+
+/// `count` 个裸 NUL + `tail`：构造线上那种「行首填充 + 一条完整 JSON」的行。
+fn nul_pad(count: usize, tail: &str) -> String {
+    let mut out = "\0".repeat(count);
+    out.push_str(tail);
+    out
+}
+
+/// 行首 NUL + 一条完整记录：剥掉填充后该记录照常复制，`nul_stripped` 报出行号与字节数。
+#[test]
+fn repair_strips_leading_nul_filler_before_a_complete_record() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let padded = nul_pad(5, r#"{"a":1}"#);
+    let text = format!("{padded}\n{}\n", r#"{"b":2}"#);
+    // 严格校验仍然拒绝（语义不变）：NUL 不是空白，第 1 列就报「expected value」。
+    let strict = normalize_jsonl(&text, own).unwrap_err();
+    assert!(strict.contains("第 1 行的格式无法识别"), "{strict}");
+
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("行首 NUL 填充必须可无损修复")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.nul_stripped, vec![(1usize, 5usize)]);
+    assert_eq!(repair.dropped_tail_line, None, "剥离填充不得算丢记录");
+    assert!(repair.split_lines.is_empty(), "这不是「粘连拆行」");
+    assert_eq!(repair.text, format!("{}\n{}\n", r#"{"a":1}"#, r#"{"b":2}"#));
+    assert_eq!(normalize_jsonl(&repair.text, own).unwrap().record_count, 2);
+}
+
+/// 行尾 NUL + 完整记录：同样是填充，剥掉即可（行尾风格原样保留）。
+#[test]
+fn repair_strips_trailing_nul_filler_after_a_complete_record() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let padded = nul_pad(3, r#"{"b":2}"#);
+    let text = format!("{}\r\n{padded}\r\n", r#"{"a":1}"#);
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("行尾 NUL 填充必须可无损修复")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.nul_stripped, vec![(2usize, 3usize)]);
+    assert_eq!(
+        repair.text,
+        format!("{}\r\n{}\r\n", r#"{"a":1}"#, r#"{"b":2}"#),
+        "CRLF 行尾不得被悄悄改掉"
+    );
+    assert_eq!(normalize_jsonl(&repair.text, own).unwrap().record_count, 2);
+}
+
+/// NUL 夹在两条记录之间：两段各是一条完整记录，按原行尾风格拆成独立两行。
+#[test]
+fn repair_splits_two_records_separated_by_nul() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let glued = nul_pad(2, r#"{"c":3}"#);
+    let text = format!("{}\n{}\0{glued}\n", r#"{"a":1}"#, r#"{"b":2}"#);
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("NUL 分隔的两条完整记录必须可无损拆行")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.nul_stripped, vec![(2usize, 3usize)]);
+    assert_eq!(
+        repair.text,
+        format!("{}\n{}\n{}\n", r#"{"a":1}"#, r#"{"b":2}"#, r#"{"c":3}"#)
+    );
+    assert_eq!(normalize_jsonl(&repair.text, own).unwrap().record_count, 3);
+}
+
+/// 中间行整行都是 NUL：连行尾一起移除，前后记录都保留（留空行会被判异常）。
+#[test]
+fn repair_removes_a_nul_only_line_in_the_middle() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let filler = "\0".repeat(9);
+    let text = format!("{}\n{filler}\n{}\n", r#"{"a":1}"#, r#"{"b":2}"#);
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("整行 NUL 填充必须可移除")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.nul_stripped, vec![(2usize, 9usize)]);
+    assert_eq!(repair.text, format!("{}\n{}\n", r#"{"a":1}"#, r#"{"b":2}"#));
+    assert_eq!(
+        repair.text.lines().count(),
+        2,
+        "整行填充移除后行数要少一行，且不得留下空行"
+    );
+    assert_eq!(normalize_jsonl(&repair.text, own).unwrap().record_count, 2);
+}
+
+/// NUL 落在一条记录内部（把记录劈成两段）：无法证明无损 → 拒绝，不得拼接猜测。
+#[test]
+fn repair_rejects_nul_inside_a_record() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let split = format!(
+        "{}\0\0\0{}",
+        r#"{"sessionId":"a","text":"he"#, r#"llo"}"#
+    );
+    let text = format!("{}\n{split}\n{}\n", r#"{"a":1}"#, r#"{"d":4}"#);
+    let error = repair_jsonl_for_copy(&text, own).expect_err("被 NUL 劈开的记录不得被修复");
+    assert!(error.contains("第 2 行"), "必须指出坏行行号：{error}");
+    assert!(error.contains("不是末行"), "{error}");
+}
+
+/// 行首 NUL + 末行截断（前面已有完整记录）：按末行规则丢弃该行，同时报告剥离了填充。
+#[test]
+fn repair_handles_leading_nul_on_a_truncated_last_line() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let truncated = nul_pad(4, r#"{"b":"半"#);
+    let text = format!("{}\n{truncated}\n", r#"{"a":1}"#);
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("末行 NUL + 截断必须按末行规则修复")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.dropped_tail_line, Some(2));
+    assert_eq!(
+        repair.kept_tail_line_records, None,
+        "整行都是半截，没有可保留的完整值"
+    );
+    assert_eq!(repair.nul_stripped, vec![(2usize, 4usize)]);
+    assert_eq!(repair.text, format!("{}\n", r#"{"a":1}"#));
+}
+
+/// 行首 NUL + 截断，但该行**不是**末行：后面还有内容 → 拒绝。
+#[test]
+fn repair_rejects_leading_nul_with_truncation_when_not_last_line() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let truncated = nul_pad(4, r#"{"b":"半"#);
+    let text = format!("{}\n{truncated}\n{}\n", r#"{"a":1}"#, r#"{"d":4}"#);
+    let error = repair_jsonl_for_copy(&text, own).expect_err("非末行的截断不得被修复");
+    assert!(error.contains("第 2 行"), "{error}");
+    assert!(error.contains("不是末行"), "{error}");
+}
+
+/// 中间行的 NUL 填充（非整行 NUL、也不是末行）：这一类**无损**，因此允许修复。
+#[test]
+fn repair_allows_nul_filler_on_a_middle_line() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let padded = nul_pad(7, r#"{"b":2}"#);
+    let text = format!("{}\n{padded}\n{}\n", r#"{"a":1}"#, r#"{"c":3}"#);
+    let repair = repair_jsonl_for_copy(&text, own)
+        .expect("中间行的 NUL 填充必须可无损修复")
+        .expect("必须给出修复结果");
+    assert_eq!(repair.nul_stripped, vec![(2usize, 7usize)]);
+    assert_eq!(
+        repair.text,
+        format!("{}\n{}\n{}\n", r#"{"a":1}"#, r#"{"b":2}"#, r#"{"c":3}"#)
+    );
+    // 修复后记录数必须与严格校验的独立统计一致（沿用现有防御性校验）。
+    let normalized = normalize_jsonl(&repair.text, own).expect("修复后的正文必须能通过严格校验");
+    assert_eq!(normalized.record_count, 3);
+    assert_eq!(repair.text.lines().count(), normalized.record_count);
+}
+
+/// 只有填充、没有任何记录的文件：修复后仍是空内容 → 拒绝（不得复制出空会话）。
+#[test]
+fn repair_rejects_a_body_made_only_of_nul_filler() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let filler = "\0".repeat(32);
+    let filler_line = format!("{filler}\n");
+    assert!(repair_jsonl_for_copy(&filler, own).is_err());
+    assert!(repair_jsonl_for_copy(&filler_line, own).is_err());
+}
+
+/// 干净正文 → 无需修复。
+#[test]
+fn repair_is_noop_for_valid_body_without_filler() {
+    let own = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    assert!(repair_jsonl_for_copy(&sample_body(own), own)
+        .unwrap()
+        .is_none());
+}
