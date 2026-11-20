@@ -16,6 +16,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { DemoAction } from "@/components/demo-action";
@@ -30,6 +31,11 @@ import type {
 } from "@/lib/types";
 
 import { SettingsGroup } from "./rows";
+import {
+  accountsFoldSummary,
+  previewFoldSummary,
+  SETTINGS_SYNC_FOLD_DEFAULT_OPEN,
+} from "./settings-sync-fold";
 
 /** 主题键里会出现「主题归属改写」，预览/确认弹窗都要用到这个字面量。 */
 const THEME_KEY = "appearance.themeSelection";
@@ -149,6 +155,15 @@ export function SettingsSyncCard() {
   const [backupsBusy, setBackupsBusy] = useState(false);
   const [backupsError, setBackupsError] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<SettingsSyncBackupEntry | null>(null);
+
+  /**
+   * R5-06：两块明细各自独立折叠，**默认收起**（`SETTINGS_SYNC_FOLD_DEFAULT_OPEN` 全为 false）。
+   *
+   * 刻意不写 localStorage：离开设置页再回来仍是折叠态（清单明确要求），
+   * 与「默认折叠」同一个语义；需要看明细时展开一次即可。
+   */
+  const [accountsOpen, setAccountsOpen] = useState(SETTINGS_SYNC_FOLD_DEFAULT_OPEN.accounts);
+  const [previewOpen, setPreviewOpen] = useState(SETTINGS_SYNC_FOLD_DEFAULT_OPEN.preview);
 
   const loadStatus = useCallback(async (): Promise<SettingsSyncStatus | null> => {
     try {
@@ -304,6 +319,12 @@ export function SettingsSyncCard() {
   const changedTargets = plan?.targets.filter((target) => target.status === "changed") ?? [];
   const pendingItems = changedTargets.reduce((sum, target) => sum + target.changes.length, 0);
 
+  /** 折叠标题行的摘要：账号数 / 可同步数 / 未登录数，由 `tableRows` 现算。 */
+  const accountsSummary = useMemo(() => accountsFoldSummary(tableRows), [tableRows]);
+
+  /** 折叠标题行的摘要：待同步账号数与项数（无变更时显示「已一致」）。 */
+  const previewSummary = previewFoldSummary(changedTargets.length, pendingItems);
+
   /** 这次同步会把哪些账号的主题换掉：确认弹窗里必须点名。 */
   const themeOverwrites = useMemo(() => {
     if (!plan) return [];
@@ -426,118 +447,159 @@ export function SettingsSyncCard() {
               </div>
             </div>
 
-            {/* 账号属性表：主题合并成一列；未登录账号置底，并给「去登录」出口。 */}
-            <div className="max-h-[320px] overflow-y-auto rounded-lg border border-border/60">
-              <table className="w-full table-fixed text-xs">
-                <colgroup>
-                  <col className="w-[44%]" />
-                  <col className="w-[30%]" />
-                  <col className="w-[26%]" />
-                </colgroup>
-                <thead className="sticky top-0 z-10 bg-muted text-[11px] text-muted-foreground">
-                  <tr>
-                    <th className="px-2 py-1.5 text-left font-medium">账号</th>
-                    <th className="px-2 py-1.5 text-left font-medium">主题</th>
-                    <th className="px-2 py-1.5 text-left font-medium">本机状态</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tableRows.map((account) => (
-                    <tr key={account.uid} className="border-t border-border/40">
-                      <td className="truncate px-2 py-1.5" title={`${account.label} · ${account.uid}`}>
-                        {account.label}
-                      </td>
-                      <td className="truncate px-2 py-1.5" title={themeCell(account)}>
-                        {themeCell(account)}
-                      </td>
-                      <td className="px-2 py-1.5">
-                        {account.hasDirectory ? (
-                          <span
-                            className="flex min-w-0 items-baseline gap-1"
-                            title={scopesTitle(account.scopes)}
-                          >
-                            <span className="shrink-0">可同步</span>
-                            <span className="min-w-0 truncate text-[10px] text-muted-foreground">
-                              · {account.scopes.length} 个工作区配置
-                            </span>
-                          </span>
-                        ) : (
-                          <span className="flex min-w-0 items-baseline gap-1 text-muted-foreground">
-                            <span className="shrink-0">未登录</span>
-                            <Link
-                              to="/"
-                              className="shrink-0 text-[10px] text-primary underline-offset-2 hover:underline"
-                              title="去账号页登录该账号（未在本机登录过的账号没有偏好目录，无法接收同步）"
-                            >
-                              去登录
-                            </Link>
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {/*
+              R5-06：本机账号属性表改为可折叠、默认收起；标题行保留摘要计数。
+              展开后仍维持原有的 max-h-[320px] 内滚动 + sticky 表头。
+            */}
+            <Collapsible
+              open={accountsOpen}
+              onOpenChange={setAccountsOpen}
+              className="rounded-lg border border-border/60"
+            >
+              <CollapsibleTrigger
+                type="button"
+                className="group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <span className="shrink-0 font-medium text-foreground">本机账号</span>
+                <span className="min-w-0 flex-1 truncate tabular-nums text-muted-foreground">
+                  {accountsSummary}
+                </span>
+                <ChevronDown
+                  className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180"
+                  aria-hidden="true"
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="max-h-[320px] overflow-y-auto border-t border-border/60">
+                  <table className="w-full table-fixed text-xs">
+                    <colgroup>
+                      <col className="w-[44%]" />
+                      <col className="w-[30%]" />
+                      <col className="w-[26%]" />
+                    </colgroup>
+                    <thead className="sticky top-0 z-10 bg-muted text-[11px] text-muted-foreground">
+                      <tr>
+                        <th className="px-2 py-1.5 text-left font-medium">账号</th>
+                        <th className="px-2 py-1.5 text-left font-medium">主题</th>
+                        <th className="px-2 py-1.5 text-left font-medium">本机状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tableRows.map((account) => (
+                        <tr key={account.uid} className="border-t border-border/40">
+                          <td className="truncate px-2 py-1.5" title={`${account.label} · ${account.uid}`}>
+                            {account.label}
+                          </td>
+                          <td className="truncate px-2 py-1.5" title={themeCell(account)}>
+                            {themeCell(account)}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            {account.hasDirectory ? (
+                              <span
+                                className="flex min-w-0 items-baseline gap-1"
+                                title={scopesTitle(account.scopes)}
+                              >
+                                <span className="shrink-0">可同步</span>
+                                <span className="min-w-0 truncate text-[10px] text-muted-foreground">
+                                  · {account.scopes.length} 个工作区配置
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="flex min-w-0 items-baseline gap-1 text-muted-foreground">
+                                <span className="shrink-0">未登录</span>
+                                <Link
+                                  to="/"
+                                  className="shrink-0 text-[10px] text-primary underline-offset-2 hover:underline"
+                                  title="去账号页登录该账号（未在本机登录过的账号没有偏好目录，无法接收同步）"
+                                >
+                                  去登录
+                                </Link>
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
 
+            {/*
+              R5-06：「本次预览」同样改为可折叠、默认收起，标题行保留「待同步 N 个账号 · M 项 / 已一致」。
+              `plan` 为空（尚未预览 / 预览失败）时不渲染折叠结构，维持原有提示文案。
+            */}
             {plan ? (
-              <div className="mt-3 rounded-lg border border-border/60 bg-muted/20 p-2.5 text-[11px]">
-                <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="font-medium text-foreground">
+              <Collapsible
+                open={previewOpen}
+                onOpenChange={setPreviewOpen}
+                className="mt-3 rounded-lg border border-border/60 bg-muted/20 text-[11px]"
+              >
+                <CollapsibleTrigger
+                  type="button"
+                  className="group flex w-full flex-wrap items-baseline justify-between gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                >
+                  <span className="min-w-0 font-medium text-foreground">
                     本次预览
                     <span className="ml-1 font-normal text-muted-foreground" title={plan.source.uid}>
                       · 源账号：{plan.source.label}
                     </span>
                   </span>
-                  <span className="shrink-0 tabular-nums text-muted-foreground">
-                    {changedTargets.length === 0
-                      ? "已一致"
-                      : `待同步 ${changedTargets.length} 个账号 · ${pendingItems} 项`}
+                  <span className="flex shrink-0 items-baseline gap-1.5 tabular-nums text-muted-foreground">
+                    {previewSummary}
+                    <ChevronDown
+                      className="size-3.5 shrink-0 self-center transition-transform group-data-[state=open]:rotate-180"
+                      aria-hidden="true"
+                    />
                   </span>
-                </div>
-                <div className="grid grid-cols-[40%_minmax(0,1.6fr)_auto] items-baseline gap-x-2 gap-y-1">
-                  {previewRows.map(({ account, target }) => {
-                    const overwrite =
-                      target?.changes.filter((change) => change.action === "overwrite").length ?? 0;
-                    const added =
-                      target?.changes.filter((change) => change.action === "add").length ?? 0;
-                    return (
-                      <Fragment key={account.uid}>
-                        <span className="truncate" title={account.label}>
-                          {account.label}
-                        </span>
-                        <span className="min-w-0">
-                          {!target ? (
-                            <span className="text-muted-foreground">不在本次计划内</span>
-                          ) : target.status === "skipped" ? (
-                            <span className="text-muted-foreground">跳过：{target.reason}</span>
-                          ) : target.changes.length === 0 ? (
-                            <span className="text-muted-foreground">已一致</span>
-                          ) : (
-                            <span className="tabular-nums">
-                              覆盖 {overwrite} 项 · 新增 {added} 项
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="border-t border-border/50 px-2.5 py-2">
+                    <div className="grid grid-cols-[40%_minmax(0,1.6fr)_auto] items-baseline gap-x-2 gap-y-1">
+                      {previewRows.map(({ account, target }) => {
+                        const overwrite =
+                          target?.changes.filter((change) => change.action === "overwrite").length ?? 0;
+                        const added =
+                          target?.changes.filter((change) => change.action === "add").length ?? 0;
+                        return (
+                          <Fragment key={account.uid}>
+                            <span className="truncate" title={account.label}>
+                              {account.label}
                             </span>
-                          )}
-                        </span>
-                        <span className="justify-self-end">
-                          {target?.themeRewrite && target.status !== "skipped" ? (
-                            <Badge
-                              variant="secondary"
-                              className="text-[10px] font-normal"
-                              title="主题的资源与来源相同，只是归属账号 / revision 需要贴到目标账号；不写入时会保持原样"
-                            >
-                              {target.status === "changed" ? "主题归属改写" : "仅主题归属差异"}
-                            </Badge>
-                          ) : null}
-                        </span>
-                      </Fragment>
-                    );
-                  })}
-                </div>
-                <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground/80">
-                  源账号与未登录账号不参与同步，因此这里的行数比上表少。「仅主题归属差异」不计入项数，也不会写入。
-                </p>
-              </div>
+                            <span className="min-w-0">
+                              {!target ? (
+                                <span className="text-muted-foreground">不在本次计划内</span>
+                              ) : target.status === "skipped" ? (
+                                <span className="text-muted-foreground">跳过：{target.reason}</span>
+                              ) : target.changes.length === 0 ? (
+                                <span className="text-muted-foreground">已一致</span>
+                              ) : (
+                                <span className="tabular-nums">
+                                  覆盖 {overwrite} 项 · 新增 {added} 项
+                                </span>
+                              )}
+                            </span>
+                            <span className="justify-self-end">
+                              {target?.themeRewrite && target.status !== "skipped" ? (
+                                <Badge
+                                  variant="secondary"
+                                  className="text-[10px] font-normal"
+                                  title="主题的资源与来源相同，只是归属账号 / revision 需要贴到目标账号；不写入时会保持原样"
+                                >
+                                  {target.status === "changed" ? "主题归属改写" : "仅主题归属差异"}
+                                </Badge>
+                              ) : null}
+                            </span>
+                          </Fragment>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground/80">
+                      源账号与未登录账号不参与同步，因此这里的行数比上表少。「仅主题归属差异」不计入项数，也不会写入。
+                    </p>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
             ) : (
               <p className="mt-3 text-[11px] text-muted-foreground">
                 {previewing
