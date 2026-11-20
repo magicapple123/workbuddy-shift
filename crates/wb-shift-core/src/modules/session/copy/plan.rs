@@ -398,9 +398,7 @@ fn mark_aux_skipped_for_requests(
         if operation.aux_skipped
             || operation.source.uid != source.uid
             || operation.target.uid != target.uid
-            || !session_ids
-                .iter()
-                .any(|cid| *cid == operation.source.session_id)
+            || !session_ids.contains(&operation.source.session_id)
         {
             continue;
         }

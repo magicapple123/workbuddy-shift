@@ -2,6 +2,7 @@
 
 use super::plan::*;
 use super::*;
+use crate::modules::automation_sync;
 
 /// 切换账号。
 ///
@@ -160,6 +161,17 @@ pub fn switch_account(
         restart,
     );
 
+    // 自动化定时任务（R5-11）：只在客户端已关闭（restart）且用户开启同步时执行。
+    // 失败不阻断认证切换——与会话复制同口径，结论进报告让用户自己判断。
+    let automation_report = if restart
+        && automation_sync::is_enabled(&crate::modules::session::SessionPaths::for_variant(variant))
+    {
+        progress("正在同步自动化任务…");
+        Some(automation_sync::sync(&source_uid, &target_uid, variant))
+    } else {
+        None
+    };
+
     progress("正在写入认证文件…");
     auth_file::write_account_to_auth_file(&acc, variant)?;
     if restart {
@@ -187,5 +199,8 @@ pub fn switch_account(
         result["sessionRecovery"] = r;
     }
     result["settingsSync"] = settings_report;
+    if let Some(a) = automation_report {
+        result["automationSync"] = a;
+    }
     Ok(result)
 }

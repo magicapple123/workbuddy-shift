@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
-import { CircleAlert, Loader2 } from "lucide-react";
+import { CircleAlert, Loader2, TriangleAlert } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,7 @@ import { useSwitchAccountProgress } from "@/hooks/use-switch-account-progress";
 import { accountVariant, variantAppName } from "@/lib/variant";
 import type {
   AccountMeta,
+  AutomationTasksSummary,
   Session,
   SessionLinkPreviewGroup,
   SessionSyncSelection,
@@ -53,6 +54,11 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [currentUid, setCurrentUid] = useState<string | null>(null);
+  /**
+   * 当前登录账号启用中的「自动化」定时任务数（切号后会停止执行，客户端界面不提示）。
+   * 读不到（未安装 / 老版本 / 无任务）时为 `null`，此时不渲染提示块。
+   */
+  const [automationTasks, setAutomationTasks] = useState<AutomationTasksSummary | null>(null);
   const [progress, setProgress] = useSwitchAccountProgress();
   /** 会话同步：勾选结果（默认值来自后端 defaultChecked）与预览组（结果反馈回显用）。 */
   const [syncSelections, setSyncSelections] = useState<SessionSyncSelection[]>([]);
@@ -103,6 +109,24 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     // 关闭时只取消回写，保留内容到退出动画结束。
     return () => { cancelled = true; };
   }, [open, accountId, variant]);
+
+  // 任务数只依赖「当前登录账号」：拿到 uid 后查一次，查不到就静默（不打扰切换）。
+  useEffect(() => {
+    if (!open || !currentUid) {
+      setAutomationTasks(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .automationTasksSummary(currentUid)
+      .then((summary) => {
+        if (!cancelled) setAutomationTasks(summary.count > 0 ? summary : null);
+      })
+      .catch(() => {
+        if (!cancelled) setAutomationTasks(null);
+      });
+    return () => { cancelled = true; };
+  }, [open, currentUid]);
 
   function toggleSession(id: string) {
     setSelected((prev) => toggleSessionSelection(prev, id));
@@ -241,6 +265,28 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
 
         {/* min-h-0：矮窗口下压缩本区而不是裁切页脚。列表按自身 max-h 滚动；矮窗口或权限大卡时 tab 内容区可滚，避免裁切。仅当常驻提示超过剩余空间时本层滚动。 */}
         <div className="flex min-h-0 flex-col gap-3 overflow-x-hidden overflow-y-auto">
+          {/* 自动化定时任务：切号后源账号的任务不再执行，必须先告诉用户（只读提示，不写库）。 */}
+          {automationTasks && (
+            <Alert variant="warning" className="min-w-0 shrink-0">
+              <TriangleAlert />
+              <AlertTitle>
+                {automationTasks.enabled
+                  ? `将复制 ${automationTasks.count} 个定时任务到目标账号`
+                  : `当前账号有 ${automationTasks.count} 个启用的定时任务`}
+              </AlertTitle>
+              <AlertDescription className="min-w-0 break-all">
+                {automationTasks.enabled
+                  ? "原任务会改为暂停（不删除）；含技能 / 连接器 / 空间引用的任务只提示、不复制，且需要勾选重启。"
+                  : "切号后这些任务会停止执行，客户端不会提示。可在「设置 → 切号时同步定时任务」开启自动搬运。"}
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  {automationTasks.names.join("、")}
+                  {automationTasks.count > automationTasks.names.length
+                    ? ` 等 ${automationTasks.count} 个`
+                    : ""}
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* 常驻提示区：切换错误 / 权限 / 关联检查失败不随 tab 切换隐藏。 */}
           <SwitchAccountPermissionAlert
             error={error}

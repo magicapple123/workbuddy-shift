@@ -142,14 +142,12 @@ fn space_folder_paths(conn: &Connection, space_id: &str, meta: &SpaceMeta) -> Ve
         }
     }
     if table_exists(conn, "spaces") && column_exists(conn, "spaces", "primary_folder_path") {
-        if let Ok(primary) = conn.query_row(
+        if let Ok(Some(path)) = conn.query_row(
             "SELECT primary_folder_path FROM spaces WHERE id = ?1",
             [space_id],
             |row| row.get::<_, Option<String>>(0),
         ) {
-            if let Some(path) = primary {
-                paths.push(path);
-            }
+            paths.push(path);
         }
     }
     paths.retain(|path| !path.trim().is_empty());

@@ -11,6 +11,7 @@ import { PermissionCheckCard } from "./permission-check-card";
 import { RateLimitCard } from "./rate-limit-card";
 import { StartupCard } from "./startup-card";
 import { SupportedToolsCard } from "./supported-tools-card";
+import { AutomationSyncCard } from "./automation-sync-card";
 import { SettingsSyncCard } from "./settings-sync-card";
 import { UpdateCard } from "./update-card";
 
@@ -29,6 +30,7 @@ export default function SettingsPage() {
         <AppearanceCard />
         <SupportedToolsCard />
         {api.isDemoMode() ? null : <SettingsSyncCard />}
+        {api.isDemoMode() ? null : <AutomationSyncCard />}
         <PermissionCheckCard />
         {api.isDemoMode() ? null : <AutoCheckinCard />}
         <AutoRotateCard />

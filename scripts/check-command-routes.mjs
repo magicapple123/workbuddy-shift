@@ -93,6 +93,9 @@ for (const route of routes) {
 const HTTP_ONLY = new Set(["switch_progress"]);
 // 桌面专属命令：没有 WebUI 路由，前端用 isDesktop()/isWebui() 守卫。
 const DESKTOP_ONLY = new Set([
+  "automation_sync_enabled",
+  "automation_sync_set_enabled",
+  "automation_tasks_summary",
   "dev_environment",
   "open_permission_settings",
   "check_auth_permission",

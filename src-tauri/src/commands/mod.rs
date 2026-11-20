@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 mod accounts;
+mod automation;
 mod checkin;
 mod clients;
 mod groups;
