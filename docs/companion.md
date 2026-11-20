@@ -72,6 +72,20 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
   `permission/preset` 是启动配置，不是请求），因此 DSH 只有「进行中 / 已完成 / 空闲」。
 - DSH 桌面端没有会话 URL scheme，卡片不提供「进入对话」。
 
+## 权限审批（「需要授权」）
+
+悬浮栏区分两种「要人处理」的等待，**只做检测与跳转，不做允许/拒绝决策**——审批仍在客户端
+自己的弹窗里完成（远程审批需要客户端 hook 支持返回决策并把 `async` 改成阻塞式，未立项）。
+
+| 环节 | 行为 |
+| --- | --- |
+| 事件 | WorkBuddy `PermissionRequest` 与确认类 `Notification` → `wait.kind="permission"`；提问工具 → `wait.kind="question"`。Codeg / Codex 未打标时由 `hub.rs#pending_kind` 推断：带 `questions` 或提问工具名的是提问，其余（含沙箱审批日志兜底）按授权处理 |
+| 防误报 | 授权类 `wait` 带 `graceMs`（`hub::PERMISSION_GRACE_MS` = 2500）。hub 存 `graceUntil`，`snapshot()` 到点才投影；期间被 `resolve` 掉的请求既不出卡片也不发通知（覆盖客户端的自动批准）。提问不延迟 |
+| 展示 | `presentation.ts`：授权 → 状态「需要授权」、正文「工具 · 原文」、动作「去处理」；提问 → 维持「待确认」+ 问题正文。卡片用琥珀色描边 + 盾牌图标（`rail.css` 的 `[data-kind=permission]`） |
+| 去重与清理 | 同一 `callId` 重复上报只保留一条；`PostToolUse`/`PostToolUseFailure` 按 id 结算，缺 `tool_use_id` 的授权请求（占位 `perm:<ts>`）按工具名兜底结算；`Stop`/`Interrupt`/`SessionEnd` 清空该会话的 `pending` |
+| 通知 | 复用运行时桥：`companion-runtime` 把 `wait` 事件交给 `companion-desktop` 弹系统通知，去重键含 `sessionId + roundId + callId`。悬浮窗 WebView 的 capability **不含** `notification:allow-notify`，因此不从页面里重复发通知；通知不可用（未开启「桌面通知」或系统拒绝）时降级为浮窗高亮（`monitor/permission-attention.ts` 给 `#desktop-rail` 加 `permission-attention`，2.4 秒后自移除），不抛错 |
+| 已知缺口 | 托盘通知标题由 `companion-desktop` 统一写成「需要确认」，尚未按 `kind` 分成「需要授权」；沙箱审批日志兜底（`adapters/workbuddy/log_watch.rs`）没有 `kind` 字段，靠推断归为授权 |
+
 ## 用户目录
 
 | 路径 | 内容 |

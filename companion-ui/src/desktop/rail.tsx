@@ -3,7 +3,9 @@
 import { watchTheme } from './theme';
 import { createRoot } from 'react-dom/client';
 import { RailApp } from './components/Rail';
-import { createRailController } from './rail-controller';
+import { createRailController, type RailControllerOptions } from './rail-controller';
+import { createSSETransport } from '../monitor/transport.js';
+import { withPermissionAttention } from '../monitor/permission-attention.js';
 import { disableNativeContentDrag } from './host.js';
 import './rail.css';
 
@@ -20,6 +22,21 @@ const stopThemeWatch = watchTheme();
 const container = document.getElementById('desktop-rail');
 if (container) void boot(container);
 
+/** Set only for the production wiring; the demo build has no real stream. */
+let stopAttention: (() => void) | null = null;
+
+/**
+ * Production wiring: the real snapshot stream, plus the permission-gate
+ * highlight. The wrapper only observes the same snapshots the rail already
+ * renders — it never sends a decision back to a client (see
+ * `monitor/permission-attention.ts`).
+ */
+function productionOptions(target: HTMLElement): RailControllerOptions {
+  const attention = withPermissionAttention(createSSETransport().subscribe, {container: target});
+  stopAttention = attention.dispose;
+  return {subscribe: attention.subscribe};
+}
+
 /**
  * The demo build runs this same rail against the stage page that embeds it
  * instead of against a host. The choice is a build-time constant, so a query
@@ -31,7 +48,7 @@ async function boot(target: HTMLElement) {
   const demo = import.meta.env.VITE_DEMO_MODE === '1';
   const controller = demo
     ? createRailController((await import('../demo/rail-bridge.js')).createDemoRailOptions())
-    : createRailController();
+    : createRailController(productionOptions(target));
   // `#desktop-rail` is the React container, so React never writes its
   // attributes; the controller owns the classes and datasets that describe the
   // window as a whole (inactive, motion-paused, welcome phase).
@@ -39,6 +56,7 @@ async function boot(target: HTMLElement) {
   createRoot(target).render(<RailApp controller={controller} container={target} />);
   window.addEventListener('pagehide', () => {
     controller.dispose();
+    stopAttention?.();
     stopThemeWatch();
   }, {once: true});
   controller.start();

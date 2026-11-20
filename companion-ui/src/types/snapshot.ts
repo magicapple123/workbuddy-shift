@@ -37,12 +37,30 @@ export interface PendingQuestion {
   options: PendingQuestionOption[];
 }
 
+/**
+ * What a pending request is waiting for:
+ * - `permission` — a tool gate (the client's own allow/deny dialog). The rail
+ *   only reports it; it never decides.
+ * - `question` — the agent asked the user something.
+ *
+ * The rail renders both as "needs the user" but must not word them the same
+ * way: the user has to look in a different place for each.
+ */
+export type PendingKind = 'permission' | 'question';
+
 export interface PendingRequest {
   id: string;
   tool?: string;
   text: string;
   questions: PendingQuestion[];
   ts: number;
+  /** Inferred by `hub.rs` (`pending_kind`) when a producer does not stamp it. */
+  kind?: PendingKind;
+  /**
+   * A permission gate stays hidden until this timestamp: the client may still
+   * auto-approve it (2.5s grace, `PERMISSION_GRACE_MS`). Absent on questions.
+   */
+  graceUntil?: number;
   /** Async Codex questions only; omitted for every other wait. */
   optional?: true;
 }

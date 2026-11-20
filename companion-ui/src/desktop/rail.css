@@ -146,3 +146,22 @@ button:focus-visible{outline:2px solid var(--wb-focus-ring);outline-offset:3px}
 
 #desktop-rail[data-size=medium] .desktop-notice,#desktop-rail[data-size=small] .desktop-notice{right:calc(33px + 74px * var(--rail-scale));width:calc(228px * var(--rail-scale));font-size:calc(11px * var(--rail-scale));padding:calc(10px * var(--rail-scale)) calc(12px * var(--rail-scale))}
 
+/* R5-09 权限审批：与普通提问区分开。
+   授权类卡片用琥珀色描边 + 盾牌图标（问题类仍用等待色圆点），文案由
+   `presentation.ts` 给成「需要授权」与「工具 · 原文」。颜色只取 tokens。 */
+.desktop-card:has(.desktop-card-body[data-kind=permission]){border-color:var(--wb-warning)}
+.desktop-card-body[data-kind=permission] .desktop-card-status{color:var(--wb-warning)}
+/* 盾牌取代圆点：同一个位置只能是其中一个符号。 */
+.desktop-card-body[data-kind=permission] .desktop-card-status::before{display:none}
+.desktop-card-shield{width:9px;height:9px;flex-shrink:0}
+
+/* 托盘通知不可用时的降级：浮窗自己亮两下，不抛错、不弹窗。 */
+@keyframes permission-attention{
+  0%,100%{box-shadow:0 6px 18px var(--wb-glass-shadow),inset 0 1px 1px var(--wb-glass-inner)}
+  50%{box-shadow:0 0 0 3px var(--wb-warning),0 6px 18px var(--wb-glass-shadow)}
+}
+#desktop-rail.permission-attention .desktop-strip{animation:permission-attention 1.1s ease-in-out 2}
+@media(prefers-reduced-motion:reduce){
+  #desktop-rail.permission-attention .desktop-strip{animation:none;outline:2px solid var(--wb-warning);outline-offset:2px}
+}
+
