@@ -36,6 +36,17 @@ type TokenBarShapeProps = ComponentProps<typeof Rectangle> & {
   value?: number | [number, number];
 };
 
+/**
+ * 图表系列（顺序即堆叠顺序）。**这份列表必须与导出列一一对应**：
+ * 任何一方增删系列，都要同时改 `./export.ts` 的 `TOTALS_HEADERS` / `totalsCells`
+ * 以及 `./metric.tsx` 的口径说明（见 docs/FAQ.md「为什么缓存写入是 0」）。
+ *
+ * `cacheWrite` 在 WorkBuddy（DeepSeek 系）数据里恒为 0：上游 `usage` 对象根本没有
+ * 写入字段，只在 `providerData.rawUsage` 里为 schema 兼容保留、从不填值（R5-18）。
+ * 恒 0 属**预期**，不是统计缺陷；因此这里保持显示该系列与 0 值，不做自动隐藏、
+ * 不加 tooltip 说明——若将来接入会上报写入的模型（Anthropic 系），该系列会自动
+ * 出现非 0 值。
+ */
 const TOKEN_SERIES: TokenSeriesKey[] = [
   "cacheRead",
   "uncachedInput",

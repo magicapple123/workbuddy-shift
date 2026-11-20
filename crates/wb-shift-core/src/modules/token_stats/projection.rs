@@ -244,6 +244,28 @@ pub(super) fn cached_input_field(object: &Map<String, Value>) -> u64 {
     .unwrap_or(0)
 }
 
+/// Cache-write aliases. Four spellings show up across providers/log formats:
+/// Anthropic-style `cache_creation_input_tokens`, DeepSeek-style
+/// `prompt_cache_write_tokens`, the camelCase IDE variant, and our own
+/// `cache_write_input_tokens`.
+///
+/// R5-18 (2026-11-20): this counter is legitimately **always 0** on
+/// WorkBuddy data. The `usage` object emitted by WorkBuddy only carries
+/// `input_tokens` / `output_tokens` / `total_tokens` /
+/// `cache_read_input_tokens`; the write fields survive only in
+/// `providerData.rawUsage` for schema compatibility and are never populated
+/// by the DeepSeek family (its context cache is priced per hit/miss and has
+/// no "cache write" line item). A full scan of 183,613 local records found
+/// the maximum of both fields to be 0, while `cache_read_input_tokens`
+/// behaved normally — i.e. the 0 is a real value, not a decoding defect.
+///
+/// Therefore:
+/// - do **not** drop the parsing below just because the value is always 0;
+///   an Anthropic-style model that reports writes will start working with no
+///   code change;
+/// - do **not** substitute `prompt_cache_miss_tokens` for a write count (see
+///   the note at the end of `usage_from`): it means "newly computed input",
+///   not "written to cache".
 pub(super) const CACHE_WRITE_KEYS: &[&str] = &[
     "cache_write_input_tokens",
     "cacheWriteInputTokens",

@@ -23,7 +23,20 @@ import { formatRequestTime } from "./data";
  * CSV 与 xlsx 共用同一份中间结构（`ExportSection`），保证两种格式逐段数字一致。
  */
 
-/** 数值列（CSV 里保持纯数字，可求和；xlsx 里是数值类型）。 */
+/**
+ * 数值列（CSV 里保持纯数字，可求和；xlsx 里是数值类型）。
+ *
+ * **规则（R5-18）：导出列必须与图表系列一一对得上。**
+ * 图表 `./trend-chart.tsx` 的 `TOKEN_SERIES`（缓存读取 / 新增输入 / 输出 / 缓存写入）
+ * 与这里的分类是同一套口径：图上有哪个分类，导出就有哪一列，绝不出现「界面有、导出没有」
+ * 或「导出有、界面没有」。注意映射不是字面同名——`输入` 列 = `新增输入 + 缓存读取`
+ * （`data.ts` 里 `total = input + output + cacheWrite`，`input` 已含 cacheRead），
+ * `总 Token` 与 `请求数` 是合计/计数列，不对应单个系列。
+ * 因此任一侧增删分类（例如将来出现 cacheWrite > 0 的新系列）都必须同时改另一侧。
+ *
+ * 「缓存写」列在 WorkBuddy（DeepSeek 系）数据里恒为 0，属上游不填，是**预期值**，
+ * 不是导出缺陷，因此保留该列（隐藏系列 / 删列都已明确否决）。
+ */
 const TOTALS_HEADERS = ["总 Token", "输入", "输出", "缓存读", "缓存写", "请求数"];
 
 interface ExportSection {
