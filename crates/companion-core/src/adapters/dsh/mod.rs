@@ -51,7 +51,8 @@ impl Collector {
             return Ok(());
         }
         let time = now();
-        if self.dsh_log_watch.primed && time - self.dsh_log_watch.last_scan < log_watch::SCAN_INTERVAL_MS
+        if self.dsh_log_watch.primed
+            && time - self.dsh_log_watch.last_scan < log_watch::SCAN_INTERVAL_MS
         {
             return Ok(());
         }
@@ -76,16 +77,13 @@ impl Collector {
             .filter_map(|state| state.unsupported)
             .max();
         match unsupported {
-            Some(version) => self.hub.health(
-                "dsh",
-                "error",
-                &HeaderError::Unsupported(version).message(),
-            ),
-            None => self.hub.health(
-                "dsh",
-                "ok",
-                "已连接 DSH 会话日志（只读；子代理会话不显示）",
-            ),
+            Some(version) => {
+                self.hub
+                    .health("dsh", "error", &HeaderError::Unsupported(version).message())
+            }
+            None => self
+                .hub
+                .health("dsh", "ok", "已连接 DSH 会话日志（只读；子代理会话不显示）"),
         }
     }
 

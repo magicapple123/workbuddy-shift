@@ -137,8 +137,8 @@ pub(crate) fn frame_len(buf: &[u8]) -> Option<usize> {
 /// 解压一个完整帧。输出上限 `MAX_FRAME_OUTPUT`。
 pub(crate) fn decode_frame(frame: &[u8]) -> Result<String, String> {
     let mut out = Vec::new();
-    let mut decoder = zstd::stream::read::Decoder::new(frame)
-        .map_err(|e| format!("DSH 会话帧解压失败：{e}"))?;
+    let mut decoder =
+        zstd::stream::read::Decoder::new(frame).map_err(|e| format!("DSH 会话帧解压失败：{e}"))?;
     decoder
         .by_ref()
         .take(MAX_FRAME_OUTPUT as u64)
@@ -159,7 +159,9 @@ pub(crate) fn read_header(path: &Path) -> Result<Header, HeaderError> {
             return Err(HeaderError::Unreadable);
         };
         probe.truncate(n);
-        let Some(len) = frame_len(&probe) else { continue };
+        let Some(len) = frame_len(&probe) else {
+            continue;
+        };
         let Ok(text) = decode_frame(&probe[..len]) else {
             return Err(HeaderError::Unreadable);
         };

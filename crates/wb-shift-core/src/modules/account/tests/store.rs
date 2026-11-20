@@ -135,6 +135,75 @@
         })
     }
 
+    // -----------------------------------------------------------------------
+    // 本地字段白名单不变量（`LOCAL_ACCOUNT_FIELDS`）
+    //
+    // 三处写回路径（刷新 Token / 扫码重登 / 导入备份）都必须保留白名单里的字段。
+    // 这里按白名单**逐个字段**跑一遍，新增字段而忘了给样例值时用例会直接失败并报出字段名，
+    // 避免再出现「加了字段但漏了一处保留列表 → 刷新后用户数据被覆盖」这类 bug。
+    // -----------------------------------------------------------------------
+
+    /// 每个本地字段给一份非默认样例值；白名单新增字段时必须在这里补一条。
+    fn local_field_sample(key: &str) -> Value {
+        match key {
+            "note" => json!("工作号"),
+            "displayField" => json!("phone"),
+            "mark" => json!({
+                "text": "即将限额",
+                "color": "warning",
+                "createdAt": 1_763_654_321_000_i64,
+                "expiresAt": null,
+            }),
+            other => panic!(
+                "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在本不变量测试里补一条样例值，\
+                 并确认三处写回路径都会保留它"
+            ),
+        }
+    }
+
+    #[test]
+    fn refresh_upsert_keeps_every_local_account_field() {
+        for key in LOCAL_ACCOUNT_FIELDS {
+            let mut existing = account("a-1", Some("uid-1"), "小明", None);
+            existing[key] = local_field_sample(key);
+            let mut accounts = vec![existing];
+
+            // 官方刷新对象天然只带 token / 官方字段。
+            upsert_account_in(
+                &mut accounts,
+                &json!({"id": "a-1", "uid": "uid-1", "access_token": "refreshed"}),
+            );
+
+            assert_eq!(
+                accounts[0][key],
+                local_field_sample(key),
+                "刷新 Token 不得覆盖本地字段 `{key}`"
+            );
+            assert_eq!(accounts[0]["access_token"], "refreshed", "官方字段仍应更新");
+        }
+    }
+
+    #[test]
+    fn collected_upsert_keeps_every_local_account_field() {
+        for key in LOCAL_ACCOUNT_FIELDS {
+            let mut existing = account("a-1", Some("uid-1"), "小明", None);
+            existing[key] = local_field_sample(key);
+            let mut accounts = vec![existing];
+
+            upsert_collected_account(
+                &mut accounts,
+                json!({"uid": "uid-1", "nickname": "小明（官方更新）", "access_token": "collected"}),
+            );
+
+            assert_eq!(
+                accounts[0][key],
+                local_field_sample(key),
+                "扫码重登 / 导入本机登录态不得覆盖本地字段 `{key}`"
+            );
+            assert_eq!(accounts[0]["nickname"], "小明（官方更新）", "官方字段仍应更新");
+        }
+    }
+
     #[test]
     fn same_nickname_with_different_uids_is_retained() {
         let mut accounts = vec![account("old", Some("uid-1"), "同名", Some("同名"))];

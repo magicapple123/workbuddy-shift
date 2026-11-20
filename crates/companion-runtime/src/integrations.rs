@@ -69,7 +69,10 @@ fn dsh_status(c: &Collector) -> (&'static str, String) {
         ),
         Ok(_) => match dsh_log_count(c) {
             0 => ("installed", "已连接（只读）；暂无会话记录".into()),
-            count => ("installed", format!("已连接（只读）；已发现 {count} 个会话日志")),
+            count => (
+                "installed",
+                format!("已连接（只读）；已发现 {count} 个会话日志"),
+            ),
         },
     }
 }
@@ -78,7 +81,10 @@ fn dsh_log_count(c: &Collector) -> usize {
     const CAP: usize = 500;
     let mut logs = Vec::new();
     collect_session_logs(&c.dsh_sessions_dir(), &mut logs);
-    logs.iter().filter(|path| is_session_log(path)).take(CAP).count()
+    logs.iter()
+        .filter(|path| is_session_log(path))
+        .take(CAP)
+        .count()
 }
 fn binary(c: &Collector) -> PathBuf {
     c.home.join(if cfg!(windows) {

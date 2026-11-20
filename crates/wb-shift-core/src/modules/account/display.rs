@@ -124,7 +124,10 @@ fn normalize_mark(raw: &Value, created_at: i64, now: i64) -> Result<Value, Strin
     if text.contains('\n') || text.contains('\r') {
         return Err("标记不能包含换行".to_string());
     }
-    let color = object.get("color").and_then(Value::as_str).unwrap_or_default();
+    let color = object
+        .get("color")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if !MARK_COLORS.contains(&color) {
         return Err("标记颜色无效".to_string());
     }

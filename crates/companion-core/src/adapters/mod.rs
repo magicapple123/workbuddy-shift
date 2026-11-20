@@ -8,10 +8,10 @@ pub use ide::{
     codebuddy_edition, codebuddy_settings_files, merge_codebuddy_ide_hooks,
     CODEBUDDY_IDE_HOOK_EVENTS,
 };
-mod workbuddy;
 mod dsh;
-pub use dsh::{collect_session_logs, is_session_log};
+mod workbuddy;
 use crate::{atomic_json, hub::Hub, now, settings, text};
+pub use dsh::{collect_session_logs, is_session_log};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::{

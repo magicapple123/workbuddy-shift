@@ -100,7 +100,53 @@
 
         assert_eq!(accounts[0]["mark"]["text"], "积分将过期");
         assert_eq!(accounts[0]["mark"]["color"], "danger");
-        assert_eq!(accounts[0]["mark"]["expiresAt"], json!(1_800_000_000_000_i64));    }
+        assert_eq!(accounts[0]["mark"]["expiresAt"], json!(1_800_000_000_000_i64));
+    }
+
+    // -----------------------------------------------------------------------
+    // 本地字段白名单不变量（`account::LOCAL_ACCOUNT_FIELDS`）
+    //
+    // 导入路径是第三处会覆盖整条记录的写回，必须与「刷新 Token」「扫码重登」保持同一份白名单。
+    // 这里按白名单逐个字段跑：新增字段却没给样例值时会直接失败并报出字段名。
+    // -----------------------------------------------------------------------
+
+    fn local_field_sample(key: &str) -> Value {
+        match key {
+            "note" => json!("工作号"),
+            "displayField" => json!("phone"),
+            "mark" => json!({
+                "text": "即将限额",
+                "color": "warning",
+                "createdAt": 1_763_654_321_000_i64,
+                "expiresAt": null,
+            }),
+            other => panic!(
+                "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在导入侧不变量测试里补样例值，\
+                 并确认旧备份导入不会覆盖它"
+            ),
+        }
+    }
+
+    #[test]
+    fn merge_keeps_every_local_account_field_from_old_backup() {
+        for key in account::LOCAL_ACCOUNT_FIELDS {
+            let mut local = record("local", Some("u1"), "旧名称", None, true);
+            local[key] = local_field_sample(key);
+            let mut accounts = vec![local];
+
+            // 旧备份只有官方字段 + token。
+            let text =
+                r#"[{ "id": "local", "uid": "u1", "nickname": "新名称", "access_token": "tok-new" }]"#;
+            merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+            assert_eq!(
+                accounts[0][key],
+                local_field_sample(key),
+                "导入旧备份不得覆盖本地字段 `{key}`"
+            );
+            assert_eq!(accounts[0]["nickname"], "新名称", "官方字段仍以备份为准");
+        }
+    }
 
     #[test]
     fn merge_appends_when_uid_missing_or_unmatched() {

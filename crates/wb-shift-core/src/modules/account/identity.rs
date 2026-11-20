@@ -114,14 +114,8 @@ pub fn upsert_collected_account(accounts: &mut Vec<Value>, mut collected: Value)
             }
         }
         // 本地展示字段（备注 / 显示选择 / 标记）不来自官方采集：采集结果缺失时保留已有值。
-        // 扫码重登 / 自动导入本机登录态都走这条路径，漏掉 `mark` 会让标记被采集结果冲掉（R5-04）。
-        for key in ["note", "displayField", "mark"] {
-            if collected.get(key).is_none() {
-                if let Some(v) = existing.get(key) {
-                    collected[key] = v.clone();
-                }
-            }
-        }
+        // 扫码重登 / 自动导入本机登录态都走这条路径，白名单见 `LOCAL_ACCOUNT_FIELDS`。
+        inherit_local_fields(existing, &mut collected);
 
         if let Some(existing_id) = get_str(existing, "id") {
             collected["id"] = Value::String(existing_id);

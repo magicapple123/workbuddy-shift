@@ -110,7 +110,11 @@ pub enum DshEvent {
     /// `turn/start`。
     Start { round: String },
     /// `tool/call`：让「进行中」有内容可显示。
-    Step { round: String, call_id: String, label: String },
+    Step {
+        round: String,
+        call_id: String,
+        label: String,
+    },
     /// `turn/end` / `session/disposed`。
     End {
         round: String,
@@ -235,13 +239,15 @@ mod tests {
     #[test]
     fn parses_v4_header_and_detects_subagents() {
         let root = parse_header(&json!({"type":"session","version":4,"id":"session-b743",
-            "cwd":"D:\\workbuddy-shift","isSeeded":false,"delegationDepth":0})).unwrap();
+            "cwd":"D:\\workbuddy-shift","isSeeded":false,"delegationDepth":0}))
+        .unwrap();
         assert_eq!(root.version, 4);
         assert_eq!(root.id, "session-b743");
         assert_eq!(root.cwd, "D:\\workbuddy-shift");
         assert_eq!(root.parent, None);
         let child = parse_header(&json!({"type":"session","version":4,"id":"febfee40",
-            "cwd":"D:\\workbuddy-shift","parentSession":"session-b743","origin":"subagent"})).unwrap();
+            "cwd":"D:\\workbuddy-shift","parentSession":"session-b743","origin":"subagent"}))
+        .unwrap();
         assert_eq!(child.parent.as_deref(), Some("session-b743"));
     }
 
@@ -272,10 +278,14 @@ mod tests {
     fn maps_turns_tools_and_end_reasons() {
         assert_eq!(
             map_event(&json!({"type":"turn/start","data":{"turn":1}})),
-            Some(DshEvent::Start { round: "turn:1".into() })
+            Some(DshEvent::Start {
+                round: "turn:1".into()
+            })
         );
         assert_eq!(
-            map_event(&json!({"type":"tool/call","data":{"turn":3,"callId":"call_00_x","name":"run_code"}})),
+            map_event(
+                &json!({"type":"tool/call","data":{"turn":3,"callId":"call_00_x","name":"run_code"}})
+            ),
             Some(DshEvent::Step {
                 round: "turn:3".into(),
                 call_id: "call_00_x".into(),
@@ -284,15 +294,27 @@ mod tests {
         );
         assert_eq!(
             map_event(&json!({"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}})),
-            Some(DshEvent::End { round: "turn:1".into(), status: "done", ended_by: None })
+            Some(DshEvent::End {
+                round: "turn:1".into(),
+                status: "done",
+                ended_by: None
+            })
         );
         assert_eq!(
-            map_event(&json!({"type":"turn/end","data":{"turn":1,"reason":{"kind":"interrupted"}}})),
-            Some(DshEvent::End { round: "turn:1".into(), status: "aborted", ended_by: None })
+            map_event(
+                &json!({"type":"turn/end","data":{"turn":1,"reason":{"kind":"interrupted"}}})
+            ),
+            Some(DshEvent::End {
+                round: "turn:1".into(),
+                status: "aborted",
+                ended_by: None
+            })
         );
         // 未知 kind 记进 endedBy，避免误报 error。
         assert_eq!(
-            map_event(&json!({"type":"turn/end","data":{"turn":2,"reason":{"kind":"quarantined"}}})),
+            map_event(
+                &json!({"type":"turn/end","data":{"turn":2,"reason":{"kind":"quarantined"}}})
+            ),
             Some(DshEvent::End {
                 round: "turn:2".into(),
                 status: "aborted",
@@ -303,11 +325,20 @@ mod tests {
 
     #[test]
     fn noisy_and_broken_lines_are_ignored() {
-        assert_eq!(map_event(&json!({"type":"step/start","data":{"turn":1,"step":1}})), None);
+        assert_eq!(
+            map_event(&json!({"type":"step/start","data":{"turn":1,"step":1}})),
+            None
+        );
         assert_eq!(map_event(&json!({"type":"unknown/future","data":{}})), None);
-        assert_eq!(map_event(&json!({"type":"tool/call","data":{"name":"x"}})), None);
+        assert_eq!(
+            map_event(&json!({"type":"tool/call","data":{"name":"x"}})),
+            None
+        );
         assert_eq!(map_event(&json!({})), None);
-        assert_eq!(map_event(&json!({"type":"approval/policy","data":{"policy":"never"}})), None);
+        assert_eq!(
+            map_event(&json!({"type":"approval/policy","data":{"policy":"never"}})),
+            None
+        );
     }
 
     #[test]
@@ -318,20 +349,33 @@ mod tests {
             DshEvent::Title(t) => assert_eq!(t.chars().count(), 240),
             other => panic!("unexpected {other:?}"),
         }
-        assert_eq!(map_event(&json!({"type":"session/title","data":{"title":"  "}})), None);
+        assert_eq!(
+            map_event(&json!({"type":"session/title","data":{"title":"  "}})),
+            None
+        );
     }
 
     #[test]
     fn approval_signal_parser_is_kept_for_a_future_version() {
         // 骨架可用，但当前 v4 日志里没有这些事件，所以适配器不会调用它。
         assert_eq!(
-            parse_approval_signal(&json!({"type":"approval/asked","data":{"callId":"c1","tool":"Bash"}})),
-            Some(ApprovalSignal::Asked { call_id: "c1".into(), tool: "Bash".into() })
+            parse_approval_signal(
+                &json!({"type":"approval/asked","data":{"callId":"c1","tool":"Bash"}})
+            ),
+            Some(ApprovalSignal::Asked {
+                call_id: "c1".into(),
+                tool: "Bash".into()
+            })
         );
         assert_eq!(
             parse_approval_signal(&json!({"type":"approval/settled","data":{"callId":"c1"}})),
-            Some(ApprovalSignal::Settled { call_id: "c1".into() })
+            Some(ApprovalSignal::Settled {
+                call_id: "c1".into()
+            })
         );
-        assert_eq!(parse_approval_signal(&json!({"type":"approval/policy"})), None);
+        assert_eq!(
+            parse_approval_signal(&json!({"type":"approval/policy"})),
+            None
+        );
     }
 }

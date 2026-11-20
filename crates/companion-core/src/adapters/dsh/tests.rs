@@ -32,10 +32,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let home = std::env::temp_dir().join(format!(
-            "dsh-{name}-{}",
-            uuid_like()
-        ));
+        let home = std::env::temp_dir().join(format!("dsh-{name}-{}", uuid_like()));
         std::fs::create_dir_all(home.join(".dsh/sessions/-D-project-/session-abc")).unwrap();
         Self { home }
     }
@@ -88,7 +85,10 @@ fn frame_walker_bounds_every_frame_and_waits_for_the_tail() {
     let all = frames(&["{\"a\":1}\n", "{\"b\":2}\n"]);
     let first = log_watch::frame_len(&all).expect("first frame");
     assert!(first < all.len());
-    assert_eq!(all.len(), first + log_watch::frame_len(&all[first..]).unwrap());
+    assert_eq!(
+        all.len(),
+        first + log_watch::frame_len(&all[first..]).unwrap()
+    );
     // 尾部半帧：不返回长度，因此 offset 不会越过它。
     assert_eq!(log_watch::frame_len(&all[..all.len() - 4]), Some(first));
     assert_eq!(log_watch::frame_len(&all[..3]), None);
@@ -143,7 +143,10 @@ fn history_is_not_imported_on_the_first_scan_but_a_running_turn_is() {
     ]));
     // 历史文件的 mtime 是 10 分钟前。
     let past = SystemTime::now() - std::time::Duration::from_secs(600);
-    let file = std::fs::OpenOptions::new().write(true).open(old.log()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(old.log())
+        .unwrap();
     file.set_modified(past).unwrap();
     let mut c = old.collector();
     c.poll_dsh().unwrap();
@@ -204,7 +207,10 @@ fn subagents_unknown_versions_and_broken_lines_are_skipped() {
     c.poll_dsh().unwrap();
     assert!(session(&c, "session-child").is_none(), "子代理不建档");
     assert!(session(&c, "session-future").is_none(), "未知版本不建档");
-    assert!(session(&c, "session-broken").is_some(), "坏行后面的正常行仍要解析");
+    assert!(
+        session(&c, "session-broken").is_some(),
+        "坏行后面的正常行仍要解析"
+    );
     assert_eq!(c.hub.sources["dsh"]["state"], "error");
     assert!(text(&c.hub.sources["dsh"]["detail"]).contains("v9"));
 }
@@ -305,7 +311,10 @@ fn real_dsh_home_is_scanned_without_history() {
     let mut files = Vec::new();
     collect_session_logs(&dir, &mut files);
     if files.is_empty() {
-        println!("{} 下没有会话日志，跳过（DSH 未安装或从未用过）", dir.display());
+        println!(
+            "{} 下没有会话日志，跳过（DSH 未安装或从未用过）",
+            dir.display()
+        );
         let _ = std::fs::remove_dir_all(&home);
         return;
     }
@@ -321,7 +330,11 @@ fn real_dsh_home_is_scanned_without_history() {
     );
     // 历史会话一个都不能进浮窗（本机 346 个会话的 mtime 都远早于 2 分钟窗口）。
     assert!(c.hub.sessions.is_empty(), "首扫不得导入历史会话");
-    assert_eq!(c.dsh_log_watch.files.len(), files.len(), "每个文件都要登记偏移");
+    assert_eq!(
+        c.dsh_log_watch.files.len(),
+        files.len(),
+        "每个文件都要登记偏移"
+    );
 
     let mut parents = 0;
     for path in &files {

@@ -16,7 +16,10 @@ const DEFAULT_MESSAGE: &str = "当前系统版本过低，界面无法正常显�
 /// `detail` 由 `index.html` 的内联检测脚本算出（含实测到的 WebKit 版本），前端原样带过来；
 /// 弹出失败不影响已经渲染的内联提示页，因此这里只把错误字符串化后返回。
 #[tauri::command(rename_all = "camelCase")]
-pub fn report_unsupported_webview(app: tauri::AppHandle, detail: Option<String>) -> Result<(), String> {
+pub fn report_unsupported_webview(
+    app: tauri::AppHandle,
+    detail: Option<String>,
+) -> Result<(), String> {
     let message = detail
         .as_deref()
         .map(str::trim)

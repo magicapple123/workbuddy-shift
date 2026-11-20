@@ -75,16 +75,9 @@ pub(super) fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> Me
             let mut replaced = item.clone();
             // 本地展示字段（备注 / 显示选择 / 标记）：备份未携带时保留本地值；
             // 备份自带则以备份为准（导入即恢复用户当时的展示配置）。
-            // `mark` 必须在这里：导入**旧备份**（不含 mark）时否则会把本地标记整条覆盖掉（R5-04）。
-            if let Some(obj) = replaced.as_object_mut() {
-                for key in ["note", "displayField", "mark"] {
-                    if !obj.contains_key(key) {
-                        if let Some(v) = existing.get(key) {
-                            obj.insert(key.to_string(), v.clone());
-                        }
-                    }
-                }
-            }
+            // 白名单见 `account::LOCAL_ACCOUNT_FIELDS`——导入**旧备份**（不含 mark）时
+            // 漏掉 `mark` 会把本地标记整条覆盖掉（R5-04）。
+            account::inherit_local_fields(existing, &mut replaced);
             // 账号库不允许出现无 id 记录（删除按 id、列表 key、导出选择都依赖
             // id）：优先保留本地 id；本地也是无 id 的历史脏数据时补一个。
             if account::get_str(&replaced, "id").is_none() {

@@ -363,7 +363,9 @@ mod tests {
     /// One running WorkBuddy session whose round started 10s ago.
     fn started(hub: &mut Hub) -> i64 {
         let start = now() - 10_000;
-        hub.ingest(json!({"source":"workbuddy","sessionId":"s","type":"start","roundId":"r1","ts":start}));
+        hub.ingest(
+            json!({"source":"workbuddy","sessionId":"s","type":"start","roundId":"r1","ts":start}),
+        );
         start
     }
 
@@ -377,13 +379,29 @@ mod tests {
     }
 
     fn row(snapshot: &Value) -> Value {
-        snapshot["sessions"].as_array().unwrap().iter().find(|s| s["id"] == "workbuddy:s").cloned().unwrap_or(Value::Null)
+        snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "workbuddy:s")
+            .cloned()
+            .unwrap_or(Value::Null)
     }
     fn ids(snapshot: &Value) -> Vec<String> {
-        row(snapshot)["pending"].as_array().into_iter().flatten().map(|p| text(&p["id"])).collect()
+        row(snapshot)["pending"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| text(&p["id"]))
+            .collect()
     }
     fn waits(snapshot: &Value) -> usize {
-        snapshot["events"].as_array().unwrap().iter().filter(|e| e["kind"] == json!("wait")).count()
+        snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == json!("wait"))
+            .count()
     }
 
     #[test]
@@ -401,7 +419,13 @@ mod tests {
         assert_eq!(waits(&snapshot), 1);
         // The held request is tracked, not dropped; the projection compares
         // against `graceUntil`, so it appears once its own window elapses.
-        assert_eq!(hub.sessions["workbuddy:s"]["pending"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            hub.sessions["workbuddy:s"]["pending"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -443,15 +467,33 @@ mod tests {
     #[test]
     fn pending_kind_is_inferred_for_sources_that_do_not_stamp_it() {
         // A sandbox approval log line carries only a tool name.
-        assert_eq!(pending_kind(&json!({"tool":"Bash","text":"沙箱审批待确认：Bash"})), KIND_PERMISSION);
+        assert_eq!(
+            pending_kind(&json!({"tool":"Bash","text":"沙箱审批待确认：Bash"})),
+            KIND_PERMISSION
+        );
         assert_eq!(pending_kind(&json!({"tool":"permission"})), KIND_PERMISSION);
-        assert_eq!(pending_kind(&json!({"tool":"notification"})), KIND_PERMISSION);
+        assert_eq!(
+            pending_kind(&json!({"tool":"notification"})),
+            KIND_PERMISSION
+        );
         assert_eq!(pending_kind(&json!({"tool":"ask"})), KIND_QUESTION);
-        assert_eq!(pending_kind(&json!({"tool":"AskUserQuestion"})), KIND_QUESTION);
-        assert_eq!(pending_kind(&json!({"tool":"x","questions":[{"text":"?"}]})), KIND_QUESTION);
+        assert_eq!(
+            pending_kind(&json!({"tool":"AskUserQuestion"})),
+            KIND_QUESTION
+        );
+        assert_eq!(
+            pending_kind(&json!({"tool":"x","questions":[{"text":"?"}]})),
+            KIND_QUESTION
+        );
         // An explicit stamp always wins over the inference.
-        assert_eq!(pending_kind(&json!({"tool":"Bash","kind":"question"})), KIND_QUESTION);
-        assert_eq!(pending_kind(&json!({"tool":"ask","kind":"permission"})), KIND_PERMISSION);
+        assert_eq!(
+            pending_kind(&json!({"tool":"Bash","kind":"question"})),
+            KIND_QUESTION
+        );
+        assert_eq!(
+            pending_kind(&json!({"tool":"ask","kind":"permission"})),
+            KIND_PERMISSION
+        );
     }
 
     #[test]

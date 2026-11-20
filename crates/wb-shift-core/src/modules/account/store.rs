@@ -102,16 +102,9 @@ pub(super) fn upsert_account_in(accounts: &mut Vec<Value>, updated: &Value) {
         let mut next = updated.clone();
         inherit_existing_variant(&accounts[index], &mut next);
         // 本地展示字段（备注 / 显示选择 / 标记）不从官方数据来：updated 缺失时保留已有值。
-        // 刷新 Token 走的就是这条路径，漏掉 `mark` 会让标记在刷新后被整条记录覆盖掉（R5-04）。
-        if let Some(obj) = next.as_object_mut() {
-            for key in ["note", "displayField", "mark"] {
-                if !obj.contains_key(key) {
-                    if let Some(v) = accounts[index].get(key) {
-                        obj.insert(key.to_string(), v.clone());
-                    }
-                }
-            }
-        }
+        // 刷新 Token 走的就是这条路径，白名单见 `LOCAL_ACCOUNT_FIELDS`（漏一个字段
+        // 就会让它在刷新后被整条记录覆盖掉，R5-04 的 `mark` 即为此）。
+        inherit_local_fields(&accounts[index], &mut next);
         // uid 回退时保留本地稳定 id，即使刷新对象携带了另一 id；历史脏数据
         // 的空 id 不继承，优先保留刷新对象的有效 id，否则生成新 id。
         if uid_matched_index.is_some() {

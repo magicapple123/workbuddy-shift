@@ -1,6 +1,6 @@
 pub mod account;
-pub mod automation_sync;
 pub mod auth_file;
+pub mod automation_sync;
 pub mod checkin;
 pub mod codebuddy_cli;
 pub mod codebuddy_cn_ide;
