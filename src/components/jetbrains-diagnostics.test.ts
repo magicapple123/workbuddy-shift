@@ -23,11 +23,20 @@ function dir(overrides: Partial<JetbrainsDiagnostics["scannedDirs"][number]> = {
   };
 }
 
+/** 两个配置根（JetBrains / Google）：Android Studio 落在 Google 根。 */
+function roots(jetbrainsExists = true, googleExists = false) {
+  return [
+    { path: "C:/Users/demo/AppData/Roaming/JetBrains", exists: jetbrainsExists },
+    { path: "C:/Users/demo/AppData/Roaming/Google", exists: googleExists },
+  ];
+}
+
 function diagnostics(overrides: Partial<JetbrainsDiagnostics> = {}): JetbrainsDiagnostics {
   const scannedDirs = overrides.scannedDirs ?? [dir()];
+  const rootStates = overrides.rootStates ?? roots();
   return {
-    configRoot: "C:/Users/demo/AppData/Roaming/JetBrains",
-    configRootExists: true,
+    configRoots: rootStates.map((root) => root.path),
+    rootStates,
     scannedDirs,
     acceptedDirs: scannedDirs.filter((item) => item.accepted).map((item) => item.name),
     pluginInstalledDirs: scannedDirs.filter((item) => item.pluginInstalled).map((item) => item.name),
@@ -38,23 +47,31 @@ function diagnostics(overrides: Partial<JetbrainsDiagnostics> = {}): JetbrainsDi
 }
 
 function status(overrides: Partial<JetbrainsStatus> = {}): JetbrainsStatus {
+  // 显式传 `diagnostics: null` 表示「旧后端 / 演示数据」：不能用 `??` 兜底成默认值。
+  const diagnosticsValue = overrides.diagnostics === undefined ? diagnostics() : overrides.diagnostics;
   return {
     installed: true,
     pluginInstalled: true,
     running: false,
     loggedIn: true,
-    configRoot: "C:/Users/demo/AppData/Roaming/JetBrains",
+    configRoots: diagnosticsValue?.configRoots ?? ["C:/Users/demo/AppData/Roaming/JetBrains"],
     targets: [],
     activeAccountId: null,
     activeAccountName: null,
-    diagnostics: diagnostics(),
+    diagnostics: diagnosticsValue,
     ...overrides,
   };
 }
 
 describe("classifyJetbrainsState", () => {
   it("没有配置根或没有任何子目录 → 未安装", () => {
-    const empty = status({ diagnostics: diagnostics({ configRootExists: false, scannedDirs: [] }) });
+    const empty = status({
+      diagnostics: diagnostics({
+        scannedDirs: [],
+        rootStates: roots(false, false),
+        configRoots: [],
+      }),
+    });
     expect(classifyJetbrainsState(empty).kind).toBe("missing");
     expect(classifyJetbrainsState(empty).hint).toContain("安装");
 
@@ -64,6 +81,18 @@ describe("classifyJetbrainsState", () => {
 
     // 状态还没拿到时不能说「可切换」。
     expect(classifyJetbrainsState(null).kind).toBe("missing");
+  });
+
+  it("只有 Google 根存在（只装了 Android Studio）→ 仍算已安装，不是未安装", () => {
+    const asOnly = status({
+      pluginInstalled: false,
+      targets: [],
+      diagnostics: diagnostics({
+        rootStates: roots(false, true),
+        scannedDirs: [dir({ name: "AndroidStudio2024.1", pluginDirs: [], pluginInstalled: false })],
+      }),
+    });
+    expect(classifyJetbrainsState(asOnly).kind).toBe("no-plugin");
   });
 
   it("目录名全部不被接受 → 未装插件（带目录名，便于反馈）", () => {
@@ -157,5 +186,19 @@ describe("JetbrainsDiagnosticsPanel", () => {
     expect(markup).not.toContain("data-state=");
     expect(markup).toContain("<details");
     expect(markup).toContain("IntelliJIdea2026.3");
+  });
+
+  it("两个配置根逐行显示存在性（JetBrains 存在、Google 不存在）", () => {
+    const markup = renderToStaticMarkup(
+      createElement(JetbrainsDiagnosticsPanel, {
+        status: status({ diagnostics: diagnostics({ rootStates: roots(true, false) }) }),
+        defaultOpen: true,
+      }),
+    );
+    expect(markup).toContain("配置根 2 个");
+    expect(markup).toContain("C:/Users/demo/AppData/Roaming/JetBrains");
+    expect(markup).toContain("C:/Users/demo/AppData/Roaming/Google");
+    expect(markup).toContain("存在");
+    expect(markup).toContain("不存在");
   });
 });

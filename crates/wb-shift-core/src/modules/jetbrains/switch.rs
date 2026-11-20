@@ -24,8 +24,21 @@ pub(super) fn validate_switch_target(
         return Err("账号 access_token 为空".to_string());
     }
 
-    if jetbrains_config_root().is_none() {
-        return Err("无法定位 JetBrains 配置目录".to_string());
+    // 两个配置根都定位不到 → 无法切换；只有**两个根都不存在**时报错，单个根缺失
+    // （如只装了 IDEA 没装 Android Studio）属于正常情况。
+    let roots = jetbrains_config_roots();
+    if roots.is_empty() {
+        return Err("无法定位 JetBrains 配置目录（未取得用户配置目录）".to_string());
+    }
+    if roots.iter().all(|root| !root.exists()) {
+        let paths: Vec<String> = roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect();
+        return Err(format!(
+            "JetBrains 配置根不存在（已检查：{}）。请先安装并至少启动一次 IDE 或 Android Studio。",
+            paths.join("、")
+        ));
     }
     let targets: Vec<Target> = list_targets()
         .into_iter()
@@ -33,7 +46,7 @@ pub(super) fn validate_switch_target(
         .collect();
     if targets.is_empty() {
         return Err(
-            "未找到已安装 CodeBuddy 插件的 JetBrains IDE。请先在 IDEA / PyCharm 中安装「Tencent Cloud CodeBuddy」插件后重试。".to_string(),
+            "未找到已安装 CodeBuddy 插件的 JetBrains IDE。请先在 JetBrains 系 IDE（IDEA / PyCharm / GoLand 等）或 Android Studio 中安装「Tencent Cloud CodeBuddy」插件后重试。".to_string(),
         );
     }
     let targets = filter_targets_by_selection(targets, config_dirs)?;
@@ -175,12 +188,22 @@ pub(super) fn relaunch_closed_on_error(closed: &[RunningIde], error: String) -> 
 // 失败诊断：每个失败分支写 error.log，并附「已识别 N 个 IDE」
 // ---------------------------------------------------------------------------
 
-/// 失败现场：配置根、配置目录清单与插件命中、运行实例映射结果（不含 secret）。
+/// 失败现场：配置根（全部候选根）、配置目录清单与插件命中、运行实例映射结果（不含 secret）。
 pub(super) fn failure_context(detected: &[Target], running: &[RunningIde]) -> String {
-    let root = jetbrains_config_root()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "（无法定位）".to_string());
-    let mut lines = vec![format!("configRoot={root}")];
+    let roots = jetbrains_config_roots();
+    let root_text = if roots.is_empty() {
+        "（无法定位）".to_string()
+    } else {
+        roots
+            .iter()
+            .map(|root| root.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    let mut lines = vec![format!("configRoots={root_text}")];
+    for root in &roots {
+        lines.push(format!("root={} exists={}", root.display(), root.exists()));
+    }
     if detected.is_empty() {
         lines.push("targets=(空)".to_string());
     } else {
@@ -233,7 +256,7 @@ pub(super) fn failure_log_detail(summary: &str, message: &str, detail: &str) -> 
     format!("{summary}\n错误：{message}\n{detail}")
 }
 
-/// 切换 JetBrains IDE（IDEA / PyCharm）CodeBuddy 插件账号。
+/// 切换 JetBrains 系 IDE（IDEA / PyCharm / GoLand / Android Studio 等）CodeBuddy 插件账号。
 ///
 /// `config_dirs`：目标配置目录名列表（如 `["PyCharm2026.2"]`）。`None` / 空列表
 /// = 全部装了插件的 IDE；非空时只写所选目录、只关闭/重开这些目录的运行实例。

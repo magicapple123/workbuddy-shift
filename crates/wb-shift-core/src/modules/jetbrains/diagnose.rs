@@ -9,14 +9,17 @@ use super::*;
 /// status() 里的 `diagnostics` 字段：切换列表为空 / 映射失败时的第一现场。
 ///
 /// 结构一旦变化要同步 `src/lib/types/clients.ts` 的 `JetbrainsDiagnostics`。
+///
+/// 配置根是**数组**（JetBrains 与 Google 两个根，Android Studio 在后者），因此
+/// `configRoots` 与 `rootStates` 成对输出：前者给机器（前端拼路径），后者给用户
+/// （逐根显示存在性）。
 pub(super) fn diagnostics_json(targets: &[Target], running: &[RunningIde]) -> Value {
-    let root = jetbrains_config_root();
-    let root_exists = root.as_deref().is_some_and(Path::exists);
-    let scanned: Vec<DirScan> = root
-        .as_deref()
-        .filter(|p| p.exists())
-        .map(scan_config_root)
-        .unwrap_or_default();
+    let root_states = config_root_states();
+    let roots: Vec<String> = root_states
+        .iter()
+        .map(|(root, _)| root.to_string_lossy().to_string())
+        .collect();
+    let scanned: Vec<DirScan> = scan_config_roots();
     let accepted: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
     let plugin_dirs: Vec<&str> = targets
         .iter()
@@ -24,8 +27,14 @@ pub(super) fn diagnostics_json(targets: &[Target], running: &[RunningIde]) -> Va
         .map(|t| t.name.as_str())
         .collect();
     json!({
-        "configRoot": root.as_deref().map(|p| p.to_string_lossy()),
-        "configRootExists": root_exists,
+        "configRoots": roots,
+        "rootStates": root_states
+            .iter()
+            .map(|(root, exists)| json!({
+                "path": root.to_string_lossy(),
+                "exists": exists,
+            }))
+            .collect::<Vec<_>>(),
         // 子目录全量清单 + 为什么被拒（accepted=false），用于区分「没装插件」与「没识别到目录」。
         "scannedDirs": scanned.iter().map(DirScan::to_json).collect::<Vec<_>>(),
         "acceptedDirs": accepted,
@@ -102,9 +111,15 @@ pub(super) fn unmapped_running_hint(unmapped: &[RunningIde]) -> String {
 /// 「已识别 N 个 IDE：A、B」——失败文案的公共后缀（区分「没识别到」与「操作错了」）。
 pub(super) fn describe_detected(targets: &[Target]) -> String {
     if targets.is_empty() {
-        let root = jetbrains_config_root()
+        let roots: Vec<String> = jetbrains_config_roots()
+            .iter()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "（无法定位）".to_string());
+            .collect();
+        let root = if roots.is_empty() {
+            "（无法定位）".to_string()
+        } else {
+            roots.join("、")
+        };
         return format!("已识别 0 个 JetBrains 配置目录（配置根：{root}）");
     }
     let names: Vec<String> = targets

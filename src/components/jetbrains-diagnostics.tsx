@@ -49,7 +49,11 @@ export function classifyJetbrainsState(status?: JetbrainsStatus | null): Jetbrai
     };
   }
 
-  const rootExists = diagnostics ? diagnostics.configRootExists : status.installed;
+  // 配置根是数组（JetBrains 与 Google 两个根）：任一存在就算「装了 IDE」，
+  // 全都不存在才算未安装。旧后端 / 演示数据没有 `rootStates` 时退回 `installed`。
+  const rootStates = diagnostics?.rootStates ?? [];
+  const rootExists =
+    rootStates.length > 0 ? rootStates.some((root) => root.exists) : status.installed;
   // 子目录清单是 `diagnostics` 才有的信息：没有它时只能按 `installed` 判定，
   // 否则「旧后端 / 演示数据」会被误报成「未安装」。
   const noDirs = diagnostics ? scanned.length === 0 : !status.installed;
@@ -57,7 +61,7 @@ export function classifyJetbrainsState(status?: JetbrainsStatus | null): Jetbrai
     return {
       kind: "missing",
       title: "未检测到 JetBrains IDE",
-      hint: "本机没有 IDEA / PyCharm 的用户配置目录：请先安装并至少启动一次。",
+      hint: "本机没有 JetBrains 系 IDE / Android Studio 的用户配置目录：请先安装并至少启动一次。",
     };
   }
 
@@ -75,7 +79,7 @@ export function classifyJetbrainsState(status?: JetbrainsStatus | null): Jetbrai
     return {
       kind: "no-plugin",
       title: "已安装 JetBrains IDE，但未检测到 CodeBuddy 插件",
-      hint: "请在 IDEA / PyCharm 的插件市场安装「Tencent Cloud CodeBuddy」后重试。",
+      hint: "请在 JetBrains 系 IDE（IDEA / PyCharm / GoLand 等）或 Android Studio 的插件市场安装「Tencent Cloud CodeBuddy」后重试。",
     };
   }
 
@@ -83,7 +87,7 @@ export function classifyJetbrainsState(status?: JetbrainsStatus | null): Jetbrai
     return {
       kind: "ready",
       title: "可切换（IDE 正在运行）",
-      hint: "切换时会先保存并退出 IDEA / PyCharm，写入后自动重新打开。",
+      hint: "切换时会先保存并退出运行中的 IDE / Android Studio，写入后自动重新打开。",
     };
   }
 
@@ -115,6 +119,8 @@ export function JetbrainsDiagnosticsPanel({ status, defaultOpen = false }: Props
   const Icon = STATE_ICON[summary.kind];
   const scanned = diagnostics?.scannedDirs ?? [];
   const running = diagnostics?.running ?? [];
+  /** 两个配置根（JetBrains / Google）各自的路径与存在性，逐行展示。 */
+  const rootStates = diagnostics?.rootStates ?? [];
   /** 「可切换」时目标列表已经说明了状态，只有异常态才额外顶一行结论（避免重复）。 */
   const showSummary = defaultOpen || summary.kind !== "ready";
 
@@ -145,14 +151,24 @@ export function JetbrainsDiagnosticsPanel({ status, defaultOpen = false }: Props
           </summary>
 
           <div className="mt-2 space-y-2 leading-5">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-muted-foreground">配置根</span>
-              <code className="break-all rounded bg-background/70 px-1.5 py-0.5">
-                {diagnostics.configRoot ?? "（无法定位）"}
-              </code>
-              <Badge variant={diagnostics.configRootExists ? "secondary" : "warning"}>
-                {diagnostics.configRootExists ? "存在" : "不存在"}
-              </Badge>
+            <div className="space-y-1">
+              <p className="text-muted-foreground">配置根 {rootStates.length} 个</p>
+              {rootStates.length === 0 ? (
+                <p className="text-muted-foreground">（无法定位配置根）</p>
+              ) : (
+                <ul className="space-y-1">
+                  {rootStates.map((root) => (
+                    <li key={root.path} className="flex flex-wrap items-center gap-1.5">
+                      <code className="break-all rounded bg-background/70 px-1.5 py-0.5">
+                        {root.path}
+                      </code>
+                      <Badge variant={root.exists ? "secondary" : "outline"}>
+                        {root.exists ? "存在" : "不存在"}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
             <div className="space-y-1">
@@ -192,7 +208,7 @@ export function JetbrainsDiagnosticsPanel({ status, defaultOpen = false }: Props
             <div className="space-y-1">
               <p className="text-muted-foreground">运行中的 IDE 进程 {running.length} 个</p>
               {running.length === 0 ? (
-                <p className="text-muted-foreground">没有检测到 IDEA / PyCharm 进程。</p>
+                <p className="text-muted-foreground">没有检测到 JetBrains 系 IDE / Android Studio 进程。</p>
               ) : (
                 <ul className="space-y-1">
                   {running.map((proc) => (

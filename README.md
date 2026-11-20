@@ -67,7 +67,7 @@ xattr -rd com.apple.quarantine "/Applications/WorkBuddy Shift.app"
 | CodeBuddy IDE（国内版 / 国际版） | ✅ | ✅ | ✅ | — | ✅ |
 | CodeBuddy CLI | ✅ | — | — | ✅ | — |
 | VS Code CodeBuddy 插件 | ✅ | ✅ | ✅ | — | ✅ |
-| JetBrains IDE 插件（IDEA / PyCharm） | ✅ | — | ✅ | — | — |
+| JetBrains IDE 插件（IDE 全家桶 / Android Studio） | ✅ | — | ✅ | — | — |
 
 ✅ 表示支持，— 表示不支持。设置 →「支持工具」可按客户端逐个开启 / 关闭入口；关闭后该端入口与状态轮询一并隐藏，不影响账号库与其它端；JetBrains 端默认关闭，可在设置中随时打开。
 

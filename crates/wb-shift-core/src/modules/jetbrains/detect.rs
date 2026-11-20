@@ -9,23 +9,44 @@ use super::status::*;
 use super::switch::*;
 use super::*;
 
-/// JetBrains 配置根目录（应用级，各产品 `<产品><版本>` 子目录并列）。
+/// 配置根目录名（平台基础目录下的并列子目录）。
 ///
-/// - Windows: `%APPDATA%\JetBrains`
-/// - macOS: `~/Library/Application Support/JetBrains`
-/// - Linux: `$XDG_CONFIG_HOME/JetBrains`（缺省 `~/.config/JetBrains`）
-pub fn jetbrains_config_root() -> Option<PathBuf> {
+/// - `JetBrains`：IDEA / PyCharm / GoLand 等 JetBrains 自家 IDE；
+/// - `Google`：Android Studio（Google 发行，配置写在 `.../Google/AndroidStudio<版本>`）。
+const CONFIG_ROOT_DIR_NAMES: [&str; 2] = ["JetBrains", "Google"];
+
+/// JetBrains 系配置根（应用级，各产品 `<产品><版本>` 子目录并列）。
+///
+/// 平台基础目录：
+/// - Windows: `%APPDATA%`
+/// - macOS: `~/Library/Application Support`
+/// - Linux: `$XDG_CONFIG_HOME`（缺省 `~/.config`）
+///
+/// 返回**全部候选根**（通常 2 个，可能不存在）；调用方必须逐个扫描，不能只取第一个
+/// ——只扫 JetBrains 根会把 Android Studio 整体判成「未安装」。
+pub fn jetbrains_config_roots() -> Vec<PathBuf> {
+    let Some(base) = config_root_base() else {
+        return Vec::new();
+    };
+    CONFIG_ROOT_DIR_NAMES
+        .iter()
+        .map(|name| base.join(name))
+        .collect()
+}
+
+/// 配置根的平台基础目录；拿不到（无法定位用户目录）时返回 `None`。
+fn config_root_base() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        Some(crate::modules::config::home_dir().join("Library/Application Support/JetBrains"))
+        Some(crate::modules::config::home_dir().join("Library/Application Support"))
     }
     #[cfg(target_os = "windows")]
     {
-        dirs::data_dir().map(|d| d.join("JetBrains"))
+        dirs::data_dir()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        dirs::config_dir().map(|d| d.join("JetBrains"))
+        dirs::config_dir()
     }
 }
 
@@ -203,16 +224,6 @@ pub(super) fn read_product_info(root: &Path) -> ProductInfo {
 #[cfg(target_os = "windows")]
 pub(super) fn install_root_from_exe(exe: &Path) -> Option<PathBuf> {
     exe.parent().and_then(Path::parent).map(Path::to_path_buf)
-}
-
-/// 按 exe 名推出的产品配置目录前缀（社区版另判，见 [`fallback_config_dir_name`]）。
-fn product_prefix_from_exe(exe: &Path) -> Option<&'static str> {
-    let name = exe.file_name()?.to_string_lossy().to_ascii_lowercase();
-    match name.as_str() {
-        "idea64.exe" | "idea.exe" | "idea" => Some("IntelliJIdea"),
-        "pycharm64.exe" | "pycharm.exe" | "pycharm" => Some("PyCharm"),
-        _ => None,
-    }
 }
 
 /// 安装目录名里的版本号（取最后一个形如 `2026.3[-eap]` 的空白分隔 token）。
@@ -397,10 +408,20 @@ pub(super) fn running_ide_from_row(row: &process::WindowsProcessRow) -> RunningI
 #[cfg(target_os = "windows")]
 pub(super) fn windows_ide_process_rows() -> Vec<process::WindowsProcessRow> {
     let self_pid = std::process::id();
-    let script = "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | \
-                  Where-Object { $_.Name -in 'idea64.exe','pycharm64.exe','idea.exe','pycharm.exe' } | \
-                  ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, $_.Name, $_.ExecutablePath }";
-    let mut rows: Vec<_> = process::ps_output(script, 8)
+    // 映像名清单由 `PRODUCTS` 派生（16 个产品 × 64/32 位），PowerShell 的 `-in`、
+    // tasklist 兜底与结果过滤三处共用同一份，杜绝「补了产品但漏了某一处」。
+    let images = windows_image_names();
+    let image_filter: String = images
+        .iter()
+        .map(|image| format!("'{image}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Name -in {image_filter} }} | \
+         ForEach-Object {{ '{{0}}|{{1}}|{{2}}' -f $_.ProcessId, $_.Name, $_.ExecutablePath }}"
+    );
+    let mut rows: Vec<_> = process::ps_output(&script, 8)
         .map(|stdout| {
             process::parse_windows_process_rows(&stdout)
                 .into_iter()
@@ -410,15 +431,13 @@ pub(super) fn windows_ide_process_rows() -> Vec<process::WindowsProcessRow> {
         .unwrap_or_default();
     if rows.is_empty() {
         // CIM 不可用时退回 tasklist（拿到 PID 关闭，但丢失 exe 路径 → 无法重开）。
-        for image in ["idea64.exe", "pycharm64.exe", "idea.exe", "pycharm.exe"] {
+        for image in &images {
             rows.extend(process::windows_tasklist_image_rows(image));
         }
     }
     rows.retain(|row| {
         let name = row.name.trim();
-        WINDOWS_IMAGE_NAMES
-            .iter()
-            .any(|n| name.eq_ignore_ascii_case(n))
+        images.iter().any(|n| name.eq_ignore_ascii_case(n))
     });
     rows
 }
@@ -436,16 +455,8 @@ pub(super) fn running_ides() -> Vec<RunningIde> {
     {
         // 进程 cmdline 形如 `/Applications/IntelliJ IDEA.app/Contents/MacOS/idea`；
         // bundle 路径回溯后读 `Contents/Resources/product-info.json`。
-        // 产品名集合（.app 名）：IntelliJ IDEA、IntelliJ IDEA CE、PyCharm、PyCharm CE。
-        let patterns: Vec<String> = [
-            "IntelliJ IDEA.app/Contents/MacOS",
-            "IntelliJ IDEA CE.app/Contents/MacOS",
-            "PyCharm.app/Contents/MacOS",
-            "PyCharm CE.app/Contents/MacOS",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        // `.app` 名清单由 `products.rs` 的产品表派生（含 `Android Studio.app`）。
+        let patterns: Vec<String> = macos_process_patterns();
         let mut rows = Vec::new();
         for (pid, args) in process::macos_rows_by_patterns(&patterns) {
             let bundle = process::extract_app_bundle_from_args(&args);
@@ -483,7 +494,8 @@ pub(super) fn running_ides() -> Vec<RunningIde> {
                     _ => continue,
                 };
                 let lower = cmdline.to_ascii_lowercase();
-                if !["idea", "pycharm"].iter().any(|name| {
+                // 可执行名清单由 `PRODUCTS` 派生（含 `studio`、`appcode` 等 16 个产品）。
+                if !linux_executable_names().iter().any(|name| {
                     lower.contains(&format!("/bin/{name} "))
                         || lower.contains(&format!("/bin/{name}\""))
                         || lower.ends_with(&format!("/bin/{name}"))
@@ -573,6 +585,42 @@ pub(super) fn scan_config_root(root: &Path) -> Vec<DirScan> {
     scans
 }
 
+/// 逐个配置根的存在性结论（诊断输出 `rootStates`）。
+///
+/// 保留「路径 + 是否存在」两段信息：只给一个布尔值的话，用户看不出我们到底扫了哪些位置
+/// ——Android Studio 的根不存在时，用户会以为工具没支持 AS。
+pub(super) fn config_root_states() -> Vec<(PathBuf, bool)> {
+    jetbrains_config_roots()
+        .into_iter()
+        .map(|root| {
+            let exists = root.exists();
+            (root, exists)
+        })
+        .collect()
+}
+
+/// 遍历**全部存在的**配置根，汇总子目录扫描结论（诊断用）。
+///
+/// 两个根下同名目录只保留第一个（与 [`list_targets`] 同口径），否则诊断清单里会出现
+/// 两行同名条目，用户无法判断哪一行才是真正被写入的目标。
+pub(super) fn scan_config_roots() -> Vec<DirScan> {
+    scan_config_roots_from(&jetbrains_config_roots())
+}
+
+/// [`scan_config_roots`] 的可注入版本（用例传临时根，不读真实 `%APPDATA%`）。
+pub(super) fn scan_config_roots_from(roots: &[PathBuf]) -> Vec<DirScan> {
+    let mut scans: Vec<DirScan> = Vec::new();
+    for root in roots.iter().filter(|root| root.exists()) {
+        for scan in scan_config_root(root) {
+            if !scans.iter().any(|known| known.name == scan.name) {
+                scans.push(scan);
+            }
+        }
+    }
+    scans.sort_by(|a, b| a.name.cmp(&b.name));
+    scans
+}
+
 /// 切换目标：一个装有（或可装）CodeBuddy 插件的产品配置目录。
 #[derive(Debug, Clone)]
 pub(super) struct Target {
@@ -601,28 +649,42 @@ impl Target {
     }
 }
 
-/// 扫描配置根，列出受支持产品的配置目录（存在即列出，无论是否装插件）。
+/// 扫描全部配置根，列出受支持产品的配置目录（存在即列出，无论是否装插件）。
+///
+/// 两个根都扫（`.../JetBrains` 与 `.../Google`）：Android Studio 只在后者下面，
+/// 只看第一个根会把 AS 用户整体判成「未安装」。
+/// 两个根下出现同名目录（历史迁移残留）时只认**先命中的那个**（JetBrains 根优先），
+/// 否则切换列表里会出现两行同名目标、写入时后一行静默覆盖前一行。
 pub(super) fn list_targets() -> Vec<Target> {
-    let Some(root) = jetbrains_config_root() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
-    let mut targets: Vec<Target> = entries
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| {
+    list_targets_from(&jetbrains_config_roots())
+}
+
+/// [`list_targets`] 的可注入版本：`roots` 由调用方给（用例传临时根）。
+pub(super) fn list_targets_from(roots: &[PathBuf]) -> Vec<Target> {
+    let mut targets: Vec<Target> = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
-            (entry.path(), name)
-        })
-        .filter(|(_, name)| is_supported_config_dir_name(name))
-        .map(|(path, name)| Target {
-            plugin_installed: plugin_dir(&path).is_some(),
-            config_dir: path,
-            name,
-        })
-        .collect();
+            if !is_supported_config_dir_name(&name) {
+                continue;
+            }
+            if targets.iter().any(|known| known.name == name) {
+                continue;
+            }
+            targets.push(Target {
+                plugin_installed: plugin_dir(&path).is_some(),
+                config_dir: path,
+                name,
+            });
+        }
+    }
     targets.sort_by(|a, b| a.name.cmp(&b.name));
     targets
 }

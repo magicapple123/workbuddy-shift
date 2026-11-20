@@ -193,7 +193,8 @@ export function accountsDemoResponse(
       pluginInstalled: true,
       running: false,
       loggedIn: true,
-      configRoot: "/demo/JetBrains",
+      // 两个配置根：演示数据给全，避免演示页把「只有 JetBrains 根」当成唯一口径。
+      configRoots: ["/demo/JetBrains", "/demo/Google"],
       targets: [
         {
           configDir: "PyCharm2026.2",

@@ -9,9 +9,14 @@
 //! `Tencent-Cloud.coding-copilot.new.accessToken`，值为完整会话 JSON——载荷构造
 //! 直接复用 [`crate::modules::vscode_ext::build_ext_session_json`]。
 //!
-//! 支持的产品（按配置目录名前缀）：`IntelliJIdea`（IDEA 旗舰）、`IdeaIC`（社区）、
-//! `PyCharm`（专业）、`PyCharmCE`（社区）。扫描所有已安装产品，一次切换写入全部
-//! 装有插件的 IDE（多产品共用同一份账号）。
+//! 支持的产品（按配置目录名前缀，共 16 个）：`IntelliJIdea`（IDEA 旗舰）、`IdeaIC`
+//! （IDEA 社区）、`PyCharm`（专业）、`PyCharmCE`（社区）、`WebStorm`、`PhpStorm`、
+//! `GoLand`、`CLion`、`RubyMine`、`DataGrip`、`Rider`、`Aqua`、`DataSpell`、`AppCode`
+//! （已停更，仅兼容旧安装）、`MPS`、`AndroidStudio`。扫描所有已安装产品，一次切换写入
+//! 全部装有插件的 IDE（多产品共用同一份账号）。
+//!
+//! 配置目录有**两个根**：JetBrains 自家 IDE 写 `.../JetBrains`，Android Studio 写
+//! `.../Google`（见 [`detect::jetbrains_config_roots`]）；两个根都会扫描。
 //!
 //! 与 VS Code 端同一时序（运行中写入会被 IDE 内存态覆盖）：优雅退出 → 写 XML →
 //! 重新打开。IDE 进程与配置目录的对应关系优先用安装目录 `product-info.json` 的
@@ -44,13 +49,6 @@ const SECRET_KEY: &str = "Tencent-Cloud.coding-copilot.new.accessToken";
 const PLUGIN_DIR_MARKER: &str = "coding-copilot";
 /// secret 存储文件相对配置目录的路径。
 const SECRET_RELATIVE: &str = "options/secret-storage.xml";
-
-/// 支持的产品：配置目录 / `product-info.json#dataDirectoryName` 前缀。
-const PRODUCT_PREFIXES: [&str; 4] = ["IntelliJIdea", "IdeaIC", "PyCharm", "PyCharmCE"];
-
-/// Windows 主进程映像名（`<product>64.exe`；zip / exe 安装通用）。
-#[cfg(target_os = "windows")]
-const WINDOWS_IMAGE_NAMES: [&str; 4] = ["idea64.exe", "pycharm64.exe", "idea.exe", "pycharm.exe"];
 
 fn state_path() -> PathBuf {
     store_dir().join(STATE_FILE)
@@ -446,10 +444,16 @@ mod win_close {
 
 mod detect;
 mod diagnose;
+mod products;
 mod status;
 mod switch;
 
-pub use detect::{detect_current_account, jetbrains_config_root};
+// 产品表（16 个产品的单一来源）在 `products.rs`：配置目录名判定、三平台进程名与
+// exe → 前缀推断都从这里取。子模块经 `use super::*` 直接可见；这里不用 `pub use`，
+// 因为产品表是模块内部实现细节，不对外暴露。
+use products::*;
+
+pub use detect::{detect_current_account, jetbrains_config_roots};
 pub use status::{
     close_running_plugin_ides, jetbrains_restart_precheck, relaunch_closed_ides,
     running_plugin_ide_labels, status, ClosedIdes,
@@ -468,4 +472,5 @@ mod tests {
     #[allow(unused_imports)]
     use super::switch::*;
     include!("tests/switch.rs");
+    include!("tests/products.rs");
 }

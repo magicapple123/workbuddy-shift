@@ -273,7 +273,8 @@
         let running = vec![running_instance(None)];
         let text = failure_context(&targets, &running);
         for expected in [
-            "configRoot=",
+            "configRoots=",
+            "root=",
             "target=PyCharm2026.3 pluginInstalled=true",
             "target=IntelliJIdea2026.3 pluginInstalled=false",
             "running pid=4242 mappingSource=unmapped configDir=(未映射)",
@@ -619,7 +620,7 @@
             text.contains("错误：账号缺少 access_token"),
             "日志必须带错误原文：{text}"
         );
-        assert!(text.contains("configRoot="), "日志必须带现场：{text}");
+        assert!(text.contains("configRoots="), "日志必须带现场：{text}");
         assert!(
             text.contains("target=PyCharm2026.3 pluginInstalled=true"),
             "日志必须带目标与插件命中：{text}"

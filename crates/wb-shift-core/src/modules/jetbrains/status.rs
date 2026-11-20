@@ -16,7 +16,7 @@ pub(super) const CLOSE_TIMEOUT_SECS: i64 = 60;
 
 /// 运行中 + 手动模式的报错文案。
 pub(super) const RUNNING_MANUAL_HINT: &str =
-    "检测到 JetBrains IDE（IDEA / PyCharm）正在运行，请先完全退出后再切换，否则写入会被 IDE 覆盖。";
+    "检测到 JetBrains 系 IDE（IDEA / PyCharm / GoLand / Android Studio 等）正在运行，请先完全退出后再切换，否则写入会被 IDE 覆盖。";
 
 pub(super) fn close_timeout_error(alive: &[u32]) -> String {
     let pids: Vec<String> = alive.iter().map(|pid| pid.to_string()).collect();
@@ -283,7 +283,10 @@ pub fn status() -> Value {
         "pluginInstalled": plugin_installed,
         "running": is_running,
         "loggedIn": logged_in,
-        "configRoot": jetbrains_config_root().map(|p| p.to_string_lossy().to_string()),
+        "configRoots": jetbrains_config_roots()
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
         "targets": targets.iter().map(|t| t.to_status_json(&running_dirs)).collect::<Vec<_>>(),
         "activeAccountId": active_account_id,
         "activeAccountName": active_account_name,
@@ -392,7 +395,7 @@ pub fn running_plugin_ide_labels() -> Vec<String> {
     labels
 }
 
-/// 关闭所有「装了插件且在运行」的 IDE（IDEA 与 PyCharm 共用同一份数据，必须全关）。
+/// 关闭所有「装了插件且在运行」的 IDE（各产品共用同一份账号数据，必须全关）。
 ///
 /// 未运行时不主动拉起：返回空句柄。关闭不完整时**先把已关掉的开回来**再报错
 /// （见 [`partial_close_error`]），不留「IDE 被关了但什么也没做」的状态。

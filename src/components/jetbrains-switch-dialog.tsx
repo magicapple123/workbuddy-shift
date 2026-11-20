@@ -32,6 +32,46 @@ interface Props {
 }
 
 /**
+ * 配置目录前缀 → 展示名。**顺序敏感：长前缀必须在前**（`PyCharmCE` 先于 `PyCharm`，
+ * `DataSpell` 先于 `DataGrip` 无所谓但 `IntelliJIdea` 不能被 `IdeaIC` 抢走）。
+ *
+ * 与后端 `PRODUCTS` 表一一对应（16 个产品）：后端加产品时这里也要加，否则弹窗里
+ * 只能看到 `AndroidStudio2024.1` 这种目录名，用户不知道自己切的是哪个 IDE。
+ */
+const PRODUCT_LABELS: ReadonlyArray<readonly [prefix: string, label: string]> = [
+  ["IntelliJIdea", "IntelliJ IDEA"],
+  ["IdeaIC", "IntelliJ IDEA CE"],
+  ["PyCharmCE", "PyCharm CE"],
+  ["PyCharm", "PyCharm"],
+  ["WebStorm", "WebStorm"],
+  ["PhpStorm", "PhpStorm"],
+  ["GoLand", "GoLand"],
+  ["CLion", "CLion"],
+  ["RubyMine", "RubyMine"],
+  ["DataGrip", "DataGrip"],
+  ["DataSpell", "DataSpell"],
+  ["Rider", "Rider"],
+  ["Aqua", "Aqua"],
+  ["AppCode", "AppCode"],
+  ["MPS", "MPS"],
+  ["AndroidStudio", "Android Studio"],
+];
+
+/**
+ * 配置目录名 → 可读标签：`GoLand2025.2` → `GoLand 2025.2`、
+ * `AndroidStudio2024.1` → `Android Studio 2024.1`、`PyCharmCE2025.1` → `PyCharm CE 2025.1`。
+ *
+ * 认不出的前缀原样返回（诊断场景下保留真实目录名比猜一个产品名更有用）。
+ */
+export function productLabel(configDir: string): string {
+  const hit = PRODUCT_LABELS.find(([prefix]) => configDir.startsWith(prefix));
+  if (!hit) return configDir;
+  const [prefix, label] = hit;
+  const suffix = configDir.slice(prefix.length);
+  return suffix ? `${label} ${suffix}` : label;
+}
+
+/**
  * JetBrains 插件切换弹窗：选择要写入的 IDE（配置目录）后执行切换。
  *
  * 检测到多个装了插件的 IDE 时可只切其中一个；缺省全选（与「一次切换全家生效」
@@ -75,7 +115,7 @@ export function JetbrainsSwitchDialog({ open, onOpenChange, account, jetbrainsSt
     setBusy(true);
     setFailure(null);
     const toastId = toast.loading("正在切换 JetBrains IDE…", {
-      description: "将注入凭证，运行中的 IDEA / PyCharm 会先退出再自动重开",
+      description: "将注入凭证，运行中的 IDE / Android Studio 会先退出再自动重开",
     });
     try {
       const result = await api.switchJetbrainsAccount(
@@ -160,8 +200,8 @@ export function JetbrainsSwitchDialog({ open, onOpenChange, account, jetbrainsSt
         {targets.length === 0 ? (
           <div className="space-y-2">
             <p className="rounded-lg bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
-              未检测到已安装 CodeBuddy 插件的 JetBrains IDE。请先在 IDEA / PyCharm
-              中安装「Tencent Cloud CodeBuddy」插件后重试。
+              未检测到已安装 CodeBuddy 插件的 JetBrains IDE。请先在 JetBrains 系 IDE（IDEA /
+              PyCharm / GoLand 等）或 Android Studio 中安装「Tencent Cloud CodeBuddy」插件后重试。
             </p>
             <JetbrainsDiagnosticsPanel status={jetbrainsStatus} defaultOpen />
           </div>
@@ -173,7 +213,7 @@ export function JetbrainsSwitchDialog({ open, onOpenChange, account, jetbrainsSt
                 onCheckedChange={(on) => setSelected(on ? null : [])}
                 aria-label="全选"
               />
-              全部 IDE
+              全部 IDE / Android Studio
             </label>
             {targets.map((t) => (
               <label
@@ -188,7 +228,9 @@ export function JetbrainsSwitchDialog({ open, onOpenChange, account, jetbrainsSt
                   onCheckedChange={(on) => toggle(t.configDir, Boolean(on))}
                   aria-label={`写入 ${t.configDir}`}
                 />
-                <span className="min-w-0 flex-1 truncate">{t.configDir}</span>
+                <span className="min-w-0 flex-1 truncate" title={t.configDir}>
+                  {productLabel(t.configDir)}
+                </span>
                 {t.running && (
                   <span className="flex-none rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
                     运行中
@@ -197,7 +239,8 @@ export function JetbrainsSwitchDialog({ open, onOpenChange, account, jetbrainsSt
               </label>
             ))}
             <p className="px-2 pt-1 text-xs leading-5 text-muted-foreground">
-              运行中的 IDE 会先退出（弹「确认退出」时自动确认）再写入并重新打开；未运行的 IDE 写入后下次打开生效。
+              运行中的 IDE 会先退出（弹「确认退出」时自动确认）再写入并重新打开；未运行的 IDE
+              写入后下次打开生效。Android Studio 与 JetBrains 系 IDE 共用同一份账号。
             </p>
             <div className="pt-1">
               <JetbrainsDiagnosticsPanel status={jetbrainsStatus} />

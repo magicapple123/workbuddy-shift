@@ -140,7 +140,7 @@ export interface VscodeExtSwitchResult {
   sessionSync?: VscodeSessionSyncReport;
 }
 
-/** JetBrains IDE 的一条配置目录状态（IDEA / PyCharm 各自独立）。 */
+/** JetBrains IDE 的一条配置目录状态（IDEA / PyCharm / GoLand / Android Studio 等各自独立）。 */
 export interface JetbrainsTargetStatus {
   /** 配置目录名（如 "PyCharm2026.2"）。 */
   configDir: string;
@@ -179,10 +179,20 @@ export interface JetbrainsScannedDir {
   hasSecretFile: boolean;
 }
 
+/** 一个 JetBrains 配置根的存在性（两个根并列，Android Studio 在 Google 根）。 */
+export interface JetbrainsConfigRootState {
+  /** 配置根的绝对路径。 */
+  path: string;
+  /** 该根当前是否存在（不存在不算错误：只装了 IDEA 的机器没有 Google 根）。 */
+  exists: boolean;
+}
+
 /** 「未检测到 IDE」时折叠展示的诊断信息。 */
 export interface JetbrainsDiagnostics {
-  configRoot: string | null;
-  configRootExists: boolean;
+  /** 全部候选配置根（`.../JetBrains` 与 `.../Google`），只读不写。 */
+  configRoots: string[];
+  /** 与 `configRoots` 一一对应的存在性结论。 */
+  rootStates: JetbrainsConfigRootState[];
   scannedDirs: JetbrainsScannedDir[];
   acceptedDirs: string[];
   pluginInstalledDirs: string[];
@@ -208,7 +218,8 @@ export interface JetbrainsStatus {
   running: boolean;
   /** 是否任一装了插件的目标存在登录态。 */
   loggedIn: boolean;
-  configRoot: string | null;
+  /** 全部候选配置根路径（`.../JetBrains`、`.../Google`）。 */
+  configRoots: string[];
   targets: JetbrainsTargetStatus[];
   activeAccountId: string | null;
   activeAccountName: string | null;
