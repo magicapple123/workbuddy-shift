@@ -14,7 +14,31 @@ pub(in crate::modules::session) struct SpaceMeta {
     /// 项目文件夹（实测真实行有值，如 `D:\ResumeForge`；`primary_folder_path` 才是 NULL）。
     /// 新建 space 时沿用源行同列，**不**拿会话的 `cwd` 硬猜——`cwd` 可能是项目子目录。
     pub(in crate::modules::session) create_folder_path: Option<String>,
+    /// 源 space 绑定过的目录（`space_folders.path` 全部 + 两个路径列，去重前的原始值）。
+    ///
+    /// 只用于**匹配**目标账号的空间，不搬到目标账号（目标机器可能没有这些目录）。
+    pub(in crate::modules::session) folder_paths: Vec<String>,
 }
+
+/// 路径比较键：分隔符统一为 `/`、转小写、去尾分隔符。
+///
+/// **不做 `canonicalize`**：目标机器上目录可能不存在，canonicalize 会失败并把比较结果
+/// 翻转（见 `config/paths.rs::sandbox_path_key`，那个只适合本机沙箱判定）。
+pub(in crate::modules::session) fn space_path_key(path: &str) -> String {
+    let unified = path.replace('\\', "/");
+    unified.trim_end_matches('/').to_lowercase()
+}
+
+/// 目标账号空间查找结果：`ambiguous` 表示同一 cwd 命中多个空间（不猜，走新建）。
+#[derive(Debug, Clone, Default)]
+pub(in crate::modules::session) struct SpaceLookup {
+    pub(in crate::modules::session) id: Option<String>,
+    pub(in crate::modules::session) ambiguous: bool,
+}
+
+/// 目标账号有多个空间绑定同一目录时写进复制报告的诊断。
+pub(in crate::modules::session) const SPACE_AMBIGUOUS_NOTE: &str =
+    "目标账号有多个空间绑定该目录，已按目录新建分组";
 
 /// 读取一行 space（列名 + 值，按表自身列序）。
 ///
@@ -65,6 +89,7 @@ pub(in crate::modules::session) fn space_meta_from_row(
         device_id: row_text(row, "device_id"),
         source_kind: row_text(row, "source_kind"),
         create_folder_path: row_text(row, "create_folder_path"),
+        folder_paths: Vec::new(),
     })
 }
 
@@ -80,7 +105,8 @@ pub(in crate::modules::session) fn read_source_space_meta(
     space_id: &str,
 ) -> Option<SpaceMeta> {
     if let Some(row) = read_space_row(conn, space_id) {
-        if let Some(meta) = space_meta_from_row(&row) {
+        if let Some(mut meta) = space_meta_from_row(&row) {
+            meta.folder_paths = space_folder_paths(conn, space_id, &meta);
             return Some(meta);
         }
     }
@@ -93,43 +119,181 @@ pub(in crate::modules::session) fn read_source_space_meta(
     }
     // 源档只读：跨档复制不触碰源档的 WAL 恢复。
     let src_conn = open_db(&src_db, true)?;
-    space_meta_from_row(&read_space_row(&src_conn, space_id)?)
+    let mut meta = space_meta_from_row(&read_space_row(&src_conn, space_id)?)?;
+    meta.folder_paths = space_folder_paths(&src_conn, space_id, &meta);
+    Some(meta)
 }
 
-/// 目标账号下找同名 space：先按「同名 + 同文件夹」精确匹配，再退回只按名字匹配。
+/// 源 space 绑定过的全部目录：`space_folders.path` + 两个路径列（去重）。
+fn space_folder_paths(conn: &Connection, space_id: &str, meta: &SpaceMeta) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(folder) = &meta.create_folder_path {
+        paths.push(folder.clone());
+    }
+    if table_exists(conn, "space_folders") && column_exists(conn, "space_folders", "path") {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT path FROM space_folders WHERE space_id = ?1 ORDER BY sort_order")
+        {
+            if let Ok(rows) = stmt.query_map([space_id], |row| row.get::<_, Option<String>>(0)) {
+                for path in rows.flatten().flatten() {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    if table_exists(conn, "spaces") && column_exists(conn, "spaces", "primary_folder_path") {
+        if let Ok(primary) = conn.query_row(
+            "SELECT primary_folder_path FROM spaces WHERE id = ?1",
+            [space_id],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            if let Some(path) = primary {
+                paths.push(path);
+            }
+        }
+    }
+    paths.retain(|path| !path.trim().is_empty());
+    paths.dedup();
+    paths
+}
+
+/// 目标账号的空间匹配：**路径优先 → 同名兜底 → 新建**（R5-20）。
 ///
-/// 只按名字匹配在「同一账号有两个同名项目」时会挂错，故先试精确的；精确未命中仍按
-/// 名字复用——目标行的路径列可能为空或换了位置，此时复用明显优于再造一个重复项目。
+/// 路径匹配用 [`space_path_key`] 归一后比较（不分大小写/分隔符），比较对象是
+/// `space_folders.path` 与 `spaces.primary_folder_path` / `create_folder_path`。
+/// 同一目录命中多个空间时视为 `ambiguous`：**不猜**（与客户端 `resolveUniqueSpaceByCwd`
+/// 同口径），退回同名兜底，仍未命中则新建并让调用方写一条诊断。
+///
+/// 名字兜底保留改造前的两级：先「同名 + 同文件夹」精确命中，再退回只按名字——
+/// 目标行的路径列可能为空或换了位置，此时复用明显优于再造一个重复项目。
 pub(in crate::modules::session) fn find_target_space_id(
     conn: &Connection,
     target_uid: &str,
     meta: &SpaceMeta,
-) -> Option<String> {
+    cwd: &str,
+) -> SpaceLookup {
     if !table_exists(conn, "spaces") {
-        return None;
+        return SpaceLookup::default();
     }
+    let mut keys: std::collections::BTreeSet<String> = meta
+        .folder_paths
+        .iter()
+        .map(|path| space_path_key(path))
+        .filter(|key| !key.is_empty())
+        .collect();
+    let cwd_key = space_path_key(cwd);
+    if !cwd_key.is_empty() {
+        keys.insert(cwd_key);
+    }
+
+    let mut hits: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // 1) space_folders.path（真实客户端的「工作目录」来源）
+    if !keys.is_empty()
+        && table_exists(conn, "space_folders")
+        && column_exists(conn, "space_folders", "path")
+    {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT sf.space_id, sf.path FROM space_folders sf JOIN spaces s ON s.id = sf.space_id WHERE s.user_id = ?1 AND COALESCE(s.deleted_at, -1) = -1",
+        ) {
+            if let Ok(rows) = stmt.query_map([target_uid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            }) {
+                for (space_id, path) in rows.flatten() {
+                    if let Some(path) = path {
+                        if keys.contains(&space_path_key(&path)) {
+                            hits.insert(space_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 2) spaces 自身的路径列（`primary_folder_path` 实测全 NULL，`create_folder_path` 才有值）
+    if hits.is_empty() && !keys.is_empty() {
+        let mut selected = String::from("id");
+        if column_exists(conn, "spaces", "primary_folder_path") {
+            selected.push_str(", primary_folder_path");
+        }
+        if column_exists(conn, "spaces", "create_folder_path") {
+            selected.push_str(", create_folder_path");
+        }
+        let sql = format!(
+            "SELECT {selected} FROM spaces WHERE user_id = ?1 AND COALESCE(deleted_at, -1) = -1"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            let has_primary = column_exists(conn, "spaces", "primary_folder_path");
+            if let Ok(rows) = stmt.query_map([target_uid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    if has_primary {
+                        row.get::<_, Option<String>>(1)?
+                    } else {
+                        None
+                    },
+                    row.get::<_, Option<String>>(if has_primary { 2 } else { 1 })
+                        .unwrap_or(None),
+                ))
+            }) {
+                for (space_id, primary, folder) in rows.flatten() {
+                    let hit = [primary, folder]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| keys.contains(&space_path_key(&path)));
+                    if hit {
+                        hits.insert(space_id);
+                    }
+                }
+            }
+        }
+    }
+    let ambiguous = hits.len() > 1;
+    if hits.len() == 1 {
+        return SpaceLookup {
+            id: hits.into_iter().next(),
+            ambiguous: false,
+        };
+    }
+
+    // 3) 同名兜底（改造前逻辑）。ambiguous 时若兜底命中的正是「争议空间」之一，
+    // 就**不复用**——那等于在两个候选里偷偷选一个，违反「不猜」的约定。
+    let mut by_name: Option<String> = None;
     if let Some(folder) = meta.create_folder_path.as_deref() {
         if column_exists(conn, "spaces", "create_folder_path") {
-            let exact = conn
+            by_name = conn
                 .query_row(
-                    "SELECT id FROM spaces WHERE user_id = ?1 AND name = ?2 AND deleted_at = -1 \
-                     AND create_folder_path = ?3 ORDER BY updated_at DESC LIMIT 1",
+                    "SELECT id FROM spaces WHERE user_id = ?1 AND name = ?2 AND deleted_at = -1 AND create_folder_path = ?3 ORDER BY updated_at DESC LIMIT 1",
                     rusqlite::params![target_uid, meta.name, folder],
                     |row| row.get::<_, String>(0),
                 )
                 .ok();
-            if exact.is_some() {
-                return exact;
+        }
+    }
+    if by_name.is_none() {
+        by_name = conn
+            .query_row(
+                "SELECT id FROM spaces WHERE user_id = ?1 AND name = ?2 AND deleted_at = -1 ORDER BY updated_at DESC LIMIT 1",
+                rusqlite::params![target_uid, meta.name],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+    }
+    if ambiguous {
+        if let Some(id) = &by_name {
+            if hits.contains(id) {
+                return SpaceLookup {
+                    id: None,
+                    ambiguous: true,
+                };
             }
         }
     }
-    conn.query_row(
-        "SELECT id FROM spaces WHERE user_id = ?1 AND name = ?2 AND deleted_at = -1 \
-         ORDER BY updated_at DESC LIMIT 1",
-        rusqlite::params![target_uid, meta.name],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
+    SpaceLookup {
+        id: by_name,
+        ambiguous,
+    }
 }
 
 /// 目标账号已有 space 的 `device_id`（源 space 也没带设备标识时的唯一来源）。
@@ -156,16 +320,22 @@ pub(in crate::modules::session) fn fallback_device_id(
 /// 让调用方写 NULL：宁可会话落回「最近」，也不造一个设备标识可疑的空项目。
 pub(in crate::modules::session) fn insert_target_space(
     conn: &Connection,
+    target_paths: &SessionPaths,
     target_uid: &str,
     meta: &SpaceMeta,
+    cwd: &str,
 ) -> Result<Option<String>, String> {
     if !table_exists(conn, "spaces") {
         return Ok(None);
     }
+    // 三级兜底：源 space → 目标账号任一 space → 设备级 `~/.workbuddy/device-id`。
+    // 设备标识是 NOT NULL 且跨账号共享（实测本机 32 条 space 的 device_id 全等），
+    // 目标账号一个 space 都没有时靠它建组，不再把 `space_id` 写成 NULL。
     let Some(device_id) = meta
         .device_id
         .clone()
         .or_else(|| fallback_device_id(conn, target_uid))
+        .or_else(|| device_id_from_store_root(target_paths))
     else {
         return Ok(None);
     };
@@ -223,7 +393,71 @@ pub(in crate::modules::session) fn insert_target_space(
     let params: Vec<&rusqlite::types::Value> = vals.iter().collect();
     conn.execute(&sql, rusqlite::params_from_iter(params))
         .map_err(|error| format!("项目空间记录保存失败：{error}"))?;
+    // 客户端建空间必然同时写 `space_folders`（`createMigratedSpace` 的 folders 参数），
+    // 少了它目标账号里这个分组「没有工作目录」。只绑会话 cwd；源空间的其它目录不搬。
+    bind_space_folders(conn, &new_id, cwd, meta.create_folder_path.as_deref())?;
     Ok(Some(new_id))
+}
+
+/// 设备级 device-id：`~/.workbuddy/device-id`（国内版）→ `~/.workbuddy-ai/device-id`。
+///
+/// 生产里 `store_root` 是 `~/.workbuddy-shift`，其父目录就是用户主目录；沙箱/单测的
+/// 临时目录下没有这个文件，因此不会把真实机器标识带进测试。
+fn device_id_from_store_root(paths: &SessionPaths) -> Option<String> {
+    let home = paths.store_root.parent()?;
+    for dir in [".workbuddy", ".workbuddy-ai"] {
+        let Ok(text) = std::fs::read_to_string(home.join(dir).join("device-id")) else {
+            continue;
+        };
+        let value = text.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// 给新空间补 `space_folders` 行：会话 cwd 记 `sort_order = 0`，`create_folder_path`
+/// 与 cwd 不同时再补一条 `sort_order = 1`。目标库没有该表（旧客户端）时整步跳过。
+fn bind_space_folders(
+    conn: &Connection,
+    space_id: &str,
+    cwd: &str,
+    create_folder_path: Option<&str>,
+) -> Result<(), String> {
+    if !table_exists(conn, "space_folders")
+        || !column_exists(conn, "space_folders", "space_id")
+        || !column_exists(conn, "space_folders", "path")
+    {
+        return Ok(());
+    }
+    let has_sort = column_exists(conn, "space_folders", "sort_order");
+    let mut folders: Vec<(String, i64)> = Vec::new();
+    let cwd = cwd.trim();
+    if !cwd.is_empty() {
+        folders.push((cwd.to_string(), 0));
+    }
+    if let Some(folder) = create_folder_path {
+        let folder = folder.trim();
+        if !folder.is_empty() && space_path_key(folder) != space_path_key(cwd) {
+            folders.push((folder.to_string(), 1));
+        }
+    }
+    for (path, sort_order) in folders {
+        let result = if has_sort {
+            conn.execute(
+                "INSERT OR IGNORE INTO space_folders (space_id, path, sort_order) VALUES (?1, ?2, ?3)",
+                rusqlite::params![space_id, path, sort_order],
+            )
+        } else {
+            conn.execute(
+                "INSERT OR IGNORE INTO space_folders (space_id, path) VALUES (?1, ?2)",
+                rusqlite::params![space_id, path],
+            )
+        };
+        result.map_err(|error| format!("项目空间目录保存失败：{error}"))?;
+    }
+    Ok(())
 }
 
 /// 把源会话的 `space_id` 映射成**目标账号自己的** space id（本缺陷的修复核心）。
@@ -232,26 +466,32 @@ pub(in crate::modules::session) fn insert_target_space(
 /// ResumeForge space（id 不同、name 相同）。跨账号复制时把源 id 原样搬过去，目标行就
 /// 指向一个不存在的 space，客户端于是把会话归到「最近」而不是项目里。
 ///
-/// 返回语义：
-/// - 源 `space_id` 为空 → `Ok(None)`：目标写 NULL，**不**新建 space；
-/// - 目标账号有同名 space → 用它的 id；
-/// - 没有同名 space → 为目标账号插一条同构 space 行，用新 id；
-/// - 源 space 查不到（跨档库丢失 / 老库没有 spaces 表）→ `Ok(None)`，如实写 NULL。
+/// 返回语义（R5-20 起按**路径优先**匹配）：
+/// - 源 `space_id` 为空 → `Ok((None, None))`：目标写 NULL，**不**新建 space；
+/// - 目标账号有空间绑定同一目录（唯一命中）→ 用它的 id；
+/// - 同一目录命中多个空间 → `ambiguous`，退回同名兜底，仍未命中则新建并带诊断；
+/// - 都没有 → 为目标账号插一条同构 space 行（含 `space_folders`），用新 id；
+/// - 源 space 查不到（跨档库丢失 / 老库没有 spaces 表）→ `Ok((None, None))`，如实写 NULL。
 pub(in crate::modules::session) fn map_target_space_id(
     conn: &Connection,
     source_paths: &SessionPaths,
+    target_paths: &SessionPaths,
     same_db: bool,
     source_row: &[(String, rusqlite::types::Value)],
     target_uid: &str,
-) -> Result<Option<String>, String> {
+    cwd: &str,
+) -> Result<(Option<String>, Option<&'static str>), String> {
     let Some(space_id) = row_text(source_row, "space_id") else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let Some(meta) = read_source_space_meta(conn, source_paths, same_db, &space_id) else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    if let Some(existing) = find_target_space_id(conn, target_uid, &meta) {
-        return Ok(Some(existing));
+    let lookup = find_target_space_id(conn, target_uid, &meta, cwd);
+    if let Some(existing) = lookup.id {
+        return Ok((Some(existing), None));
     }
-    insert_target_space(conn, target_uid, &meta)
+    let note = lookup.ambiguous.then_some(SPACE_AMBIGUOUS_NOTE);
+    let created = insert_target_space(conn, target_paths, target_uid, &meta, cwd)?;
+    Ok((created, note))
 }

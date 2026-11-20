@@ -35,8 +35,10 @@ pub(in crate::modules::session) fn backup_workbuddy_db(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::modules::session) enum DbCopyOutcome {
     /// `aux_note` 非空表示目标库缺账本表/列，副本不含用量记录（不算失败，只说明原因）。
+    /// `space_note` 非空表示目标账号同一目录命中多个空间、本次按目录新建了分组。
     Inserted {
         aux_note: Option<&'static str>,
+        space_note: Option<&'static str>,
     },
     SourceRowMissing,
     NoSessionsTable,
@@ -302,10 +304,20 @@ pub(in crate::modules::session) fn insert_session_copy(
 
     // 项目归属先算：源行的 space_id 属于源账号，必须换成目标账号自己的 space id
     // （见 [`map_target_space_id`]）。目标表没有该列时不查不建，保持旧行为。
-    let mapped_space_id = if column_exists(&tx, "sessions", "space_id") {
-        map_target_space_id(&tx, source_paths, same_db, &source_row, target_uid)?
+    let (mapped_space_id, space_note) = if column_exists(&tx, "sessions", "space_id") {
+        // 空间匹配按会话 cwd 走「路径优先 → 同名兜底 → 新建」（R5-20）。
+        let cwd = row_text(&source_row, "cwd").unwrap_or_default();
+        map_target_space_id(
+            &tx,
+            source_paths,
+            target_paths,
+            same_db,
+            &source_row,
+            target_uid,
+            &cwd,
+        )?
     } else {
-        None
+        (None, None)
     };
 
     let mut cols: Vec<String> = Vec::with_capacity(target_cols.len());
@@ -357,7 +369,10 @@ pub(in crate::modules::session) fn insert_session_copy(
         (!supported).then_some(AUX_UNSUPPORTED_NOTE)
     };
     tx.commit().map_err(|e| format!("会话记录保存失败：{e}"))?;
-    Ok(DbCopyOutcome::Inserted { aux_note })
+    Ok(DbCopyOutcome::Inserted {
+        aux_note,
+        space_note,
+    })
 }
 
 /// 复制时归一目标行的 `sessions.status`（与正文口径对齐）。

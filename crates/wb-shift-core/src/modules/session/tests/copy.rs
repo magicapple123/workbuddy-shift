@@ -1128,7 +1128,13 @@ fn insert_session_copy_duplicates_row_with_target_uid() {
         false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
+    assert_eq!(
+        outcome,
+        DbCopyOutcome::Inserted {
+            aux_note: None,
+            space_note: None
+        }
+    );
 
     let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
     let (id, user_id, title, deleted_at, is_playground): (String, String, String, Option<i64>, i64) =
@@ -1439,7 +1445,10 @@ fn insert_session_copy_normalizes_running_row_status() {
                 false
             )
             .unwrap(),
-            DbCopyOutcome::Inserted { aux_note: None }
+            DbCopyOutcome::Inserted {
+                aux_note: None,
+                space_note: None
+            }
         );
     }
 
@@ -1526,7 +1535,10 @@ fn insert_session_copy_without_status_column_still_works() {
             false
         )
         .unwrap(),
-        DbCopyOutcome::Inserted { aux_note: None }
+        DbCopyOutcome::Inserted {
+            aux_note: None,
+            space_note: None
+        }
     );
     assert_eq!(env.status_of("new-no-status"), None);
 }
@@ -1654,7 +1666,13 @@ fn copy_remaps_space_id_to_target_account_space() {
         false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
+    assert_eq!(
+        outcome,
+        DbCopyOutcome::Inserted {
+            aux_note: None,
+            space_note: None
+        }
+    );
 
     let (space_id, project_id) = space_of(&env, "new-1");
     assert_eq!(
@@ -1704,7 +1722,13 @@ fn copy_creates_space_for_target_when_missing() {
         false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
+    assert_eq!(
+        outcome,
+        DbCopyOutcome::Inserted {
+            aux_note: None,
+            space_note: None
+        }
+    );
 
     let (space_id, _) = space_of(&env, "new-1");
     let space_id = space_id.expect("目标账号没有同名 space 时应当新建并回填");
@@ -1787,7 +1811,13 @@ fn copy_keeps_null_space_id_without_creating_space() {
         false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
+    assert_eq!(
+        outcome,
+        DbCopyOutcome::Inserted {
+            aux_note: None,
+            space_note: None
+        }
+    );
 
     let (space_id, _) = space_of(&env, "new-1");
     assert_eq!(space_id, None, "源无项目归属时不得凭空塞进同名 space");
@@ -2370,7 +2400,13 @@ fn copy_reports_aux_note_when_target_lacks_ledger_tables() {
     )
     .unwrap();
     assert!(
-        matches!(outcome, DbCopyOutcome::Inserted { aux_note: Some(_) }),
+        matches!(
+            outcome,
+            DbCopyOutcome::Inserted {
+                aux_note: Some(_),
+                space_note: None
+            }
+        ),
         "{outcome:?}"
     );
     // 会话行照写，只是没有账本。
@@ -2506,4 +2542,299 @@ fn aux_replay_is_idempotent() {
     let (used, _, credit) = ledger_usage(&db, "new-replay").unwrap();
     assert_eq!(used, 9);
     assert_eq!(credit.as_deref(), Some(r#"{"r1":4.25}"#));
+}
+
+// ---------------------------------------------------------------------------
+// R5-20：复制时的空间归属（路径优先 → 同名兜底 → 新建，补 space_folders）
+// ---------------------------------------------------------------------------
+
+/// 带 `space_id` 的会话表 + `spaces` / `space_folders`（真实 5.11 客户端库结构）。
+fn create_space_schema(db: &Path) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT,
+            custom_title TEXT,
+            cwd TEXT,
+            created_at INTEGER,
+            updated_at INTEGER,
+            deleted_at INTEGER,
+            is_playground INTEGER,
+            space_id TEXT
+        );
+        CREATE TABLE spaces (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT,
+            device_id TEXT,
+            source_kind TEXT,
+            create_folder_path TEXT,
+            primary_folder_path TEXT,
+            status TEXT,
+            transport TEXT,
+            pinned INTEGER,
+            deleted_at INTEGER,
+            created_at INTEGER,
+            updated_at INTEGER
+        );
+        CREATE TABLE space_folders (
+            space_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            sort_order INTEGER,
+            PRIMARY KEY (space_id, path)
+        );",
+    )
+    .unwrap();
+}
+
+fn insert_space(db: &Path, id: &str, uid: &str, name: &str, folder: &str, device: &str) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO spaces (id, user_id, name, device_id, source_kind, create_folder_path, \
+         primary_folder_path, status, transport, pinned, deleted_at, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, 'seed', ?5, NULL, 'active', 'local', 0, -1, 1, 1)",
+        rusqlite::params![id, uid, name, device, folder],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO space_folders (space_id, path, sort_order) VALUES (?1, ?2, 0)",
+        rusqlite::params![id, folder],
+    )
+    .unwrap();
+}
+
+fn insert_session_with_space(db: &Path, id: &str, uid: &str, cwd: &str, space_id: &str) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, user_id, title, custom_title, cwd, created_at, updated_at, \
+         deleted_at, is_playground, space_id) VALUES (?1, ?2, ?3, NULL, ?4, 1000, 2000, NULL, 0, ?5)",
+        rusqlite::params![id, uid, format!("标题-{id}"), cwd, space_id],
+    )
+    .unwrap();
+}
+
+fn space_row_ids(db: &Path, uid: &str) -> Vec<String> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT id FROM spaces WHERE user_id = ?1 ORDER BY id")
+        .unwrap();
+    let rows: Vec<String> = stmt
+        .query_map([uid], |row| row.get(0))
+        .unwrap()
+        .flatten()
+        .collect();
+    rows
+}
+
+fn session_space(db: &Path, sid: &str) -> Option<String> {
+    let conn = Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT space_id FROM sessions WHERE id = ?1",
+        [sid],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+fn folder_rows(db: &Path, space_id: &str) -> Vec<(String, i64)> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT path, COALESCE(sort_order, -1) FROM space_folders WHERE space_id = ?1 ORDER BY sort_order")
+        .unwrap();
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([space_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .flatten()
+        .collect();
+    rows
+}
+
+/// 源账号 uid-a 有一条绑定 src-space 的会话，cwd 为 `cwd`，源空间目录 `folder`。
+fn space_env(name: &str, cwd: &str, folder: &str) -> Env {
+    let env = Env::new(name);
+    let db = env.paths.workbuddy_db();
+    create_space_schema(&db);
+    env.create_edge_db(WbVariant::Cn);
+    env.set_login("uid-a");
+    env.add_body("sess-1", &body_text("sess-1"));
+    insert_space(&db, "src-space", "uid-a", "ResumeForge", folder, "dev-src");
+    insert_session_with_space(&db, "sess-1", "uid-a", cwd, "src-space");
+    env
+}
+
+/// 路径键：分隔符、大小写、尾分隔符都不参与比较；不做 canonicalize。
+#[test]
+fn space_path_key_normalizes_separators_case_and_trailing_slash() {
+    assert_eq!(space_path_key("D:\\Proj\\A\\"), space_path_key("d:/proj/a"));
+    assert_eq!(space_path_key("D:/Proj/A"), "d:/proj/a");
+    assert_eq!(space_path_key(""), "");
+    // 不做符号链接解析：不同路径就是不同键（保守失败，宁可多建一个组）。
+    assert_ne!(space_path_key("D:/a"), space_path_key("D:/b"));
+}
+
+/// 目标账号有**名字不同**但绑定同一目录的空间 → 复用（证明是按路径匹配）。
+#[test]
+fn copy_reuses_target_space_by_path_even_with_different_name() {
+    let env = space_env("space-path", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    // 目标账号的空间名字完全不同，只有目录相同（还用 / 与大小写差异验证归一）。
+    insert_space(&db, "tgt-a", "uid-b", "另一个名字", "d:/proj/A/", "dev-tgt");
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    assert_eq!(session_space(&db, &new_id).as_deref(), Some("tgt-a"));
+    assert_eq!(space_row_ids(&db, "uid-b"), vec!["tgt-a"], "不得新建空间");
+    assert!(report["copied"][0].get("spaceNote").is_none());
+}
+
+/// 目标账号无该目录、但有同名空间 → 同名兜底复用。
+#[test]
+fn copy_falls_back_to_same_name_space() {
+    let env = space_env("space-name", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    insert_space(
+        &db,
+        "tgt-name",
+        "uid-b",
+        "ResumeForge",
+        "E:\\别处",
+        "dev-tgt",
+    );
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let new_id = env.first_copy_id(&report);
+    assert_eq!(session_space(&db, &new_id).as_deref(), Some("tgt-name"));
+    assert_eq!(space_row_ids(&db, "uid-b"), vec!["tgt-name"]);
+}
+
+/// 同一目录命中两个空间 → 判 ambiguous：不猜，按目录新建并写诊断。
+#[test]
+fn copy_treats_shared_cwd_as_ambiguous_and_creates_new_space() {
+    let env = space_env("space-ambiguous", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    insert_space(
+        &db,
+        "tgt-1",
+        "uid-b",
+        "ResumeForge-主",
+        "D:\\Proj",
+        "dev-tgt",
+    );
+    insert_space(&db, "tgt-2", "uid-b", "ResumeForge", "D:\\Proj", "dev-tgt");
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    let mapped = session_space(&db, &new_id).expect("必须落到某个空间");
+    assert_ne!(mapped, "tgt-1", "ambiguous 时不得静默绑到其中一个");
+    assert_ne!(mapped, "tgt-2", "ambiguous 时不得静默绑到其中一个");
+    assert_eq!(space_row_ids(&db, "uid-b").len(), 3, "应新建第三个空间");
+    assert_eq!(
+        report["copied"][0]["spaceNote"], SPACE_AMBIGUOUS_NOTE,
+        "必须写诊断"
+    );
+}
+
+/// 目标账号一个空间都没有 → 用设备级 device-id 建组，并写 `space_folders`。
+#[test]
+fn copy_creates_space_with_device_id_file_and_binds_folder() {
+    let env = space_env("space-device", "D:\\Proj\\A", "D:\\Proj");
+    // 源空间没有 device_id 时才轮到设备文件兜底。
+    Connection::open(env.paths.workbuddy_db())
+        .unwrap()
+        .execute(
+            "UPDATE spaces SET device_id = NULL WHERE id = 'src-space'",
+            [],
+        )
+        .unwrap();
+    // store_root 的父目录 = 测试临时根；写入设备标识文件模拟真实 `~/.workbuddy/device-id`。
+    let home = env.root.clone();
+    std::fs::create_dir_all(home.join(".workbuddy")).unwrap();
+    std::fs::write(home.join(".workbuddy").join("device-id"), "dev-from-file\n").unwrap();
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let new_id = env.first_copy_id(&report);
+    let db = env.paths.workbuddy_db();
+    let created = session_space(&db, &new_id).expect("target must get a space");
+    let conn = Connection::open(&db).unwrap();
+    let (uid, device): (String, String) = conn
+        .query_row(
+            "SELECT user_id, device_id FROM spaces WHERE id = ?1",
+            [&created],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(uid, "uid-b");
+    assert_eq!(device, "dev-from-file");
+    // 会话 cwd 与源 create_folder_path 不同 → 两条目录行（0 与 1）。
+    let folders = folder_rows(&db, &created);
+    assert_eq!(folders.len(), 2, "{folders:?}");
+    assert_eq!(folders[0], ("D:\\Proj\\A".to_string(), 0));
+    assert_eq!(folders[1], ("D:\\Proj".to_string(), 1));
+}
+
+/// 同一批三条同 cwd 会话 → 只建 1 个空间、`space_folders` 不重复。
+#[test]
+fn copy_same_cwd_many_sessions_creates_one_space() {
+    let env = space_env("space-idempotent", "D:\\Proj\\A", "D:\\Proj\\A");
+    let db = env.paths.workbuddy_db();
+    for id in ["sess-1", "sess-2", "sess-3"] {
+        if id != "sess-1" {
+            env.add_body(id, &body_text(id));
+            insert_session_with_space(&db, id, "uid-a", "D:\\Proj\\A", "src-space");
+        }
+    }
+
+    let report = copy(&env, "uid-b", &["sess-1", "sess-2", "sess-3"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 3, "{report}");
+    let ids = space_row_ids(&db, "uid-b");
+    assert_eq!(ids.len(), 1, "三条会话只能建一个空间：{ids:?}");
+    assert_eq!(folder_rows(&db, &ids[0]).len(), 1, "同 cwd 只绑一条目录");
+}
+
+/// 目标库没有 `space_folders` 表（旧客户端）→ 建空间但不报错。
+#[test]
+fn copy_skips_space_folders_when_table_missing() {
+    let env = space_env("space-old-client", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DROP TABLE space_folders", []).unwrap();
+    drop(conn);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    assert!(session_space(&db, &new_id).is_some(), "空间本身仍要建");
+}
+
+/// 空间写入失败 → 整条复制回滚：不残留空分组。
+#[test]
+fn space_insert_failure_rolls_back_without_orphan_space() {
+    let env = space_env("space-rollback", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER space_boom BEFORE INSERT ON spaces \
+         BEGIN SELECT RAISE(ABORT, 'spaces down'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(
+        report["copied"].as_array().map_or(0, Vec::len),
+        0,
+        "{report}"
+    );
+    let errors = report["errors"].as_array().expect("必须报错");
+    assert!(
+        errors[0]["error"].as_str().unwrap().contains("项目空间"),
+        "{errors:?}"
+    );
+    assert!(space_row_ids(&db, "uid-b").is_empty(), "不得残留空分组");
+    assert_eq!(env.rows_for("uid-b").len(), 0, "会话行也要回滚");
 }

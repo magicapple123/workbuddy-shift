@@ -276,6 +276,7 @@ pub(in crate::modules::session) fn run_copy(
                     cleanup_error,
                     source_repaired,
                     aux_note,
+                    space_note,
                 }) => {
                     let mut item = json!({
                         "id": cid,
@@ -294,6 +295,10 @@ pub(in crate::modules::session) fn run_copy(
                     // 目标库缺账本表/列：不算失败，但要让用户知道「共消耗」为什么还是少。
                     if let Some(note) = aux_note {
                         item["auxNote"] = json!(note);
+                    }
+                    // 同一目录命中多个目标空间：本次按目录新建了分组，别让用户以为串组了。
+                    if let Some(note) = space_note {
+                        item["spaceNote"] = json!(note);
                     }
                     copied.push(item);
                 }
@@ -420,6 +425,8 @@ pub(in crate::modules::session) enum CopyOutcome {
         source_repaired: Option<String>,
         /// 账本搬运的诊断说明（报告里为 `auxNote`）：目标客户端不支持时为 `Some`。
         aux_note: Option<&'static str>,
+        /// 空间归属的诊断说明（报告里为 `spaceNote`）：同目录多分组时按目录新建。
+        space_note: Option<&'static str>,
     },
     AlreadyLinked {
         session_id: String,
