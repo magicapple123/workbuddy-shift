@@ -25,10 +25,19 @@ import type { AccountMeta, DisplayField } from "@/lib/types";
 /** 备注长度上限：与后端 NOTE_MAX_CHARS 保持一致。 */
 const NOTE_MAX_LENGTH = 24;
 
-const FIELD_OPTIONS: Array<{ value: DisplayField; label: string }> = [
+/**
+ * 「卡片显示」只有两态（R5-07）：
+ *
+ * 显示名统一为「备注优先」，所以「备注」不再是独立选项——有备注时自然会显示备注。
+ * - `nickname` → 「账号名」：无备注时用昵称 / 邮箱 / UID；
+ * - `phone` → 「手机号」：始终压过备注（唯一例外）。
+ *
+ * 存量 `displayField === "note"` 在 UI 上映射到「账号名」，用户保存后写回 `nickname`
+ *（仅 UI 映射，不迁移数据）。
+ */
+const FIELD_OPTIONS: Array<{ value: "nickname" | "phone"; label: string }> = [
   { value: "nickname", label: "账号名" },
   { value: "phone", label: "手机号" },
-  { value: "note", label: "备注" },
 ];
 
 interface Props {
@@ -72,19 +81,25 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
   // 闭包内收窄：函数参数在闭包里不被 TS 收窄，先取到局部常量。
   const accountId = current.id;
   const hasPhone = Boolean(current.phoneNumber);
-  // 手机号不可用时回退账号名（含用户此前选择 phone 的存量数据）。
-  const effectiveField: DisplayField = field === "phone" && !hasPhone ? "nickname" : field;
+  /**
+   * UI 上的两态取值（R5-07）：
+   * - 选中「手机号」且确实有手机号 → `phone`；
+   * - 其余（含存量的 `note` 偏好、以及选了 phone 但账号没有手机号）→ `nickname`。
+   */
+  const effectiveField: "nickname" | "phone" = field === "phone" && hasPhone ? "phone" : "nickname";
 
   // 头部身份区展示官方字段（昵称 / 手机号 / 邮箱），不随本地显示偏好变化。
   const name = current.nickname ?? current.uid ?? current.id ?? "未命名账号";
   const subtitle = current.phoneNumber ?? accountIdentity(current);
   const uid = current.uid;
 
-  /** 「卡片显示」每格的实时预览值：备注格跟随输入框草稿，改完即可见。 */
-  function previewValue(value: DisplayField): string {
-    if (value === "nickname") return current?.nickname ?? "—";
+  /**
+   * 「卡片显示」每格的实时预览值：账号名格跟随备注草稿（备注优先），
+   * 这样用户边输入备注就能看到卡片上会变成什么名字。
+   */
+  function previewValue(value: "nickname" | "phone"): string {
     if (value === "phone") return current?.phoneNumber ?? "无手机号";
-    return note.trim() || "未填写备注";
+    return note.trim() || current?.nickname || current?.email || current?.uid || "—";
   }
 
   async function copyUid(value: string) {
@@ -201,7 +216,7 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
           <RadioGroup
             value={effectiveField}
             onValueChange={(value) => setField(value as DisplayField)}
-            className="grid grid-cols-3 gap-2"
+            className="grid grid-cols-2 gap-2"
           >
             {FIELD_OPTIONS.map((opt) => {
               const id = `display-field-${opt.value}`;
@@ -226,6 +241,9 @@ export function AccountInfoDialog({ open, onOpenChange, account, onSaved }: Prop
               );
             })}
           </RadioGroup>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            已填写备注时，卡片与列表优先显示备注；选择手机号则始终显示手机号。
+          </p>
           {!hasPhone && (
             <p className="text-[11px] text-muted-foreground">该账号没有手机号，无法按手机号显示。</p>
           )}

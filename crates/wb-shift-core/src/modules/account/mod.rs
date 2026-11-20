@@ -41,7 +41,8 @@ mod store;
 
 pub use display::{
     account_display_name, account_meta, build_auth_headers, display_value, envelope_token_error,
-    get_str, update_account_display, update_account_display_in,
+    get_str, mark_meta, update_account_display, update_account_display_in, MARK_COLORS,
+    MARK_TEXT_MAX_CHARS,
 };
 pub use identity::{
     enterprise_id_of, is_enterprise_account, save_collected_account, secret_value,

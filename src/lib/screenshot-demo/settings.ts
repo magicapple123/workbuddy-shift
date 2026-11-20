@@ -1,3 +1,4 @@
+import { displayName } from "../account-display";
 import type {
   AutoRotateConfig,
   CheckinConfig,
@@ -112,7 +113,7 @@ function rateLimitHookStatus(): RateLimitHookStatus {
 /** 签到日志只覆盖支持签到的档位；A/B/C 的索引与取值不变，企业版 D 追加在国际版之后。 */
 function checkinLogs(): CheckinLog[] {
   return hydratedAccounts().flatMap((account, accountIndex) => variantSupportsCheckin(accountVariant(account))
-    ? [0, 1, 2].map((daysAgo) => ({ ts: atLocalTime(daysAgo, 8, 6 + accountIndex * 9), accountId: account.id, email: account.nickname ?? account.email ?? account.id, result: accountIndex === 1 && daysAgo === 0 ? "already" : "success" }))
+    ? [0, 1, 2].map((daysAgo) => ({ ts: atLocalTime(daysAgo, 8, 6 + accountIndex * 9), accountId: account.id, email: displayName(account), result: accountIndex === 1 && daysAgo === 0 ? "already" : "success" }))
     : []);
 }
 

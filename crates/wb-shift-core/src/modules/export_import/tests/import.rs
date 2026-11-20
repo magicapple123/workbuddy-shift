@@ -61,6 +61,47 @@
         assert_eq!(accounts[0]["access_token"], "tok");
     }
 
+    /// R5-04：导入**旧备份**（不含 `mark`）不得冲掉本地标记。
+    ///
+    /// 覆盖分支会用导入记录整条替换本地记录，所以 `mark` 必须加进保留列表，
+    /// 与 `note` / `displayField` 同一处理。
+    #[test]
+    fn merge_keeps_local_mark_when_backup_has_none() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["note"] = json!("设计组-主号");
+        local["mark"] = json!({
+            "text": "即将限额",
+            "color": "warning",
+            "createdAt": 1_763_654_321_000_i64,
+            "expiresAt": null,
+        });
+        let mut accounts = vec![local];
+
+        let text = r#"[{ "id": "local", "uid": "u1", "nickname": "新名称", "access_token": "tok-new" }]"#;
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(result.overwritten, 1);
+        assert_eq!(accounts[0]["mark"]["text"], "即将限额", "旧备份缺 mark 时保留本地标记");
+        assert_eq!(accounts[0]["mark"]["color"], "warning");
+        assert_eq!(accounts[0]["note"], "设计组-主号", "note 同样保留");
+        assert_eq!(accounts[0]["nickname"], "新名称", "官方字段仍以导入记录为准");
+    }
+
+    /// R5-04：备份自带 `mark` 时以备份为准（导入即恢复用户当时的展示配置）。
+    #[test]
+    fn merge_restores_mark_from_backup() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["mark"] = json!({"text": "暂不使用", "color": "neutral", "createdAt": 1, "expiresAt": null});
+        let mut accounts = vec![local];
+
+        let text = r#"[{ "id": "local", "uid": "u1", "nickname": "新名称", "access_token": "tok-new",
+            "mark": { "text": "积分将过期", "color": "danger", "createdAt": 2, "expiresAt": 1800000000000 } }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(accounts[0]["mark"]["text"], "积分将过期");
+        assert_eq!(accounts[0]["mark"]["color"], "danger");
+        assert_eq!(accounts[0]["mark"]["expiresAt"], json!(1_800_000_000_000_i64));    }
+
     #[test]
     fn merge_appends_when_uid_missing_or_unmatched() {
         let mut accounts = vec![record("local", Some("u1"), "甲", None, true)];

@@ -66,6 +66,8 @@ export function useAccountsPage() {
   const [switchAccount, setSwitchAccount] = useState<AccountMeta | null>(null);
   /** 「账号信息」弹框目标账号（查看信息 / 编辑备注 / 选择显示字段）。 */
   const [infoTarget, setInfoTarget] = useState<AccountMeta | null>(null);
+  /** 「账号标记」弹框目标账号（R5-04；卡片图标与「…」菜单共用）。 */
+  const [markTarget, setMarkTarget] = useState<AccountMeta | null>(null);
   const [codebuddyCliSwitchingId, setCodebuddyCliSwitchingId] = useState<string | null>(null);
   /** CodeBuddy IDE 切换弹窗目标（null=关闭）；切换与可选会话复制/同步在弹窗内完成。 */
   const [codebuddyIdeSwitchAccount, setCodebuddyIdeSwitchAccount] = useState<AccountMeta | null>(null);
@@ -91,7 +93,7 @@ export function useAccountsPage() {
   const travelAvailable = variantSupportsTravel(variant);
   const enabledTools = useSupportedTools();
   const [compact, toggleCompact] = useCompactMode();
-  /** 排序偏好（localStorage `accounts.sort`）：六项单选 + 同一项再点反转。 */
+  /** 排序偏好（localStorage `accounts.sort`）：七项单选 + 同一项再点反转。 */
   const [sort, setSort] = usePersistedPreferenceState(SORT_PREFERENCE);
   /** 点击某个维度：非当前项切到该维度（用其默认方向），当前项只翻转方向。 */
   const onSortChange = useCallback(
@@ -417,6 +419,8 @@ export function useAccountsPage() {
     setSwitchAccount,
     infoTarget,
     setInfoTarget,
+    markTarget,
+    setMarkTarget,
     codebuddyCliSwitchingId,
     codebuddyIdeSwitchAccount,
     setCodebuddyIdeSwitchAccount,

@@ -97,17 +97,23 @@
         assert_eq!(account_meta(&json!({"id": "a4"}))["isEnterprise"], false);
     }
 
+    /// R5-07：前后端同一套「备注优先」顺序（昵称优先于邮箱）。
     #[test]
     fn account_display_name_priority() {
         assert_eq!(
             account_display_name(&json!({"email": "a@b.c", "nickname": "n"})),
-            "a@b.c"
+            "n"
+        );
+        assert_eq!(
+            account_display_name(&json!({"email": "a@b.c", "nickname": "n", "note": "备注"})),
+            "备注"
         );
         assert_eq!(
             account_display_name(&json!({"nickname": "n", "uid": "u"})),
             "n"
         );
         assert_eq!(account_display_name(&json!({"uid": "u"})), "u");
+        assert_eq!(account_display_name(&json!({"id": "i"})), "i");
         assert_eq!(account_display_name(&json!({})), "unknown");
     }
 

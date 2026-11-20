@@ -1,20 +1,39 @@
+import { Fragment, type ReactNode } from "react";
 import { CalendarCheck2, CalendarDays, CalendarOff, Gauge, PlaneTakeoff, Star } from "lucide-react";
-import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { AccountMeta, RateLimitBorrowed, RateLimitEntry, TravelStatus } from "@/lib/types";
+import type {
+  AccountMark,
+  AccountMeta,
+  RateLimitBorrowed,
+  RateLimitEntry,
+  TravelStatus,
+} from "@/lib/types";
 
-import { formatRateLimitClock, formatRateLimitRemaining, jetbrainsTooltip, travelTooltip, vscodeExtTooltip } from "./formatters";
+import { chipClass } from "./chip-class";
+import {
+  formatRateLimitClock,
+  formatRateLimitRemaining,
+  jetbrainsTooltip,
+  travelTooltip,
+  vscodeExtTooltip,
+} from "./formatters";
+import { AccountMarkChip } from "./mark-chip";
+import { HiddenStatusChips } from "./overflow-chip";
+import { selectCompactStatusChips, STATUS_PRIORITY, type StatusChipDescriptor } from "./status-selection";
 
-export const chipClass = "rounded-md px-1.5 py-0 text-[11px] font-medium";
+// 兼容既有导入方（`credit-section.tsx` 仍从本模块取 chipClass）。
+export { chipClass };
 
 /**
- * 卡片头部的状态 chip 区：企业版 / 签到 / 旅行 / 限额 / 失效 / 建议优先 / 多端在用。
+ * 卡片头部的状态 chip 区：标记 / 企业版 / 签到 / 旅行 / 限额 / 失效 / 建议优先 / 多端在用。
  *
- * 只负责把各状态的展示件按固定顺序拼起来；数据与判定都在调用方与上面的 chip 构造函数里，
- * 拆分前这段 JSX 直接写在 `account-card.tsx` 的组件体内。
+ * R5-05 起把「一串条件 JSX」重构成数据数组 `StatusChipDescriptor[]`：
+ * - 非紧凑卡：全部渲染，顺序与改造前一致（视觉零变化）；
+ * - 紧凑卡：按优先级只留 3 个槽位（标记钉住、永不收起），其余折叠成 `+N`，
+ *   保证 340px 宽度下账号名可读、标记不被挤掉。
  */
 export function AccountStatusChips({
   account,
@@ -23,6 +42,7 @@ export function AccountStatusChips({
   compact,
   creditPriority,
   now,
+  onEditMark,
   rateLimits,
   rateLimitBorrowed,
   todayCheckedIn,
@@ -36,42 +56,127 @@ export function AccountStatusChips({
   creditPriority?: boolean;
   /** 限额倒计时的本地时钟（每秒推进）。 */
   now: number;
+  /** 点击标记图标 → 打开标记对话框（有标记时才渲染图标）。 */
+  onEditMark?: () => void;
   rateLimits?: RateLimitEntry[];
   rateLimitBorrowed?: RateLimitBorrowed | null;
   todayCheckedIn?: boolean;
   travelStatus?: TravelStatus;
 }) {
-  return (
-    <>
-      {/* 企业版标注（issue #167）：身份属性优先于状态 chip。
-          紧凑卡片单行头部放不下（会挤掉账号名），徽标改在积分区显示。 */}
-      {!compact && account.isEnterprise && <Badge variant="secondary" className={chipClass}>企业版</Badge>}
-      {autoCheckinAllowed === false &&
-        statusIconChip({
-          icon: <CalendarOff className="size-3.5" />,
-          label: "自动签到已关闭",
-          tooltip: `${todayCheckedIn === undefined ? "" : todayCheckedIn ? "今日已签到。" : "今日未签到。"}该账号已关闭自动签到，刷新时也会忽略，仍可手动签到`,
-          variant: "secondary",
-        })}
-      {autoCheckinAllowed !== false && todayCheckedIn !== undefined &&
-        statusIconChip({
-          icon: todayCheckedIn ? (
-            <CalendarCheck2 className="size-3.5" />
-          ) : (
-            <CalendarDays className="size-3.5" />
-          ),
-          label: todayCheckedIn ? "今日已签到" : "今日未签到",
-          tooltip: todayCheckedIn ? "今日已签到" : "今日未签到",
-          variant: todayCheckedIn ? "success" : "secondary",
-        })}
-      {travelChip(travelStatus, compact)}
-      {rateLimitChip(rateLimits, now, rateLimitBorrowed, compact)}
-      {(account.needsRelogin || (typeof account.expiresAt === "number" && account.expiresAt < Date.now())) && (
-        <Badge variant="warning" className={chipClass}>
-          {account.needsRelogin ? "需重新登录" : "Token 已过期"}
-        </Badge>
-      )}
-      {creditPriority && (
+  const chips: StatusChipDescriptor[] = [];
+
+  // 1）用户标记（R5-04）：永远排在状态区首位，且钉住不被 `+N` 收起。
+  //    已过期的标记在这里被过滤掉（`activeMark`），但记录仍保留在账号库里。
+  const mark = activeMarkOf(account, now);
+  if (mark) {
+    chips.push({
+      key: "mark",
+      priority: STATUS_PRIORITY.mark,
+      pinned: true,
+      detail: mark.text,
+      node: <AccountMarkChip mark={mark} now={now} onEdit={onEditMark} />,
+    });
+  }
+
+  // 2）企业版标注（issue #167）：身份属性优先于状态 chip。
+  //    紧凑卡片单行头部放不下（会挤掉账号名），徽标改在积分区显示。
+  if (!compact && account.isEnterprise) {
+    chips.push({
+      key: "enterprise",
+      priority: STATUS_PRIORITY.enterprise,
+      detail: "企业版",
+      node: <Badge variant="secondary" className={chipClass}>企业版</Badge>,
+    });
+  }
+
+  // 3）自动签到被关闭（配置状态）。
+  if (autoCheckinAllowed === false) {
+    chips.push({
+      key: "autoCheckinOff",
+      priority: STATUS_PRIORITY.autoCheckinOff,
+      detail: "自动签到已关闭",
+      node: statusIconChip({
+        icon: <CalendarOff className="size-3.5" />,
+        label: "自动签到已关闭",
+        tooltip: `${todayCheckedIn === undefined ? "" : todayCheckedIn ? "今日已签到。" : "今日未签到。"}该账号已关闭自动签到，刷新时也会忽略，仍可手动签到`,
+        variant: "secondary",
+      }),
+    });
+  }
+
+  // 4）今日签到状态。
+  if (autoCheckinAllowed !== false && todayCheckedIn !== undefined) {
+    chips.push(
+      todayCheckedIn
+        ? {
+            key: "checkinDone",
+            priority: STATUS_PRIORITY.checkinDone,
+            detail: "今日已签到",
+            node: statusIconChip({
+              icon: <CalendarCheck2 className="size-3.5" />,
+              label: "今日已签到",
+              tooltip: "今日已签到",
+              variant: "success",
+            }),
+          }
+        : {
+            key: "checkinPending",
+            priority: STATUS_PRIORITY.checkinPending,
+            detail: "今日未签到",
+            node: statusIconChip({
+              icon: <CalendarDays className="size-3.5" />,
+              label: "今日未签到",
+              tooltip: "今日未签到",
+              variant: "secondary",
+            }),
+          },
+    );
+  }
+
+  // 5）旅行状态（纯信息）。
+  const travel = travelChip(travelStatus, compact);
+  if (travel && travelStatus) {
+    chips.push({
+      key: "travel",
+      priority: STATUS_PRIORITY.travel,
+      detail: travelTooltip(travelStatus),
+      node: travel,
+    });
+  }
+
+  // 6）模型限额（直接影响当前任务）。
+  const limits = rateLimitInfo(rateLimits, now, rateLimitBorrowed);
+  if (limits) {
+    chips.push({
+      key: "rateLimit",
+      priority: STATUS_PRIORITY.rateLimit,
+      detail: limits.label,
+      node: rateLimitChip(rateLimits, now, rateLimitBorrowed, compact),
+    });
+  }
+
+  // 7）需重新登录 / Token 已过期（阻断使用）。
+  const reloginLabel = account.needsRelogin
+    ? "需重新登录"
+    : typeof account.expiresAt === "number" && account.expiresAt < Date.now()
+      ? "Token 已过期"
+      : null;
+  if (reloginLabel) {
+    chips.push({
+      key: "relogin",
+      priority: STATUS_PRIORITY.relogin,
+      detail: reloginLabel,
+      node: <Badge variant="warning" className={chipClass}>{reloginLabel}</Badge>,
+    });
+  }
+
+  // 8）建议优先使用（有即将到期积分）。
+  if (creditPriority) {
+    chips.push({
+      key: "creditPriority",
+      priority: STATUS_PRIORITY.creditPriority,
+      detail: "建议优先使用",
+      node: (
         <Tooltip>
           <TooltipTrigger asChild>
             <Badge variant="warning" className={cn(chipClass, "px-1")} aria-label="建议优先">
@@ -80,12 +185,53 @@ export function AccountStatusChips({
           </TooltipTrigger>
           <TooltipContent side="top">建议优先使用</TooltipContent>
         </Tooltip>
-      )}
-      {!compact && activeProductCount >= 2 && (
-        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>{activeProductCount} 个工具正在使用</Badge>
-      )}
+      ),
+    });
+  }
+
+  // 9）多端在用汇总（非紧凑，纯信息）。
+  if (!compact && activeProductCount >= 2) {
+    chips.push({
+      key: "multiTool",
+      priority: STATUS_PRIORITY.multiTool,
+      detail: `${activeProductCount} 个工具正在使用`,
+      node: (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>
+          {activeProductCount} 个工具正在使用
+        </Badge>
+      ),
+    });
+  }
+
+  // 非紧凑卡：全部渲染，不排序、不截断（与改造前视觉一致）。
+  if (!compact) {
+    return (
+      <>
+        {chips.map((chip) => (
+          <Fragment key={chip.key}>{chip.node}</Fragment>
+        ))}
+      </>
+    );
+  }
+
+  // 紧凑卡：3 槽 + `+N`。
+  const { visible, hidden } = selectCompactStatusChips(chips);
+  return (
+    <>
+      {visible.map((chip) => (
+        <Fragment key={chip.key}>{chip.node}</Fragment>
+      ))}
+      {hidden.length > 0 && <HiddenStatusChips hidden={hidden} />}
     </>
   );
+}
+
+/** 卡片上应当展示的标记（已过期返回 null，与 `formatters.activeMark` 同语义）。 */
+function activeMarkOf(account: AccountMeta, now: number): AccountMark | null {
+  const mark = account.mark;
+  if (!mark) return null;
+  if (typeof mark.expiresAt === "number" && mark.expiresAt <= now) return null;
+  return mark;
 }
 
 export function statusIconChip({
@@ -99,7 +245,7 @@ export function statusIconChip({
   icon: ReactNode;
   label: string;
   tooltip: ReactNode;
-  variant: "secondary" | "success" | "warning";
+  variant: "secondary" | "success" | "warning" | "danger";
   /** 数量角标；≤1 时不显示（单个受限模型不需要角标）。 */
   count?: number;
   /** 置灰（未激活状态，如「未旅行」）：图标与角标一起使用 muted 前景色。 */
@@ -176,13 +322,12 @@ const SOURCE_LABELS: Record<string, string> = {
 const sourceLabelOf = (source?: string) =>
   source ? (SOURCE_LABELS[source] ?? "其它客户端") : null;
 
-export function rateLimitChip(
+/** 限额的纯文本摘要（chip 的 aria-label 与 `+N` 的 detail 共用，保证两处文案一致）。 */
+function rateLimitInfo(
   limits: RateLimitEntry[] | undefined,
   now: number,
   borrowed?: RateLimitBorrowed | null,
-  /** 紧凑卡片空间不足：兜底提示退化为图标 + tooltip，避免挤掉账号名。 */
-  compact = false,
-) {
+): { label: string; lines: string[]; count: number; borrowed: RateLimitBorrowed | null } | null {
   const active = (limits ?? [])
     .filter((limit) => Number.isFinite(limit.resetAt) && limit.resetAt > now)
     .sort((left, right) => left.resetAt - right.resetAt);
@@ -196,12 +341,33 @@ export function rateLimitChip(
     const source = sourceLabelOf(limit.source);
     return `${limit.model ?? "未知模型"} · ${formatRateLimitRemaining(limit.resetAt, now)}（${formatRateLimitClock(limit.resetAt, now)}）${source ? ` · 来自${source}` : ""}`;
   });
-  // 13-B：VS Code 无自有记录时只给「兜底提示」，不把其它客户端的模型限额冒充成 VS Code 的。
   if (activeBorrowed) {
     const clock = formatRateLimitClock(activeBorrowed.resetAt, now);
-    // 文案用**真实来源**（WorkBuddy / WorkBuddy 国际版 / CodeBuddy CLI…），不再笼统说
-    // 「其它客户端」：用户看到 WorkBuddy 桌面端限流却写着「其它客户端」会以为是误报。
-    const label = `${activeBorrowed.sourceLabel} 限流至 ${clock}`;
+    return {
+      // 文案用**真实来源**（WorkBuddy / WorkBuddy 国际版 / CodeBuddy CLI…），不再笼统说
+      // 「其它客户端」：用户看到 WorkBuddy 桌面端限流却写着「其它客户端」会以为是误报。
+      label: `${activeBorrowed.sourceLabel} 限流至 ${clock}`,
+      lines,
+      count: active.length,
+      borrowed: activeBorrowed,
+    };
+  }
+  return { label: `模型限额：${lines.join("；")}`, lines, count: active.length, borrowed: null };
+}
+
+export function rateLimitChip(
+  limits: RateLimitEntry[] | undefined,
+  now: number,
+  borrowed?: RateLimitBorrowed | null,
+  /** 紧凑卡片空间不足：兜底提示退化为图标 + tooltip，避免挤掉账号名。 */
+  compact = false,
+) {
+  const info = rateLimitInfo(limits, now, borrowed);
+  if (!info) return null;
+  const { label, lines, count, borrowed: activeBorrowed } = info;
+
+  // 13-B：VS Code 无自有记录时只给「兜底提示」，不把其它客户端的模型限额冒充成 VS Code 的。
+  if (activeBorrowed) {
     const tooltip = (
       <span className="flex flex-col gap-0.5 text-[11px] leading-4">
         <span>来自 {activeBorrowed.sourceLabel} 的记录；当前客户端用到同一账号/模型时可能同样受限。</span>
@@ -243,7 +409,7 @@ export function rateLimitChip(
       </span>
     ),
     variant: "warning",
-    count: active.length,
+    count: count,
   });
 }
 

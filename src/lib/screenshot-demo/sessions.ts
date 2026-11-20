@@ -1,3 +1,4 @@
+import { displayName } from "../account-display";
 import type {
   AccountMeta,
   Session,
@@ -266,7 +267,7 @@ export function buildDemoSessionGroups(
         accountId: account.id,
         uid: account.uid ?? `demo-uid-${memberIndex}`,
         sessionId: `${groupId}-session-${memberIndex + 1}`,
-        accountName: account.nickname || account.email || account.uid || "演示账号",
+        accountName: displayName(account),
         variant: accountVariant(account),
         linkState: "active" as const,
         versionStatus,

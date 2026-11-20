@@ -8,6 +8,11 @@ export interface AccountCardProps {
   onRefresh?: (a: AccountMeta) => void;
   /** 打开「账号信息」弹框（查看信息、编辑备注、选择显示字段）。 */
   onShowInfo?: (a: AccountMeta) => void;
+  /**
+   * 打开「账号标记」弹框（R5-04）：卡片上的标记图标与「…」菜单的标记项共用它。
+   * 缺省时不渲染菜单项，状态区的标记图标也不可点击。
+   */
+  onShowMark?: (a: AccountMeta) => void;
   onSwitch?: (a: AccountMeta) => void;
   todayCheckedIn?: boolean;
   /** 单账号参与许可，独立于全局开关；undefined 表示配置尚未加载。 */

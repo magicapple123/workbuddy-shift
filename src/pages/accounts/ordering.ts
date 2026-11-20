@@ -30,7 +30,7 @@ export function creditPriorityRank(credit?: CreditExpiry): number {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 排序维度（六项单选 + 同一项再点反转）                                        */
+/* 排序维度（七项单选 + 同一项再点反转）                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -42,6 +42,7 @@ export function creditPriorityRank(credit?: CreditExpiry): number {
  * - `creditRemaining`：「剩余积分」——当前剩余积分总量。
  * - `creditUpdated`：「最近更新」——积分采集时刻（卡片右下「18:33 更新」）。
  * - `name`：显示名（中文按拼音，数字按数值）。
+ * - `mark`：账号标记的创建时刻（R5-04，第七项）——最近标记的在前。
  *
  * 这些字符串会写进 localStorage 的 `accounts.sort`，改动等于让用户偏好失效，勿轻易重命名。
  */
@@ -51,7 +52,8 @@ export type SortKey =
   | "creditExpiry"
   | "creditRemaining"
   | "creditUpdated"
-  | "name";
+  | "name"
+  | "mark";
 
 export type SortDirection = "asc" | "desc";
 
@@ -60,7 +62,7 @@ export interface SortState {
   dir: SortDirection;
 }
 
-/** 六项排序维度的固定迭代顺序（菜单与解析共用）。 */
+/** 七项排序维度的固定迭代顺序（菜单与解析共用）。 */
 export const SORT_KEYS: readonly SortKey[] = [
   "default",
   "rateLimitRecovery",
@@ -68,6 +70,7 @@ export const SORT_KEYS: readonly SortKey[] = [
   "creditRemaining",
   "creditUpdated",
   "name",
+  "mark",
 ];
 
 /**
@@ -82,6 +85,8 @@ export const SORT_DEFAULT_DIRECTION: Record<SortKey, SortDirection> = {
   creditRemaining: "desc",
   creditUpdated: "desc",
   name: "asc",
+  // 「最近标记的在前」是打过标记之后的第一诉求，默认方向与「最近更新」一致。
+  mark: "desc",
 };
 
 /** 缺省排序：现有行为（不发任何排序请求即等于它）。 */
@@ -251,7 +256,7 @@ export function orderAccountsByCredit(
 }
 
 /* -------------------------------------------------------------------------- */
-/* 六项排序入口                                                                 */
+/* 七项排序入口                                                                 */
 /* -------------------------------------------------------------------------- */
 
 /** 排序所需的全部信号快照（都是账号页已有的映射，避免排序层再连 store）。 */
@@ -313,6 +318,10 @@ export function sortAccounts(
         const name = displayName(account).trim();
         return name.length > 0 ? name : null;
       }
+      case "mark":
+        // 用 `createdAt` 而不是 `expiresAt`：默认时长为「不自动过期」，按到期时间排序会把
+        // 大部分标记排到最后；紧迫度已经由 chip 上的剩余时间表达。
+        return account.mark?.createdAt ?? null;
       default:
         return null;
     }

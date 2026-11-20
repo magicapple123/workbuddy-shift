@@ -1250,3 +1250,183 @@ fn session_row_info_reads_a_legacy_table_without_deleted_at() {
     // 缺列 + 行不存在：仍然是 None（不能因为缺列就把「不存在」当成「存在」）。
     assert_eq!(session_row_info(&env.paths(), "missing"), None);
 }
+
+// ---------------------------------------------------------------------------
+// R5-16 切号弹窗预览的摘要 / 判定缓存
+// ---------------------------------------------------------------------------
+
+use crate::modules::session_link::real_read_count;
+
+/// 预览项里除一次性凭据之外的全部字段（凭据每次都新发，不参与比对）。
+fn groups_without_token(preview: &Value) -> Vec<Value> {
+    preview["groups"]
+        .as_array()
+        .map(|groups| {
+            groups
+                .iter()
+                .map(|item| {
+                    let mut item = item.clone();
+                    if let Some(object) = item.as_object_mut() {
+                        object.remove("previewToken");
+                    }
+                    item
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 等长改写正文（用于构造「长度没变、只有 mtime 变了」的失效场景）。
+fn rewrite_same_length(path: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(from.len(), to.len(), "等长改写的前提");
+    assert!(text.contains(from), "正文里应包含 {from}");
+    let patched = text.replacen(from, to, 1);
+    assert_eq!(patched.len(), text.len());
+    std::fs::write(path, &patched).unwrap();
+}
+
+/// 把 mtime 推到 1 小时后：与刚写入的时刻一定可区分，不受系统时钟粒度影响。
+fn bump_mtime(path: &Path) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+
+/// 第二次打开切号弹窗不再读取任何正文，且判定结果与首次逐字段一致。
+#[test]
+fn preview_second_open_reuses_cached_decisions_without_reading_bodies() {
+    // `fast_forward_scene` 内部已经预览过一次，判定缓存是温的。
+    let env = ready_env("preview-cache-hit");
+    fast_forward_scene(&env);
+
+    let reads_before = real_read_count();
+    let first = preview(&env, "uid-b");
+    assert_eq!(
+        real_read_count(),
+        reads_before,
+        "缓存命中时预览不得读取正文"
+    );
+    let reads_after_first = real_read_count();
+    let second = preview(&env, "uid-b");
+    assert_eq!(
+        real_read_count(),
+        reads_after_first,
+        "再次预览仍不得读取正文"
+    );
+    assert_eq!(
+        groups_without_token(&first),
+        groups_without_token(&second),
+        "命中缓存必须给出与首次一致的判定"
+    );
+    // 凭据仍然每次新发（缓存不缓存凭据）。
+    assert!(second["groups"][0]["previewToken"].as_str().is_some());
+}
+
+/// 预览之间来源追加记录（len 变化）→ 判定必须重新计算，不得沿用旧判定。
+#[test]
+fn preview_decision_cache_invalidates_when_body_grows() {
+    let env = ready_env("preview-cache-append");
+    fast_forward_scene(&env);
+    let warm = preview(&env, "uid-b");
+    assert_eq!(warm["groups"][0]["recordCount"]["source"], 5, "{warm}");
+
+    append_records(&env.body_path("sess-1"), "sess-1", 10, 2);
+    let reads_before = real_read_count();
+    let after = preview(&env, "uid-b");
+    assert!(
+        real_read_count() > reads_before,
+        "len 变化必须回落到真实读取"
+    );
+    assert_eq!(after["groups"][0]["verdict"], "fastForward", "{after}");
+    assert_eq!(
+        after["groups"][0]["recordCount"]["source"], 7,
+        "记录数必须来自本次读取，不能是缓存里的 5：{after}"
+    );
+    assert_eq!(after["groups"][0]["extraA"], 5, "{after}");
+}
+
+/// 预览之间等长改写目标正文（只有 mtime 变化）→ 判定同样必须失效。
+#[test]
+fn preview_decision_cache_invalidates_on_mtime_only_change() {
+    let env = ready_env("preview-cache-mtime");
+    let (_, _, target_id) = fast_forward_scene(&env);
+    let warm = preview(&env, "uid-b");
+    assert_eq!(warm["groups"][0]["verdict"], "fastForward", "{warm}");
+
+    let target_path = env.body_path(&target_id);
+    rewrite_same_length(&target_path, "\"text\":\"hi\"", "\"text\":\"ho\"");
+    bump_mtime(&target_path);
+
+    let reads_before = real_read_count();
+    let after = preview(&env, "uid-b");
+    assert!(
+        real_read_count() > reads_before,
+        "mtime 变化必须回落到真实读取"
+    );
+    assert_eq!(
+        after["groups"][0]["verdict"], "diverge",
+        "目标内容已变，判定必须跟着变：{after}"
+    );
+    assert_eq!(after["groups"][0]["recordCount"]["target"], 2, "{after}");
+}
+
+/// 执行路径不复用预览缓存：预览之后手工改目标正文，同步必须报「检查结果已失效」。
+///
+/// 如果执行路径命中了预览缓存，它拿到的还是预览时刻的摘要，会认为「什么都没变」并
+/// 直接写入——所以「被拦下」正是执行路径真实读取的证据。
+#[test]
+fn sync_execution_ignores_preview_decision_cache() {
+    let env = ready_env("preview-cache-exec");
+    let (group_id, token, target_id) = fast_forward_scene(&env);
+    // 预热判定缓存（同时证明命中路径不会把结果写进任何执行侧结构）。
+    let warm = preview(&env, "uid-b");
+    assert_eq!(warm["groups"][0]["verdict"], "fastForward", "{warm}");
+
+    let target_path = env.body_path(&target_id);
+    rewrite_same_length(&target_path, "\"text\":\"hi\"", "\"text\":\"ho\"");
+    bump_mtime(&target_path);
+    let body_before = std::fs::read_to_string(&target_path).unwrap();
+
+    let reads_before = real_read_count();
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert!(
+        real_read_count() > reads_before,
+        "执行路径必须重新读取正文"
+    );
+    assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+    assert!(report["errors"].as_array().unwrap().is_empty(), "{report}");
+    assert_eq!(report["skipped"][0]["reasonCode"], REASON_PREVIEW_STALE);
+    // 零写入：目标正文原样保留。
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        body_before
+    );
+}
+
+/// 执行侧的读取原语（`member_content_state`）永远实读，且拿得到真实正文。
+#[test]
+fn execution_content_read_is_never_served_from_cache() {
+    let env = ready_env("preview-cache-primitive");
+    let (_, _, target_id) = fast_forward_scene(&env);
+    let _ = preview(&env, "uid-b");
+
+    let reads_before = real_read_count();
+    let state = member_content_state(&env.paths(), &target_id);
+    assert_eq!(
+        real_read_count(),
+        reads_before + 1,
+        "执行路径的读取原语必须实读，不得命中预览缓存"
+    );
+    match state {
+        ContentState::Ready(snapshot) => {
+            assert!(!snapshot.text.is_empty(), "执行路径要拿到真实正文落盘");
+            assert_eq!(snapshot.normalized.record_count, 2);
+        }
+        other => panic!("目标正文应可验证，实际 {other:?}"),
+    }
+}

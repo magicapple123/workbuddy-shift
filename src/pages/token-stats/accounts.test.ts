@@ -136,4 +136,23 @@ describe("Token 账号维度", () => {
     expect(accountLabel("", ACCOUNTS)).toBe("未归属");
     expect(selectionLabel({ kind: "all" }, ACCOUNTS)).toBe("所有账号");
   });
+
+  /**
+   * R5-07：Token 统计下拉与账号卡片同名——有备注显示备注，显式手机号偏好仍然压过备注。
+   *
+   * 此前的本地实现是「昵称 → 邮箱」，用户自己写的备注完全不出现。
+   */
+  it("账号显示名复用全局口径：备注优先、手机号例外、无备注回退昵称/邮箱", () => {
+    const noted = [{ ...ACCOUNTS[0], note: "设计组-主号" }];
+    expect(accountLabel("uid-a", noted)).toBe("设计组-主号");
+    expect(
+      accountLabel("uid-a", [
+        { ...ACCOUNTS[0], note: "设计组-主号", phoneNumber: "13800000000", displayField: "phone" },
+      ]),
+    ).toBe("13800000000");
+    // 无备注：昵称 → 邮箱 → uid。
+    expect(accountLabel("uid-a", ACCOUNTS)).toBe("账号 A");
+    expect(accountLabel("uid-b", ACCOUNTS)).toBe("b@example.com");
+    expect(accountLabel("uid-c", ACCOUNTS)).toBe("uid-c");
+  });
 });

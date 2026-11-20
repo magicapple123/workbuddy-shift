@@ -369,3 +369,54 @@ describe("sortAccounts 通用行为", () => {
     expect(result.ready).toBe(false);
   });
 });
+
+/**
+ * R5-04 第七项排序：「标记」按 `mark.createdAt` 比较。
+ *
+ * 关键在于**缺值恒排最后，与方向无关**——否则升序时「没有标记」的账号会顶到最前面。
+ */
+describe("sortAccounts 标记", () => {
+  /** 构造一条标记（`expiresAt` 默认不自动过期）。 */
+  function mark(createdAt: number) {
+    return { text: "即将限额", color: "warning" as const, createdAt, expiresAt: null };
+  }
+
+  const accounts = [
+    account("older", { mark: mark(now - 2 * 86_400_000) }),
+    account("none"),
+    account("newer", { mark: mark(now - 3_600_000) }),
+  ];
+
+  it("默认降序：最近标记的在前，无标记恒末尾", () => {
+    const result = sortAccounts(accounts, { key: "mark", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["newer", "older", "none"]);
+  });
+
+  it("升序同样把无标记的放最后", () => {
+    const result = sortAccounts(accounts, { key: "mark", dir: "asc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["older", "newer", "none"]);
+  });
+
+  it("默认方向是 desc", () => {
+    expect(nextSortState({ key: "name", dir: "asc" }, "mark")).toEqual({ key: "mark", dir: "desc" });
+  });
+
+  it("老版本读到 \"mark\" 不会崩：解析成合法状态，未知维度回退默认", () => {
+    expect(parseSort('{"key":"mark","dir":"asc"}')).toEqual({ key: "mark", dir: "asc" });
+    expect(parseSort("mark")).toEqual({ key: "mark", dir: "desc" });
+    expect(parseSort('{"key":"nope","dir":"asc"}')).toEqual(DEFAULT_SORT);
+  });
+
+  it("已过期的标记仍然参与排序（只影响卡片是否显示图标）", () => {
+    const expired = [
+      account("expired", {
+        mark: { text: "即将限额", color: "warning", createdAt: now - 1_000, expiresAt: now - 500 },
+      }),
+      account("live", {
+        mark: { text: "即将限额", color: "warning", createdAt: now - 5_000, expiresAt: now + 60_000 },
+      }),
+    ];
+    const result = sortAccounts(expired, { key: "mark", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["expired", "live"]);
+  });
+});

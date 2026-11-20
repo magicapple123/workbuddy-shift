@@ -223,7 +223,7 @@ describe("演示模式下客户端操作一致禁用", () => {
     }
   });
 
-  it("紧凑卡片：头部 5 个客户端入口全部由 DemoAction 接管", async () => {
+  it("紧凑卡片：产品切换收成一个下拉（R5-05），不再内联 5 个写操作按钮", async () => {
     vi.resetModules();
     vi.stubEnv("VITE_DEMO_MODE", "1");
     try {
@@ -236,7 +236,11 @@ describe("演示模式下客户端操作一致禁用", () => {
           featuresDisabled: false,
         }),
       );
-      expect(countDemoWrappers(html)).toBe(5);
+      // 紧凑卡改成「一个下拉 + 置灰原因」：不再有 5 份 DemoAction 包装，也没有内联的写按钮。
+      expect(countDemoWrappers(html)).toBe(0);
+      expect(html.split('aria-label="切换产品"').length - 1).toBe(1);
+      expect(html).not.toContain("设为 WorkBuddy 当前账号");
+      expect(html).not.toContain("切换到 CodeBuddy IDE");
     } finally {
       vi.unstubAllEnvs();
       vi.resetModules();
@@ -263,14 +267,16 @@ describe("演示模式下客户端操作一致禁用", () => {
 /**
  * 紧凑卡片头部原本内联 5 份「当前账号」角标（标记 + 勾选角标），现统一复用
  * `ProductCurrentState` 的图标角标形态；宽卡片 footer 的胶囊形态保持原样。
+ *
+ * R5-05 起紧凑卡的产品入口收成一个下拉，头部不再出现 5 份角标：
+ * 当前产品由下拉触发器上的图标表达，其余产品在菜单里用勾选表达。
  */
 describe("当前账号角标复用 ProductCurrentState", () => {
-  it("紧凑卡片：5 个当前账号角标都有 role=status 与产品 aria-label", () => {
+  it("宽松卡片：5 个当前账号角标都有 role=status 与产品 aria-label（footer 胶囊形态）", () => {
     const html = renderToStaticMarkup(
       createElement(AccountCard, {
         account: account(),
         onDelete: () => {},
-        compact: true,
         featuresDisabled: false,
         workbuddyActive: true,
         codebuddyCnIdeActive: true,
@@ -291,5 +297,153 @@ describe("当前账号角标复用 ProductCurrentState", () => {
     }
     // 当前账号态不是操作入口，不应出现演示模式的只读包装。
     expect(countDemoWrappers(html)).toBe(0);
+  });
+
+  it("紧凑卡片：产品入口收成一个下拉，头部不再内联 5 份角标", () => {
+    const html = renderToStaticMarkup(
+      createElement(AccountCard, {
+        account: account(),
+        onDelete: () => {},
+        compact: true,
+        featuresDisabled: false,
+        workbuddyActive: true,
+        codebuddyCnIdeActive: true,
+        vscodeExtActive: true,
+        jetbrainsActive: true,
+        codebuddyCliActive: true,
+      }),
+    );
+    expect(html.split('aria-label="切换产品"').length - 1).toBe(1);
+    expect(html.split('role="status"').length - 1).toBe(0);
+  });
+});
+
+/**
+ * R5-04：标记在卡片上**只有图标**（Tag，无文字、无左侧色条），可点击，读屏可读。
+ *
+ * 过期后图标消失（`activeMark` 过滤），但账号库里的记录仍在——这条只校验渲染，
+ * 持久化由 core 单测覆盖。
+ */
+describe("账号标记图标", () => {
+  const liveMark = {
+    text: "即将限额",
+    color: "warning" as const,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 2 * 3_600_000,
+  };
+
+  it("有标记：状态区渲染可点击的标记图标，aria-label 含文本与剩余时间", () => {
+    const html = render(
+      account({ mark: liveMark }),
+      {
+        ok: true,
+        unlimited: false,
+        totalCapacity: 2000,
+        totalRemaining: 1500,
+        expiringSoonRemaining: 0,
+        expiredRemaining: 0,
+        soonestExpireAt: null,
+        expiringSoon: false,
+        expired: false,
+        resources: [],
+      },
+    );
+    const header = headerOf(html);
+    expect(header).toContain("aria-label=\"标记：即将限额，剩 2 小时，点击编辑\"");
+    // 只有图标：状态区里不应出现标记文本。
+    expect(header).not.toContain(">即将限额<");
+    // 可点击 → 是 button 而不是 span。
+    expect(header).toContain("<button");
+  });
+
+  it("没有标记：不渲染标记图标", () => {
+    const html = render(account(), {
+      ok: true,
+      unlimited: false,
+      totalCapacity: 2000,
+      totalRemaining: 1500,
+      expiringSoonRemaining: 0,
+      expiredRemaining: 0,
+      soonestExpireAt: null,
+      expiringSoon: false,
+      expired: false,
+      resources: [],
+    });
+    expect(headerOf(html)).not.toContain("标记：");
+  });
+
+  it("标记已过期：图标消失（记录保留由 core 单测覆盖）", () => {
+    const html = render(
+      account({
+        mark: { ...liveMark, createdAt: Date.now() - 7_200_000, expiresAt: Date.now() - 60_000 },
+      }),
+      {
+        ok: true,
+        unlimited: false,
+        totalCapacity: 2000,
+        totalRemaining: 1500,
+        expiringSoonRemaining: 0,
+        expiredRemaining: 0,
+        soonestExpireAt: null,
+        expiringSoon: false,
+        expired: false,
+        resources: [],
+      },
+    );
+    expect(headerOf(html)).not.toContain("标记：");
+  });
+
+  it("紧凑卡片同样只渲染图标（不挤占账号名、不出现文字 chip）", () => {
+    const html = render(
+      account({ mark: liveMark }),
+      {
+        ok: true,
+        unlimited: false,
+        totalCapacity: 2000,
+        totalRemaining: 1500,
+        expiringSoonRemaining: 0,
+        expiredRemaining: 0,
+        soonestExpireAt: null,
+        expiringSoon: false,
+        expired: false,
+        resources: [],
+      },
+      true,
+    );
+    expect(headerOf(html)).toContain("标记：即将限额");
+    expect(headerOf(html)).not.toContain(">即将限额<");
+  });
+});
+
+/**
+ * R5-05 紧凑卡 3 槽收纳的渲染侧断言：超出槽位的状态折叠成 `+N`，
+ * `aria-label` 列出被收起的项（选择逻辑本身在 `status-selection.test.ts`）。
+ */
+describe("紧凑卡状态收纳", () => {
+  it("标记 + 3 个系统状态 → 渲染 +1，且被收起项的文案进 aria-label", () => {
+    const html = renderToStaticMarkup(
+      createElement(AccountCard, {
+        account: account({
+          mark: {
+            text: "即将限额",
+            color: "warning",
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 3_600_000,
+          },
+        }),
+        onDelete: () => {},
+        compact: true,
+        featuresDisabled: false,
+        todayCheckedIn: true,
+        travelStatus: { label: "traveling", locationName: "巴黎", rewardCredit: 100, arriveAt: null },
+        rateLimits: [{ model: "claude", resetAt: Date.now() + 600_000, firstSeenAt: 0, hitCount: 1 }],
+      }),
+    );
+    const header = headerOf(html);
+    // 4 个状态 → 槽 3 → 收起 1 个（旅行，优先级最后）。
+    expect(header).toContain("+1");
+    expect(header).toContain("还有 1 个状态：");
+    // 标记永远不进 +N。
+    expect(header).toContain("标记：即将限额");
   });
 });

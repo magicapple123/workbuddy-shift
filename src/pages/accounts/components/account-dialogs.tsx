@@ -1,4 +1,5 @@
 import { AccountInfoDialog } from "@/components/account-info-dialog";
+import { AccountMarkDialog } from "@/components/account-mark-dialog";
 import { CodebuddyIdeSwitchAccountDialog } from "@/components/codebuddy-ide-switch-account-dialog";
 import { ExportAccountsDialog } from "@/components/export-accounts-dialog";
 import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
@@ -57,6 +58,19 @@ export function AccountDialogs({ page }: { page: AccountsPageController }) {
           if (!open) page.setInfoTarget(null);
         }}
         account={page.infoTarget}
+        onSaved={() => {
+          void page.fetchAll();
+        }}
+      />
+      {/* 账号标记（R5-04）：卡片图标与「…」菜单都打开这一个弹窗；积分 / 限额用于智能提示。 */}
+      <AccountMarkDialog
+        open={page.markTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) page.setMarkTarget(null);
+        }}
+        account={page.markTarget}
+        credit={page.markTarget ? page.creditMap[page.markTarget.id] : undefined}
+        rateLimits={page.markTarget ? page.rateLimitMap[page.markTarget.id] : undefined}
         onSaved={() => {
           void page.fetchAll();
         }}

@@ -95,6 +95,7 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
           onDelete={page.onDelete}
           onSwitch={page.setSwitchAccount}
           onShowInfo={page.setInfoTarget}
+          onShowMark={page.setMarkTarget}
           onCheckin={checkinAvailable ? page.onCheckin : undefined}
           onRefresh={page.onRefresh}
           todayCheckedIn={checkinMap[account.id]}

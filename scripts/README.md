@@ -125,11 +125,61 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | `check-companion-contract.mjs` | 悬浮窗公开演示 postMessage channel 两端一致检查 |
 | `bump-version.sh` | 统一 bump 版本（单一版本源；同步 6 crate、前端/npm/tauri 清单与 Cargo.lock） |
 | `build-companion.mjs` | 内置悬浮窗嵌入包 / 运行时 / 演示包构建（见 docs/companion.md） |
-| `gen-update-json.sh` / `merge-update-manifests.py` | 生成 / 合并 Tauri updater 清单（CI 发版流程使用） |
+| `gen-update-json.sh` / `merge-update-manifests.py` | 生成 / 合并 Tauri updater 清单（CI 发版流程使用；`notes` 口径见下节） |
 | `make-dmg.sh` / `dmgbuild-settings.py` | macOS DMG 打包（CI 无 Finder 环境使用 dmgbuild） |
 | `fix-app.sh` | 本机 macOS 构建后把 dist 补进真实 `.app`（glob 定位，不写死名字） |
 | `gen-tray-icon.py` / `gen-tray-template.py` / `gen-windows-rounded-icon.py` / `compare-icons.py` | 托盘图标 / Windows 圆角图标 / 图标对比工具（手动运行，不参与构建） |
 | `with-env.mjs` | 跨平台环境变量前缀执行（pnpm scripts 使用） |
+
+### 更新清单的 `notes` 口径（R5-01）
+
+`gen-update-json.sh` 产出的 `latest-*.json` 里，`notes` 的语义是**应用内卡片摘要（纯文本）**，
+不是 Release 说明全文。完整说明由 `GITHUB_RELEASE_URL` 承载（卡片底部的「查看完整说明」）。
+
+为什么改：`docs/release-notes-v*.md` 是**面向 GitHub Release 页**写的——含安装包选择表、
+`.sig` / `latest*.json` 的用途说明、「下载哪个？」这类只在 Release 页有意义的段落。
+整份塞进 360px 宽的卡片，展开后会原样显示 `## 升级说明`、`| --- | --- |`、`> latest-*.json`，
+折叠态头三行只剩标题与空行，一条实质内容都看不到。
+
+取值顺序：
+
+1. `.md` 里的 `<!-- card:begin -->` … `<!-- card:end -->` 区块（**推荐**，语义清晰、可控）；
+2. 没有标记时退化为整份正文（同样走清洗，保证老笔记也能出可读摘要）。
+
+清洗规则（脚本内用 Python 标准库实现）：
+
+- 表格整段丢弃（表头 + `| --- |` 分隔行 + 数据行）。**不做**表格→列表转换：360px 宽度排不出表；
+- 标题行整行丢弃（卡片自带「发现新版本 vX」，`## 新增` 只会剩一行孤立的「新增」）；
+- 去行首 `>`、`-` / `*` / `+`、`1.` 等标记，去 `**` / `__` / 反引号，`[文字](链接)` → 文字；
+- 去「发布日期：…」这类只属于 Release 页的元信息行；
+- 连续空行压成一个，首尾 `trim`；
+- 最终 ≤ **600 字符**（约 10 行 × 60 字），超出按行边界截断并补 `…`。
+
+写下一版发布说明时，在文件顶部加一段摘要区块即可：
+
+```markdown
+<!-- card:begin -->
+一句话说清这次更新带来了什么。
+
+- 一条一条列用户能感知的变化
+<!-- card:end -->
+
+# WorkBuddy Shift 0.2.x
+...
+```
+
+两条兜底：
+
+- **无 Python** → `notes` 留空并打日志，卡片只显示版本号与「查看完整说明」，绝不塞脏 Markdown；
+- **前端** `cleanNotes()`（`src/components/update-prompt.ts`）再洗一遍。已经发布的清单不会回改，
+  老客户端会一直收到旧格式，这层保证它们至少不再露出 `##` / `| --- |`。
+
+脚本写完清单会**立刻自检 JSON 合法性**：`notes` 里的引号把 JSON 写坏时，客户端会当成
+「清单不可达」而不是报错，发版后才排查代价极高。
+
+> 没有真实签名产物时脚本会 **fail fast**（`期望恰好 1 个签名包，实际 0` 并 `exit 1`），
+> 不会产出半截 JSON。离线自验：造一个假 `*.sig` + 同名产物到 `BUNDLE_DIR`，
+> 用 `UPDATE_VERSION=9.9.9` 覆盖版本号即可跑到清洗逻辑，不需要联网、不需要真签名。
 
 ### 会话诊断 / 修复（一次性，手动运行）
 

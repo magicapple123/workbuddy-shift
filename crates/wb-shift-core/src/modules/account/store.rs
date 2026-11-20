@@ -101,9 +101,10 @@ pub(super) fn upsert_account_in(accounts: &mut Vec<Value>, updated: &Value) {
     if let Some(index) = matched_index {
         let mut next = updated.clone();
         inherit_existing_variant(&accounts[index], &mut next);
-        // 本地展示字段（备注 / 显示选择）不从官方数据来：updated 缺失时保留已有值。
+        // 本地展示字段（备注 / 显示选择 / 标记）不从官方数据来：updated 缺失时保留已有值。
+        // 刷新 Token 走的就是这条路径，漏掉 `mark` 会让标记在刷新后被整条记录覆盖掉（R5-04）。
         if let Some(obj) = next.as_object_mut() {
-            for key in ["note", "displayField"] {
+            for key in ["note", "displayField", "mark"] {
                 if !obj.contains_key(key) {
                     if let Some(v) = accounts[index].get(key) {
                         obj.insert(key.to_string(), v.clone());

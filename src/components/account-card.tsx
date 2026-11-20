@@ -28,14 +28,17 @@ export function AccountCard(props: AccountCardProps) {
   } = props;
   const [now, setNow] = useState(() => Date.now());
   /**
-   * 限额图标要随官方恢复时刻自动消失（AC3），所以本地每秒走一次时钟。
-   * 只在确实有受限模型时才开定时器，普通卡片不引入额外开销。
+   * 限额图标与标记图标都要随时间自动消失，所以本地每秒走一次时钟：
+   * - 限额：官方恢复时刻到了就消失（AC3）；
+   * - 标记（R5-04）：`expiresAt` 到了就隐藏，「剩 32 分钟」也要自己走。
+   * 只在确实需要倒计时时才开定时器，普通卡片不引入额外开销。
    */
+  const markExpiresAt = account.mark?.expiresAt ?? null;
   useEffect(() => {
-    if (!rateLimits?.length) return;
+    if (!rateLimits?.length && markExpiresAt === null) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [rateLimits]);
+  }, [rateLimits, markExpiresAt]);
   const name = displayName(account);
   const avatarClass = avatarTone(name);
   const activeProductCount = [workbuddyActive, codebuddyCliActive, codebuddyCnIdeActive, vscodeExtActive, jetbrainsActive].filter(Boolean).length;
@@ -55,6 +58,7 @@ export function AccountCard(props: AccountCardProps) {
               compact={compact}
               creditPriority={creditPriority}
               now={now}
+              onEditMark={props.onShowMark ? () => props.onShowMark?.(props.account) : undefined}
               rateLimits={rateLimits}
               rateLimitBorrowed={rateLimitBorrowed}
               todayCheckedIn={todayCheckedIn}

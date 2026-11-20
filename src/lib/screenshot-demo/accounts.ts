@@ -1,5 +1,7 @@
+import { displayName } from "../account-display";
 import { normalizeVariant } from "../variant";
 import type {
+  AccountMark,
   AccountMeta,
   AppStatus,
   AutoRotateConfig,
@@ -56,7 +58,9 @@ export const intlAccountA: AccountMeta = { id: "demo-account-ai-a", uid: "demo-i
 const intlAccountB: AccountMeta = { id: "demo-account-ai-b", uid: "demo-intl-002", email: "intl-b@example.com", nickname: "国际版 B", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "ai" };
 
 export const accounts: AccountMeta[] = [
-  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", nickname: "测试 A", phoneNumber: "138 0013 8001", note: "主力账号", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
+  // 演示账号 A 带一条 2 小时后到期的标记（R5-04）：截图上能看到状态区首位的标签图标，
+  // 悬停显示「即将限额 / 至 … · 剩 2 小时 / 创建于 …」。
+  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", nickname: "测试 A", phoneNumber: "138 0013 8001", note: "主力账号", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn", mark: { text: "即将限额", color: "warning", createdAt: Date.now(), expiresAt: Date.now() + 2 * 3_600_000 } },
   { id: "demo-account-b", uid: "demo-user-002", email: "test-b@example.com", nickname: "测试 B", phoneNumber: "138 0013 8002", note: "备用号", displayField: "note", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
   // 企业版有限配额：卡片应显示「企业版」徽标 + 单条「企业配额」。
   { id: "demo-account-c", uid: "demo-user-003", email: "test-c@example.com", nickname: "测试 C", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn", isEnterprise: true },
@@ -157,7 +161,7 @@ export function accountsDemoResponse(
       dbExists: true,
       appPath: "/demo/CodeBuddy CN.app",
       activeAccountId: demoAccounts[1].id,
-      activeAccountName: demoAccounts[1].nickname,
+      activeAccountName: displayName(demoAccounts[1]),
     } satisfies CodeBuddyCnIdeStatus;
     // 国际版同理：不 mock 会让演示切到「国际版」时落到 default → throw（被 AccountsPage 的
     // try/catch 吞掉），IDE 标记退化成「未接入」——而这正是本轮国际版 IDE 功能在演示页的展示面。
@@ -170,7 +174,7 @@ export function accountsDemoResponse(
       dbExists: true,
       appPath: "/demo/CodeBuddy IDE.app",
       activeAccountId: intlAccountA.id,
-      activeAccountName: intlAccountA.nickname,
+      activeAccountName: displayName(intlAccountA),
     } satisfies CodeBuddyCnIdeStatus;
 
     case "get_vscode_ext_status": return {
@@ -182,7 +186,7 @@ export function accountsDemoResponse(
       dbPath: "/demo/Code/User/globalStorage/state.vscdb",
       dbExists: true,
       activeAccountId: demoAccounts[0].id,
-      activeAccountName: demoAccounts[0].nickname,
+      activeAccountName: displayName(demoAccounts[0]),
       detectedFrom: "state",
       statePath: "/demo/vscode_ext.json",
     } satisfies VscodeExtStatus;
@@ -205,7 +209,7 @@ export function accountsDemoResponse(
         },
       ],
       activeAccountId: demoAccounts[2]?.id ?? null,
-      activeAccountName: demoAccounts[2]?.nickname ?? null,
+      activeAccountName: demoAccounts[2] ? displayName(demoAccounts[2]) : null,
       detectedFrom: "secret-storage",
       statePath: "/demo/jetbrains_ext.json",
     } satisfies JetbrainsStatus;
@@ -221,12 +225,23 @@ export function accountsDemoResponse(
     case "update_account_display": {
       const target = accounts.find((account) => account.id === args?.accountId);
       if (!target) throw new Error("账号不存在");
-      const patch = (args?.patch ?? {}) as { note?: string | null; displayField?: DisplayField };
+      const patch = (args?.patch ?? {}) as {
+        note?: string | null;
+        displayField?: DisplayField;
+        mark?: AccountMark | null;
+      };
       if ("note" in patch) {
         const trimmed = typeof patch.note === "string" ? patch.note.trim() : "";
         target.note = trimmed || null;
       }
       if (patch.displayField) target.displayField = patch.displayField;
+      // R5-04：标记（对象 = 覆盖保存，null = 解除）；createdAt 与真实后端一样由服务端注入。
+      if ("mark" in patch) {
+        const incoming = patch.mark;
+        target.mark = incoming
+          ? { ...incoming, createdAt: Date.now() }
+          : null;
+      }
       return { ok: true, account: { ...target } };
     }
     default: return undefined;

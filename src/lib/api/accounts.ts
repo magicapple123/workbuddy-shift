@@ -9,6 +9,7 @@ import type {
   OAuthStartResult,
   SessionSyncSelection,
   SwitchResult,
+  UpdateAccountMark,
   WbVariant,
 } from "../types";
 import { demoModeEnabled } from "../demo-mode";
@@ -59,12 +60,17 @@ export function deleteAccount(accountId: string): Promise<{ ok: boolean }> {
 }
 
 /**
- * 更新账号本地展示字段（备注 / 显示选择）。
- * patch 只传需要改的项：`note`（字符串或 null 清空）、`displayField`。
+ * 更新账号本地展示字段（备注 / 显示选择 / 标记）。
+ * patch 只传需要改的项：`note`（字符串或 null 清空）、`displayField`、
+ * `mark`（标记对象或 null 解除，见 R5-04）。
  */
 export function updateAccountDisplay(
   accountId: string,
-  patch: { note?: string | null; displayField?: DisplayField },
+  patch: {
+    note?: string | null;
+    displayField?: DisplayField;
+    mark?: UpdateAccountMark | null;
+  },
 ): Promise<{ ok: boolean; account: AccountMeta }> {
   if (demoModeEnabled) {
     return Promise.resolve(

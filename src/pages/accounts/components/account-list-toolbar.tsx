@@ -28,7 +28,7 @@ interface Props {
   refreshLabel: string;
   demoMode: boolean;
   onRefresh: () => void;
-  /** 当前排序（六项单选 + 同项反转）。 */
+  /** 当前排序（七项单选 + 同项反转）。 */
   sort: SortState;
   /** 点击某个维度：非当前项=切换并按默认方向，当前项=只翻转方向。 */
   onSortChange: (key: SortKey) => void;
@@ -43,7 +43,7 @@ interface SortOption {
   hint: string;
 }
 
-/** 六个排序维度的文案（顺序即菜单顺序）。 */
+/** 七个排序维度的文案（顺序即菜单顺序）。 */
 const SORT_OPTIONS: readonly SortOption[] = [
   { key: "default", label: "默认", hint: "按积分优先级" },
   { key: "rateLimitRecovery", label: "额度恢复时间", hint: "最快恢复在前" },
@@ -51,6 +51,8 @@ const SORT_OPTIONS: readonly SortOption[] = [
   { key: "creditRemaining", label: "剩余积分", hint: "多到少" },
   { key: "creditUpdated", label: "最近更新", hint: "新到旧" },
   { key: "name", label: "名称", hint: "拼音升序" },
+  // R5-04 第七项：按标记的创建时刻排（默认降序 = 最近标记的在前）。
+  { key: "mark", label: "标记", hint: "最近标记在前" },
 ];
 
 /** 当前维度的按钮文案（默认维度展示「排序」，避免按钮看起来像「空排序」）。 */
@@ -66,7 +68,7 @@ function directionIcon(dir: SortState["dir"]) {
 /**
  * 账号列表工具栏：标题 + 计数 + 排序 + 紧凑模式 + 刷新全部积分/签到。
  *
- * 排序是「六项单选 + 同一项再点反转」：点击非当前项切到该维度并按默认方向，
+ * 排序是「七项单选 + 同一项再点反转」：点击非当前项切到该维度并按默认方向，
  * 点击当前项只翻转方向且菜单不关闭（方便连点比较两个方向）。
  */
 export function AccountListToolbar({

@@ -24,6 +24,11 @@ const badgeVariants = cva(
         outline: "text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
         success: "border-transparent bg-success-soft text-success",
         warning: "border-transparent bg-warning-soft text-warning",
+        /*
+         * `danger`：浅底 + 同色系文字，用于「需要注意但非删除」的弱提示（R5-04 的 danger 标记色）。
+         * 与 `destructive`（实心底，删除/失败专用）区分：这里不能抢主操作的视觉权重。
+         */
+        danger: "border-transparent bg-danger-soft text-danger",
       },
     },
     defaultVariants: {

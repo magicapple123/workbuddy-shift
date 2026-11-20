@@ -17,20 +17,43 @@ export interface DisplayableAccount {
   displayField?: DisplayField | null;
 }
 
+/** 取非空字符串（trim 后为空按缺失处理，与后端 `account::get_str` 同语义）。 */
+function trimmed(value: string | null | undefined): string {
+  return (value ?? "").trim();
+}
+
 /**
- * 账号显示名：按本地 `displayField` 取字段（备注 / 手机号 / 账号名），
- * 选定字段为空时回退 `nickname → uid → id`。
+ * 账号显示名（**全局唯一口径**，见 R5-07）：备注优先。
  *
- * 所有展示账号名的位置统一走本函数，保证卡片、切换弹窗、选择列表等名称一致。
+ * 取值顺序与后端 `crates/wb-shift-core/src/modules/account/display.rs` 的
+ * `account_display_name()` **逐条一致**；改动必须两边同步，并在两边的单测里锁同一组用例：
+ *
+ * 1. `displayField === "phone"` 且手机号非空 → 手机号（唯一压过备注的例外）
+ * 2. `note` 非空 → 备注
+ * 3. `nickname` 非空 → 昵称
+ * 4. `email` 非空 → 邮箱
+ * 5. `uid` 非空 → uid
+ * 6. `id` 非空 → id
+ * 7. 兜底 → 「未命名账号」（后端为 `unknown`）
+ *
+ * 产品决策：「用户自己写的备注必须压过官方昵称 / 邮箱」。此前前端是
+ * `displayField → 昵称 → uid → id`（默认忽略备注）、Token 统计下拉是「昵称 → 邮箱」，
+ * 同一账号在不同页面会叫不同的名字；本轮统一收敛到本函数。
+ *
+ * 所有展示账号名的位置（账号卡片、切换弹窗、Token 统计下拉、积分统计、签到日志等）
+ * 都必须走本函数，不要在调用处另写 `nickname || email` 的私有规则。
  */
 export function displayName(account: DisplayableAccount): string {
-  const byField =
-    account.displayField === "phone"
-      ? account.phoneNumber
-      : account.displayField === "note"
-        ? account.note
-        : account.nickname;
-  return byField || account.nickname || account.uid || account.id || "未命名账号";
+  const phone = account.displayField === "phone" ? trimmed(account.phoneNumber) : "";
+  return (
+    phone ||
+    trimmed(account.note) ||
+    trimmed(account.nickname) ||
+    trimmed(account.email) ||
+    trimmed(account.uid) ||
+    trimmed(account.id) ||
+    "未命名账号"
+  );
 }
 
 /** 账号身份行：邮箱脱敏展示（本地段只留首字符），无邮箱时回退 UID / ID。 */

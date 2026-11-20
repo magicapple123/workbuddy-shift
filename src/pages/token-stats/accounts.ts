@@ -5,6 +5,7 @@
  * 重新扫盘、不发起新请求。这里全部是纯函数 + localStorage 偏好，便于单测。
  */
 
+import { displayName } from "@/lib/account-display";
 import { readPreference, writePreference } from "@/lib/persisted-preference";
 import type {
   AccountMeta,
@@ -95,12 +96,19 @@ export function persistAccountSelection(source: SourceKey, selection: AccountSel
   );
 }
 
-/** 账号显示名：昵称 → 邮箱 → uid 后 6 位；空 uid 是「未归属」。 */
+/**
+ * 账号显示名：**直接复用全局口径** `displayName()`（R5-07：备注优先）。
+ *
+ * 历史实现是「昵称 → 邮箱」的第四套规则，导致同一账号在卡片叫昵称、在下拉叫邮箱、
+ * 有备注时两处都不显示备注。现在下拉、标题、导出文件名与卡片 / 积分页同名。
+ *
+ * 账号库里找不到该 uid（历史账号 / 其它机器）时保留 `…{uid 后 6 位}` 兜底；
+ * 空 uid 仍是「未归属」。
+ */
 export function accountLabel(uid: string, accounts: AccountMeta[]): string {
   if (!uid) return "未归属";
   const meta = accounts.find((account) => account.uid === uid);
-  const name = meta?.nickname?.trim() || meta?.email?.trim();
-  if (name) return name;
+  if (meta) return displayName(meta);
   return uid.length > 6 ? `…${uid.slice(-6)}` : uid;
 }
 

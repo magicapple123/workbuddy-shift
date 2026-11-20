@@ -1,3 +1,4 @@
+import { displayName } from "../account-display";
 import type { CreditExpiry, CreditOfficialUsageModel, CreditStatistics } from "../types";
 import { accountVariant, variantSupportsCheckin } from "../variant";
 import type { DemoContext } from "./accounts";
@@ -145,7 +146,7 @@ function creditExpiry(accountId: string): CreditExpiry {
     return {
       ok: true,
       accountId: account.id,
-      accountName: account.nickname ?? account.email ?? account.id,
+      accountName: displayName(account),
       updatedAt,
       unlimited: true,
       totalCapacity: null,
@@ -162,7 +163,7 @@ function creditExpiry(accountId: string): CreditExpiry {
   return {
     ok: true,
     accountId: account.id,
-    accountName: account.nickname ?? account.email ?? account.id,
+    accountName: displayName(account),
     updatedAt,
     // 企业版有限配额显式标记 unlimited=false；个人版不新增字段（保持原有 mock 形态）。
     ...(account.isEnterprise ? { unlimited: false } : {}),
@@ -257,7 +258,7 @@ function visibleRequests(accountIndex: number) {
             : flashCredits[(rowIndex + accountIndex * 3) % flashCredits.length];
     return {
       accountId: account.id,
-      accountName: account.nickname ?? account.email ?? account.id,
+      accountName: displayName(account),
       requestId: `demo-request-${String(accountIndex + 1).padStart(2, "0")}-${String(rowIndex + 1).padStart(4, "0")}`,
       credit,
       model,
@@ -290,7 +291,7 @@ function buildStatistics(): CreditStatistics {
   const creditRows = accounts.map((account) => creditExpiry(account.id));
   const officialAccounts = demoAccounts.map((account, index) => ({
     accountId: account.id,
-    accountName: account.nickname ?? account.email ?? account.id,
+    accountName: displayName(account),
     ok: true,
     requestCount: usageSeeds[index].requestCount,
     detailTruncated: true,
@@ -322,7 +323,7 @@ function buildStatistics(): CreditStatistics {
       const checkinResult = index === 1 ? "already" : "success";
       return {
         accountId: account.id,
-        accountName: account.nickname ?? account.email ?? account.id,
+        accountName: displayName(account),
         isCurrent: currentAccountIds.has(account.id),
         currentRemaining: creditRows[index].totalRemaining ?? null,
         totalCapacity: creditRows[index].totalCapacity ?? null,
@@ -344,7 +345,7 @@ function buildStatistics(): CreditStatistics {
           ts: atLocalTime(0, 8, 6 + index * 9),
           date: localDate(0),
           accountId: account.id,
-          accountName: account.nickname ?? account.email ?? account.id,
+          accountName: displayName(account),
           result: index === 1 ? "already" : "success",
         }]
       : []),

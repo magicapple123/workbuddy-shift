@@ -73,10 +73,11 @@ pub(super) fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> Me
             .find(|a| account::get_str(a, "uid").as_deref() == Some(uid))
         {
             let mut replaced = item.clone();
-            // 本地展示字段（备注 / 显示选择）：备份未携带时保留本地值；
+            // 本地展示字段（备注 / 显示选择 / 标记）：备份未携带时保留本地值；
             // 备份自带则以备份为准（导入即恢复用户当时的展示配置）。
+            // `mark` 必须在这里：导入**旧备份**（不含 mark）时否则会把本地标记整条覆盖掉（R5-04）。
             if let Some(obj) = replaced.as_object_mut() {
-                for key in ["note", "displayField"] {
+                for key in ["note", "displayField", "mark"] {
                     if !obj.contains_key(key) {
                         if let Some(v) = existing.get(key) {
                             obj.insert(key.to_string(), v.clone());
