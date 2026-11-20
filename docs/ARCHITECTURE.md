@@ -357,7 +357,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/vscode_session/copy.rs` | 571 | 复制 | JetBrains 复制要同时处理 projectKey / bucket / 会话 id 三层路径，且与 VS Code 分支共享同一套索引重写；拆开会让两条路径的校验分叉。 | 下一轮把 JetBrains 路径解析抽到 vscode_session/jetbrains_paths.rs。 |
 | `crates/companion-core/src/hub.rs` | 510 | 会话状态机 | 等待/授权/提问三态与 grace 投影共用同一份成员快照；拆开会让「快照里是否出现」与「通知是否发出」判据分叉。 | 下一轮把 `permission-attention` 相关投影抽到 `hub/attention.rs`。 |
 | `crates/wb-shift-core/src/modules/automation_sync.rs` | 761 | 定时任务同步 | 只读统计、备份、复制、暂停与设置读写共用同一份 `automations` 列清单与判定函数，拆开会让「跳过的任务」与「复制的列」口径分叉；其中约 300 行为单测。 | 下一轮把 `tests` 段拆到 `automation_sync_tests.rs` 即可回落到 500 行内。 |
-| `crates/wb-shift-core/src/modules/refresh.rs` | 1464 | 认证刷新 | 失败分级、标记自愈、单飞与退避共用同一份账号库读写与 `accounts.json` 语义；拆开会让「写标记」与「清标记」读到不同版本。 | 下一轮把 `verify_*` 复核调度抽到 `refresh/verify.rs`。 |
+| `crates/wb-shift-core/src/modules/refresh.rs` | 1486 | 认证刷新 | 失败分级、标记自愈、单飞与退避共用同一份账号库读写与 `accounts.json` 语义；拆开会让「写标记」与「清标记」读到不同版本。 | 下一轮把 `verify_*` 复核调度抽到 `refresh/verify.rs`。 |
 | `crates/wb-shift-core/src/modules/session/sync/preview.rs` | 1052 | 同步预览 | 判定、指纹缓存、预览凭据绑定三者共享同一份内容身份（`ContentStamp`），拆开会让缓存键与判定前提分叉。 | 下一轮把 `PreviewDecision*` 缓存段抽到 `preview/cache.rs`。 |
 | `crates/wb-shift-core/src/modules/session_link/content.rs` | 791 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 502 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |
