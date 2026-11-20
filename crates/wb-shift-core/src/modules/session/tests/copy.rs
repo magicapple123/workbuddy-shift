@@ -2022,3 +2022,143 @@ fn session_row_owner_tolerates_a_legacy_table_without_deleted_at() {
     // 缺列 + 行不存在：仍然返回 None。
     assert_eq!(session_row_owner(&env.paths(), "missing"), None);
 }
+
+// ---------------------------------------------------------------------------
+// 源正文容错：末行截断可修复，且修复动作必须报告给用户（R1 / issue #1）
+// ---------------------------------------------------------------------------
+
+/// 源会话末行被截断（进程被杀留下的半条记录）：复制路径容错成功，并把修复动作报告出来。
+///
+/// 严格校验（`read_content_snapshot` → `normalize_jsonl`）仍然拒绝截断内容——这一条
+/// 与 `truncated_body_is_not_reported_as_success` 是同一个不变量的两面：判据不变，
+/// 只是复制路径多了一步「末行截断且前面有完整记录」的可解释修复。
+#[test]
+fn truncated_tail_body_is_repaired_and_reported() {
+    let env = ready_env("repair-tail");
+    // 两条完整记录 + 一条半截记录（第 3 行）。
+    let source = format!(
+        "{}{}",
+        body_text("sess-1"),
+        "{\"type\":\"user\",\"sessionId\":\"sess-1\",\"text\":\"半"
+    );
+    env.add_body("sess-1", &source);
+    assert!(
+        matches!(
+            session_link::read_content_snapshot(&env.body_path("sess-1"), "sess-1"),
+            session_link::ContentState::Unavailable(_)
+        ),
+        "严格校验必须仍然判为不可验证"
+    );
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert!(report.get("errors").is_none(), "{report}");
+    let note = report["copied"][0]["sourceRepaired"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(note.contains("第 3 行"), "修复说明必须指出行号：{note}");
+    assert!(note.contains("已跳过"), "{note}");
+
+    // 副本 = 修复后的正文：两条记录、新 id 引用、能通过严格读取。
+    let new_id = env.first_copy_id(&report);
+    let copied = std::fs::read_to_string(env.body_path(&new_id)).unwrap();
+    assert_eq!(copied.lines().count(), 2, "{copied}");
+    assert!(copied.contains(&new_id));
+    assert!(!copied.contains("sess-1"), "{copied}");
+    assert!(
+        matches!(
+            session_link::read_content_snapshot(&env.body_path(&new_id), &new_id),
+            session_link::ContentState::Ready(snapshot) if snapshot.normalized.record_count == 2
+        ),
+        "副本必须能通过严格校验"
+    );
+
+    // 源文件一字不改（修复只在内存里做）。
+    assert_eq!(
+        std::fs::read_to_string(env.body_path("sess-1")).unwrap(),
+        source
+    );
+    assert_eq!(env.rows_for("uid-b").len(), 1);
+}
+
+/// 两个对象粘在同一行（上次退出没写换行）：无损拆分后复制成功，报告里说明「内容未丢失」。
+#[test]
+fn glued_records_are_split_and_reported() {
+    let env = ready_env("repair-glued");
+    let glued = format!(
+        "{}{}",
+        json!({"type": "user", "sessionId": "sess-1", "text": "你好"}),
+        json!({"type": "assistant", "sessionId": "sess-1", "text": "hi"})
+    );
+    env.add_body("sess-1", &format!("{glued}\n"));
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let note = report["copied"][0]["sourceRepaired"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(note.contains("第 1 行"), "{note}");
+    assert!(note.contains("拆分"), "{note}");
+    assert!(!note.contains("已跳过"), "无损拆分不得报告丢记录：{note}");
+
+    let new_id = env.first_copy_id(&report);
+    let copied = std::fs::read_to_string(env.body_path(&new_id)).unwrap();
+    assert_eq!(copied.lines().count(), 2, "{copied}");
+}
+
+/// 末行「完整记录 + 半截记录」：同行的完整记录必须保留（只丢末尾半截），
+/// 报告要把「丢了半截」和「完整记录还在」两件事都说清楚，不能让用户以为丢了一条。
+#[test]
+fn truncated_tail_with_a_complete_record_keeps_that_record() {
+    let env = ready_env("repair-tail-keep");
+    let source = format!(
+        "{}{}{}",
+        body_text("sess-1"),
+        json!({"type": "user", "sessionId": "sess-1", "text": "第三条"}),
+        "{\"type\":\"assistant\",\"sessionId\":\"sess-1\",\"text\":\"半"
+    );
+    env.add_body("sess-1", &source);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let note = report["copied"][0]["sourceRepaired"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(note.contains("第 3 行"), "必须指出坏行行号：{note}");
+    assert!(note.contains("已跳过"), "{note}");
+    assert!(
+        note.contains("同行的 1 条完整记录已保留"),
+        "保留了记录就必须说明，不能只说丢了一条：{note}"
+    );
+
+    let new_id = env.first_copy_id(&report);
+    let copied = std::fs::read_to_string(env.body_path(&new_id)).unwrap();
+    assert_eq!(copied.lines().count(), 3, "{copied}");
+    assert!(
+        copied.contains("第三条"),
+        "同行已写完整的记录不得被丢掉：{copied}"
+    );
+    match session_link::read_content_snapshot(&env.body_path(&new_id), &new_id) {
+        session_link::ContentState::Ready(snapshot) => {
+            assert_eq!(snapshot.normalized.record_count, 3)
+        }
+        other => panic!("副本必须能通过严格校验，实际 {other:?}"),
+    }
+    // 源文件一字不改。
+    assert_eq!(
+        std::fs::read_to_string(env.body_path("sess-1")).unwrap(),
+        source
+    );
+}
+
+/// 没有做修复时报告里不出现 `sourceRepaired`（其它字段逐字不变）。
+#[test]
+fn clean_source_copy_has_no_source_repaired_field() {
+    let env = ready_env("repair-clean");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1);
+    assert!(
+        report["copied"][0].get("sourceRepaired").is_none(),
+        "{report}"
+    );
+}

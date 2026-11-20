@@ -28,12 +28,12 @@ pub(in crate::modules::session) fn copy_one_session(
     let Some(source_path) = find_project_jsonl(context.source_paths, cid) else {
         return Err("会话内容不存在，未复制".to_string());
     };
-    let snapshot = match session_link::read_content_snapshot(&source_path, cid) {
-        ContentState::Ready(snapshot) => snapshot,
+    // 严格校验失败时只在**内存里**做一次可解释的容错修复（源文件一字不改）；
+    // 修不出来就按原样拒绝，错误外壳与前端的既有提示保持一致。
+    let (snapshot, source_repaired) = match session_link::read_content_snapshot(&source_path, cid) {
+        ContentState::Ready(snapshot) => (snapshot, None),
         ContentState::Missing => return Err("会话内容不存在，未复制".to_string()),
-        ContentState::Unavailable(reason) => {
-            return Err(format!("会话内容无法验证（{reason}），未复制"));
-        }
+        ContentState::Unavailable(reason) => repair_source_snapshot(&source_path, cid, &reason)?,
     };
     let source_owner = session_row_owner(context.source_paths, cid);
     match source_owner.as_deref() {
@@ -136,6 +136,7 @@ pub(in crate::modules::session) fn copy_one_session(
         backup,
         cleanup_state: cleanup_state.to_string(),
         cleanup_error,
+        source_repaired,
     })
 }
 

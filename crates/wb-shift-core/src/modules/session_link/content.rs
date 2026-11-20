@@ -115,8 +115,9 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
         }
         // 只做语法校验，不构建 `Value` 树：同一个解析器、同样的接受集合，
         // 但省掉整行对象的分配与建树（长会话上约占归一化耗时的四成）。
-        serde_json::from_str::<serde::de::IgnoredAny>(line)
-            .map_err(|_| format!("第 {} 行的格式无法识别，内容可能不完整", index + 1))?;
+        serde_json::from_str::<serde::de::IgnoredAny>(line).map_err(|error| {
+            describe_parse_failure(line, index + 1, index + 1 == lines.len(), &error)
+        })?;
         // 绝大多数行不含自己的会话 id：只在真的出现时才分配替换副本。
         let marked = if line.contains(own_session_id) {
             Cow::Owned(line.replace(own_session_id, SESSION_ID_MARKER))
@@ -131,6 +132,49 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
         line_digests,
         total_digest,
     })
+}
+
+/// 单行解析失败的诊断文案：保留解析器的列号与错误类别，便于定位真实坏行。
+///
+/// 生产上遇到的两类真实形态（进程被杀留下末行半截、退出时没写换行导致两行粘连）
+/// 只看「第 N 行格式无法识别」无法区分，用户也无法判断是不是自己的会话坏了；
+/// 因此把「列号、解析器给出的错误类别、该行字节数、是否文件末行」一并带上。
+/// 文案骨架（`第 N 行的格式无法识别（…），内容可能不完整`）保持不变：前端提示与
+/// 既有排障脚本按这个骨架匹配。
+///
+/// `is_last_line` 按**归一化口径**判断（末尾空行已被剔除），因此它表达的是
+/// 「最后一个非空行」——末行截断与中间行损坏的处置方式完全不同（见
+/// [`super::content_repair`]），诊断里必须能区分。
+pub(super) fn describe_parse_failure(
+    line: &str,
+    line_no: usize,
+    is_last_line: bool,
+    error: &serde_json::Error,
+) -> String {
+    let tail = if is_last_line {
+        "文件末行"
+    } else {
+        "不是末行"
+    };
+    format!(
+        "第 {line_no} 行的格式无法识别（第 {} 列，{}；该行 {} 字节；{tail}），内容可能不完整",
+        error.column(),
+        serde_error_detail(error),
+        line.len()
+    )
+}
+
+/// 解析器错误里去掉「 at line L column C」后缀后的正文，即错误类别本身。
+///
+/// 用 `Display` 而不是 `classify()`：`classify()` 只给出 `syntax` / `eof` 这种粗分类，
+/// 而这里需要「EOF while parsing an object」这类能直接指出坏在哪一层的描述
+/// （`Display` 的结构是 `<类别> at line <L> column <C>`，行号列号已单独上报）。
+fn serde_error_detail(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    match text.rfind(" at line ") {
+        Some(index) if index > 0 => text[..index].to_string(),
+        _ => text,
+    }
 }
 
 /// 读取正文快照并做完整性校验；读取期间文件被改动时判定为不可验证。

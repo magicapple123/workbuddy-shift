@@ -91,6 +91,17 @@ export function notifySwitchResult({
       description: "没有收到复制结果：当前版本可能不支持复制会话；账号已切换，但会话没有复制。",
     });
   }
+  // 复制时对源正文做过容错修复：副本与原会话不再逐字相同，必须显式告知。
+  // 说明本身已区分有损/无损（「已跳过」= 丢了未写完的末行；「内容未丢失」= 仅拆行），
+  // 所以这里只拼后端给的说明，不追加统一后缀——否则会把无损拆分也说成丢内容。
+  const repairedNotes = (copyReport?.copied ?? [])
+    .map((item) => item.sourceRepaired)
+    .filter((note): note is string => Boolean(note));
+  if (repairedNotes.length > 0) {
+    toast.warning("源会话有损坏记录，已安全处理", {
+      description: repairedNotes.join("；"),
+    });
+  }
   // 同步结果：成功、跳过、失败与恢复信息都要能看到，不能只显示成功数。
   const groupLabel = (groupId: string) =>
     syncGroups.find((group) => group.groupId === groupId)?.title || groupId;

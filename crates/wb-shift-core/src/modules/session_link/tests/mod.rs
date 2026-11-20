@@ -1,4 +1,5 @@
 use super::content::*;
+use super::content_repair::*;
 use super::link_store::*;
 use super::operation_log::*;
 use super::preview::*;
@@ -105,6 +106,12 @@ fn sample_body(cid: &str) -> String {
 // ---- 主题片段（测试名与排序均与拆分前一致） ----
 
 include!("content.rs");
+
+include!("content_repair.rs");
+
+include!("content_repair_qa.rs");
+
+include!("content_repair_qa2.rs");
 
 include!("link_store.rs");
 

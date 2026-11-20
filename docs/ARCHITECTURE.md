@@ -74,8 +74,8 @@ Workspace 成员与共享依赖版本见根 [`Cargo.toml`](../Cargo.toml)。
 | 主题 | 模块（`src/modules/` 下） |
 | --- | --- |
 | 账号与切换 | `account/`（`store`/`display`/`identity`）、`auth_file/`（`read`/`sync`）、`switch/`（`plan`/`execute`）、`variant.rs`（档位单一来源）、`oauth.rs`、`export_import/`（`export`/`import`）；`process/`（`mod.rs` 公共入口 + `windows/`（进程/注册表/解析）+ `macos.rs`） |
-| 会话复制 / 同步 / 恢复 | `session/mod.rs`（公共入口与共享口径）、`session/paths.rs`（存储/数据根与命名空间）、`session/query.rs`（会话列表、DB 探测与会话行存活索引 `LiveSessionRows`）、`session/copy/{mod,body,db,db_spaces,plan,plan_prepare,plan_execute}.rs`、`session/exec/{mod,backup,write,write_replay}.rs`、`session/sync/{mod,preview,liveness,plan,wait}.rs`、`session/recovery.rs`、`session/run.rs`、`session/tests/`、`session_backup.rs`、`session_groups/`（`view` 列表/详情、`liveness` 插件/IDE 的组级存活汇总与清理拒绝原因、`sync` 配对、`members` 成员操作、`graph` 统一批次、`maintenance` 失效组清理、`jetbrains_guard` 切换前的组一致性守卫） |
-| 会话关联存储与判定 | `session_link.rs`（模块声明与 re-export）与其子模块 `session_link/{content,link_store,link_store/{baseline,store},operation_log,preview,sync_decision}.rs`、`session_link/tests/` |
+| 会话复制 / 同步 / 恢复 | `session/mod.rs`（公共入口与共享口径）、`session/paths.rs`（存储/数据根与命名空间）、`session/query.rs`（会话列表、DB 探测与会话行存活索引 `LiveSessionRows`）、`session/copy/{mod,body,db,db_spaces,plan,plan_prepare,plan_execute,repair}.rs`、`session/exec/{mod,backup,write,write_replay}.rs`、`session/sync/{mod,preview,liveness,plan,wait}.rs`、`session/recovery.rs`、`session/run.rs`、`session/tests/`、`session_backup.rs`、`session_groups/`（`view` 列表/详情、`liveness` 插件/IDE 的组级存活汇总与清理拒绝原因、`sync` 配对、`members` 成员操作、`graph` 统一批次、`maintenance` 失效组清理、`jetbrains_guard` 切换前的组一致性守卫） |
+| 会话关联存储与判定 | `session_link.rs`（模块声明与 re-export）与其子模块 `session_link/{content,content_repair,link_store,link_store/{baseline,store},operation_log,preview,sync_decision}.rs`、`session_link/tests/` |
 | 其它客户端 | `codebuddy_cli/`（`state`/`settings`/`helper`/`switch`）、`codebuddy_ide/`、`codebuddy_cn_ide/`、`codebuddy_ide_session/`、`codebuddy_ide_session_sync/`、`vscode_ext/`、`vscode_session/`、`vscode_session_sync/`（`index` 工作区索引四态/定位/会话目录证据、`liveness` 会话存活判定（三处消费方共用）、`register` 复制后登记、`preview` 预览、`plan`/`exec` 同步、`backup` 回滚）、`vscode_session_link/`、`vscode_cn_inject/`、`jetbrains/`（`mod/status/switch/detect/...`，`diagnose` 输出切换前诊断与阻断原因） |
 | 存储查看与清理 | `storage/`（`catalog` 分类聚合、`snapshot` 单次遍历快照（总览/会话/回收站共用）、`protected` 受保护目录判定与延迟计量、`reveal` 文件管理器定位（`scope=storage` 白名单 / `scope=cwd` 只读任意绝对目录）、`roots/` 白名单根） |
 | 限额 | `limits/`（`scan` 日志扫描、`parse/{mod,workbuddy,ide_cli}` 解析分类、`ledger/{mod,cache,payload}` 台账与缓存、`payload` 输出、`vscode_ext` VS Code 插件日志能力探测（只诊断，不产出限额条目））、`rate_limit_events/`（`state`/`parse`/`watch`）、`rate_limit_hook/`（`install`/`uninstall`/`status`） |
@@ -319,7 +319,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 
 | 文件 | 行数 | 类别 | 理由 | 后续计划 |
 | --- | ---: | --- | --- | --- |
-| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 2024 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 2164 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
 | `crates/wb-shift-core/src/modules/limits/tests.rs` | 1844 | 测试 | 限额模块测试整体随模块搬迁，测试名与基线一致。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1429 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1063 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |

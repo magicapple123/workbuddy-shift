@@ -302,3 +302,5 @@ include!("sync.rs");
 include!("exec.rs");
 
 include!("recovery.rs");
+
+include!("copy_repair_qa.rs");

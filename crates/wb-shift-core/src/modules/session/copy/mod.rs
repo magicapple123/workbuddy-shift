@@ -17,6 +17,7 @@ mod db_spaces;
 mod plan;
 mod plan_execute;
 mod plan_prepare;
+mod repair;
 
 pub(in crate::modules::session) use body::*;
 pub(in crate::modules::session) use db::*;
@@ -24,6 +25,8 @@ pub(in crate::modules::session) use db_spaces::*;
 pub use plan::{copy_sessions_cross, copy_sessions_for_switch};
 pub(in crate::modules::session) use plan_execute::*;
 pub(in crate::modules::session) use plan_prepare::*;
+// 源正文兜底（严格校验失败时的容错修复）：只被 `copy_one_session` 调用。
+pub(in crate::modules::session) use repair::repair_source_snapshot;
 // 单测注入入口 / 测试夹具：生产路径走同模块的公开入口与内部编排，这里只为 `session::tests` 转出。
 #[allow(unused_imports)]
 pub(in crate::modules::session) use plan::{

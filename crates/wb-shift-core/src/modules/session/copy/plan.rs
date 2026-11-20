@@ -257,6 +257,7 @@ pub(in crate::modules::session) fn run_copy(
                     backup,
                     cleanup_state,
                     cleanup_error,
+                    source_repaired,
                 }) => {
                     let mut item = json!({
                         "id": cid,
@@ -267,6 +268,10 @@ pub(in crate::modules::session) fn run_copy(
                     });
                     if let Some(error) = cleanup_error {
                         item["cleanupError"] = json!(error);
+                    }
+                    // 源正文有坏行、复制时做了容错处理：必须让用户知道副本与原会话不逐字相同。
+                    if let Some(note) = source_repaired {
+                        item["sourceRepaired"] = json!(note);
                     }
                     copied.push(item);
                 }
@@ -338,6 +343,9 @@ pub(in crate::modules::session) enum CopyOutcome {
         backup: Option<String>,
         cleanup_state: String,
         cleanup_error: Option<String>,
+        /// 源正文有坏行、复制时做了容错修复时的人话说明（报告里为 `sourceRepaired`）。
+        /// `None` 表示源正文严格校验一次通过，副本与原会话逐字同源。
+        source_repaired: Option<String>,
     },
     AlreadyLinked {
         session_id: String,

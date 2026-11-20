@@ -59,6 +59,11 @@ export interface CopyResult {
   cleanupState?: SessionBackupCleanupState;
   /** 清理失败原因（`cleanupState` 为 pending 时有值）。 */
   cleanupError?: string;
+  /**
+   * 源会话正文有坏行、复制时做过容错处理时的人话说明（如「源会话末尾有 1 条不完整记录
+   * （第 1000 行），已跳过」）。缺字段表示源正文一次校验通过，副本与原会话逐字同源。
+   */
+  sourceRepaired?: string;
 }
 
 /** 目标账号上已有真实有效的副本：复用而不是重复复制。 */
