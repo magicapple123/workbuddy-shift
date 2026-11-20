@@ -1,8 +1,8 @@
 use super::{ensure_hook_binary, hook_command};
 use companion_core::{
     adapters::{
-        codebuddy_settings_files, workbuddy_edition, workbuddy_settings_files, Collector,
-        CODEBUDDY_IDE_HOOK_EVENTS, WORKBUDDY_HOOK_EVENTS,
+        codebuddy_settings_files, collect_session_logs, is_session_log, workbuddy_edition,
+        workbuddy_settings_files, Collector, CODEBUDDY_IDE_HOOK_EVENTS, WORKBUDDY_HOOK_EVENTS,
     },
     atomic_json,
     settings::SOURCES,
@@ -20,10 +20,23 @@ const CODEX_EVENTS: [&str; 8] = [
     "Interrupt",
     "SessionEnd",
 ];
+/// 接入的三种类型：装 hook 的、注册 webhook 的、以及**只读日志**的。
+///
+/// DSH 没有可装的 hook（它的 hook 覆盖面窄且要改用户 `profiles` 配置），
+/// 所以它的接入状态完全由「会话目录能不能读」决定。
+fn kind_of(source: &str) -> &'static str {
+    match source {
+        "codeg" => "webhook",
+        "dsh" => "log",
+        _ => "hooks",
+    }
+}
 fn events(source: &str) -> &[&str] {
     match source {
         "codex" => &CODEX_EVENTS,
         "workbuddy" => &WORKBUDDY_HOOK_EVENTS,
+        // 只读日志来源没有 hook 事件：返回空避免误入 hook 合并逻辑。
+        "dsh" => &[],
         _ => &CODEBUDDY_IDE_HOOK_EVENTS,
     }
 }
@@ -32,8 +45,40 @@ fn files(c: &Collector, source: &str) -> Vec<PathBuf> {
     match source {
         "codex" => vec![c.paths(source)[0].join("hooks.json")],
         "workbuddy" => workbuddy_settings_files(&c.home, &custom),
+        "dsh" => Vec::new(),
         _ => codebuddy_settings_files(&c.home, &custom),
     }
+}
+/// DSH 让用户去打开的就是会话日志目录。
+fn dsh_locations(c: &Collector) -> Vec<PathBuf> {
+    let dir = c.dsh_sessions_dir();
+    if dir.is_dir() {
+        vec![dir]
+    } else {
+        Vec::new()
+    }
+}
+/// DSH 接入状态：目录可读即「已连接（只读）」，读不到就「暂不可用」。
+///
+/// 这里绝不写盘——`$DSH_HOME` 下的任何文件都不碰，也不装 hook。
+fn dsh_status(c: &Collector) -> (&'static str, String) {
+    match std::fs::read_dir(c.dsh_sessions_dir()) {
+        Err(_) => (
+            "unavailable",
+            "暂不可用：未找到 DSH 会话目录（$DSH_HOME/sessions）".into(),
+        ),
+        Ok(_) => match dsh_log_count(c) {
+            0 => ("installed", "已连接（只读）；暂无会话记录".into()),
+            count => ("installed", format!("已连接（只读）；已发现 {count} 个会话日志")),
+        },
+    }
+}
+/// 数一下现有会话日志。上千个会话时截断，接入页不需要精确值。
+fn dsh_log_count(c: &Collector) -> usize {
+    const CAP: usize = 500;
+    let mut logs = Vec::new();
+    collect_session_logs(&c.dsh_sessions_dir(), &mut logs);
+    logs.iter().filter(|path| is_session_log(path)).take(CAP).count()
 }
 fn binary(c: &Collector) -> PathBuf {
     c.home.join(if cfg!(windows) {
@@ -197,9 +242,15 @@ pub fn install_hooks(c: &Collector) -> Result<(), String> {
 }
 pub fn get(c: &Collector) -> Value {
     let sources: Vec<_> = SOURCES.iter().map(|source| {
-        let locations = if *source == "codeg" { c.paths(source) } else { files(c,source) };
-        let result = if *source == "codeg" { c.inspect_codeg_webhook() } else {
-            (|| {
+        let locations = match kind_of(source) {
+            "webhook" => c.paths(source),
+            "log" => dsh_locations(c),
+            _ => files(c,source),
+        };
+        let result = match kind_of(source) {
+            "webhook" => c.inspect_codeg_webhook(),
+            "log" => Ok(dsh_status(c)),
+            _ => (|| {
                 if locations.is_empty() || locations.iter().all(|p| !p.parent().is_some_and(Path::is_dir)) { return Ok(("unavailable", "未找到应用配置目录".into())); }
                 let mut total = 0; let mut present = 0; let mut any_owned = false;
                 for file in &locations {
@@ -210,10 +261,10 @@ pub fn get(c: &Collector) -> Value {
                 if present == total && total > 0 && binary(c).is_file() { Ok(("installed", "Hooks 已安装".into())) }
                 else if any_owned { Ok(("partial", "Hooks 不完整或运行文件缺失，请修复".into())) }
                 else { Ok(("not_installed", "Hooks 未安装".into())) }
-            })()
+            })(),
         };
         let (status,message) = result.unwrap_or_else(|e|("error",e));
-        json!({"source":source,"kind":if *source=="codeg"{"webhook"}else{"hooks"},"status":status,"message":message,"locations":locations,"automatic":c.integration_automatic(source),"lastEventAt":c.last_hook_at.get(*source)})
+        json!({"source":source,"kind":kind_of(source),"status":status,"message":message,"locations":locations,"automatic":c.integration_automatic(source),"lastEventAt":c.last_hook_at.get(*source)})
     }).collect();
     json!({"sources":sources})
 }
@@ -229,6 +280,15 @@ pub fn set(c: &mut Collector, p: &Value) -> Result<Value, String> {
     };
     if source == "codeg" && install && c.settings["sources"][source]["enabled"] != true {
         return Err("请先开启 Codeg 监听，再注册 Webhook".into());
+    }
+    if kind_of(source) == "log" {
+        // 只读来源：install / uninstall 只切「自动接入」开关，不写任何文件。
+        // DSH 的会话日志与配置全在 $DSH_HOME，我们一个字节都不碰。
+        c.set_integration_automatic(source, install)?;
+        if !install {
+            c.reset_dsh();
+        }
+        return Ok(get(c));
     }
     c.set_integration_automatic(source, install)?;
     if source == "codeg" {
@@ -277,8 +337,51 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|r| r["source"] != "codeg")
+            .filter(|r| !matches!(r["source"].as_str(), Some("codeg" | "dsh")))
             .all(|r| r["status"] == "not_installed" && r["automatic"] == false));
+        // 第 5 个来源 DSH 是只读日志接入：目录不存在即「暂不可用」，
+        // 而且 install / uninstall 都不能写盘（没有 hook 可装）。
+        restarted.settings["sources"]["dsh"]["path"] = json!(home.join("no-dsh"));
+        let dsh = get(&restarted)["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["source"] == "dsh")
+            .cloned()
+            .unwrap();
+        assert_eq!(dsh["kind"], "log");
+        assert_eq!(dsh["status"], "unavailable");
+        assert!(dsh["locations"].as_array().unwrap().is_empty());
+        let entries_before = std::fs::read_dir(&home).unwrap().count();
+        set(&mut restarted, &json!({"source":"dsh","action":"install"})).unwrap();
+        assert_eq!(get(&restarted)["sources"][4]["automatic"], true);
+        set(
+            &mut restarted,
+            &json!({"source":"dsh","action":"uninstall"}),
+        )
+        .unwrap();
+        assert_eq!(get(&restarted)["sources"][4]["automatic"], false);
+        assert_eq!(
+            std::fs::read_dir(&home).unwrap().count(),
+            entries_before,
+            "DSH 接入不得在用户目录里新建任何文件"
+        );
+        // 有 sessions 目录时是「已连接（只读）」。
+        std::fs::create_dir_all(home.join("no-dsh/sessions/-D-proj-/session-a")).unwrap();
+        std::fs::write(
+            home.join("no-dsh/sessions/-D-proj-/session-a/session.v4.jsonl.zstd"),
+            b"",
+        )
+        .unwrap();
+        let dsh = get(&restarted)["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["source"] == "dsh")
+            .cloned()
+            .unwrap();
+        assert_eq!(dsh["status"], "installed");
+        assert_eq!(dsh["locations"].as_array().unwrap().len(), 1);
         set(
             &mut restarted,
             &json!({"source":"codex","action":"install"}),

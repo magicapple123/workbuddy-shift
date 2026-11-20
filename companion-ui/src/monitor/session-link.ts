@@ -28,8 +28,8 @@ export interface SessionBadge {
 
 export const SESSION_WINDOW = {x:14,y:18,width:484,height:232};
 export const SESSION_BUTTON = {x:385,y:250,width:110,height:25,radius:6};
-export const SESSION_SOURCES = ['codex','workbuddy','codebuddy-ide','codeg'];
-export const AGENT_ICON_IDS = ['codex','workbuddy','codebuddy-ide','codeg','grok','codebuddy-vscode'];
+export const SESSION_SOURCES = ['codex','workbuddy','codebuddy-ide','codeg','dsh'];
+export const AGENT_ICON_IDS = ['codex','workbuddy','codebuddy-ide','codeg','dsh','grok','codebuddy-vscode'];
 const NESTED_AGENTS: Record<string, string> = {
   code_buddy:'codebuddy-ide', codebuddy:'codebuddy-ide', codebuddy_code:'codebuddy-ide',
   claude_code:'claude', claude_acp:'claude', claude:'claude',
@@ -45,7 +45,7 @@ export function sourceLabel(source?: string, agentType?: string) {
     if (type==='codebuddy' || type==='international') return 'CodeBuddy 国际版';
     return 'CodeBuddy';
   }
-  return source==='codex'?'Codex':source==='codeg'?'Codeg':source==='grok'?'Grok':source==='claude'?'Claude':'未绑定';
+  return source==='codex'?'Codex':source==='codeg'?'Codeg':source==='dsh'?'DSH':source==='grok'?'Grok':source==='claude'?'Claude':'未绑定';
 }
 /**
  * An imported custom source (`custom:<id>`) has no built-in name or icon: the
@@ -149,6 +149,9 @@ export function agentSessionLink(session?: LinkableSession | null): string | nul
     return codeBuddyFolderLink(session.cwd, session) || `/api/open-session?source=codebuddy-ide&edition=${edition}`;
   }
   if(session?.source==='codeg')return codegAppLink(session);
+  // DSH 桌面端没有会话 URL scheme（`crates/companion-desktop/src/session/url.rs`
+  // 里也没有 dsh），所以 DSH 卡片只展示状态，不提供「进入对话」。
+  if(session?.source==='dsh')return null;
   if(typeof session?.sessionId !== 'string' || !session.sessionId.trim())return null;
   const id=encodeURIComponent(session.sessionId);
   if(session.source==='codex')return `codex://threads/${id}`;

@@ -43,3 +43,6 @@ base64 = "0.22"
 fs2 = "0.4"
 url = "2"
 ureq = { version = "2", default-features = false, features = ["json"] }
+# DSH（DeepSeek Harness）会话日志是 zstd 压缩的 JSONL，且单个文件含多个帧。
+# 只有 companion-core 的 dsh 适配器读它，因此版本只在这里声明一次。
+zstd = "0.13"

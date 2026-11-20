@@ -18,3 +18,4 @@ ureq.workspace = true
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 base64.workspace = true
 fs2.workspace = true
+zstd.workspace = true

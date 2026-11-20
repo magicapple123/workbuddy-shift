@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-pub const SOURCES: [&str; 4] = ["codex", "workbuddy", "codebuddy-ide", "codeg"];
+pub const SOURCES: [&str; 5] = ["codex", "workbuddy", "codebuddy-ide", "codeg", "dsh"];
 pub fn defaults() -> Value {
     let mut sources: serde_json::Map<String, Value> = SOURCES
         .iter()
@@ -131,6 +131,25 @@ pub fn validate(v: &Value) -> Result<Value, String> {
     }
     Ok(d)
 }
+/// `dsh_home` 的纯函数版本：不读环境变量，便于单测。
+///
+/// `~/.dsh` 只是缺省值；DSH 自己用 `$DSH_HOME` 定位数据目录，所以监听侧必须
+/// 支持同一个变量，否则用户改了 DSH_HOME 后我们永远读到空目录。
+pub fn resolve_dsh_home(home: &Path, dsh_home: Option<&str>) -> PathBuf {
+    match dsh_home.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => match p.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(p),
+        },
+        None => home.join(".dsh"),
+    }
+}
+
+/// DSH（DeepSeek Harness）的数据根目录：`$DSH_HOME` 优先，缺省 `~/.dsh`。
+pub fn dsh_home(home: &Path) -> PathBuf {
+    resolve_dsh_home(home, std::env::var("DSH_HOME").ok().as_deref())
+}
+
 pub fn paths(home: &Path, v: &Value, source: &str) -> Vec<PathBuf> {
     if let Some(p) = v["sources"][source]["path"]
         .as_str()
@@ -156,6 +175,8 @@ pub fn paths(home: &Path, v: &Value, source: &str) -> Vec<PathBuf> {
         ]
         .map(|p| home.join(p))
         .to_vec(),
+        // DSH 只读会话日志；根目录下由适配器再找 `sessions/`。
+        "dsh" => vec![dsh_home(home)],
         _ => vec![home.join(".codebuddy")],
     }
 }
@@ -236,5 +257,32 @@ mod frame_rate_tests {
         );
         value["sources"]["workbuddy"]["logWatch"] = json!("yes");
         assert!(validate(&value).is_err());
+    }
+    #[test]
+    fn dsh_paths_default_to_dot_dsh_and_honour_the_override() {
+        let home = Path::new("/tmp/studio-home");
+        // 缺省与空白 DSH_HOME 都回退 ~/.dsh。
+        assert_eq!(resolve_dsh_home(home, None), home.join(".dsh"));
+        assert_eq!(resolve_dsh_home(home, Some("   ")), home.join(".dsh"));
+        // 与其它来源一致：`~/` 相对用户主目录展开。
+        assert_eq!(
+            resolve_dsh_home(home, Some("~/dsh-data")),
+            home.join("dsh-data")
+        );
+        assert_eq!(
+            resolve_dsh_home(home, Some("/opt/dsh-home")),
+            PathBuf::from("/opt/dsh-home")
+        );
+        // 设置里手填的路径优先（与 codex/workbuddy 同一套规则）。
+        let mut value = defaults();
+        assert_eq!(value["sources"]["dsh"]["enabled"], true);
+        value["sources"]["dsh"]["path"] = json!("~/custom-dsh");
+        assert_eq!(paths(home, &value, "dsh"), vec![home.join("custom-dsh")]);
+        // 工位可以钉在 DSH 上（校验用 SOURCES，定长数组改错会在这里挂）。
+        value = defaults();
+        value["monitor"]["seats"][0] = json!("dsh");
+        assert_eq!(validate(&value).unwrap()["monitor"]["seats"][0], "dsh");
+        assert_eq!(SOURCES.len(), 5);
+        assert!(SOURCES.contains(&"dsh"));
     }
 }

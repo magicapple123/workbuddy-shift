@@ -9,6 +9,8 @@ pub use ide::{
     CODEBUDDY_IDE_HOOK_EVENTS,
 };
 mod workbuddy;
+mod dsh;
+pub use dsh::{collect_session_logs, is_session_log};
 use crate::{atomic_json, hub::Hub, now, settings, text};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -86,6 +88,8 @@ pub struct Collector {
     pub workbuddy_live: HashMap<String, Value>,
     pub workbuddy_hook_count: u64,
     pub workbuddy_log_watch: workbuddy::LogWatch,
+    /// DSH 只读会话日志监听（第 5 个来源）。
+    pub dsh_log_watch: dsh::LogWatch,
     /// Ignore completion events after a user closes a task, until new activity arrives.
     pub closed_monitor_sessions: HashSet<String>,
     pub workbuddy_presence: crate::host_process::HostPresence,
@@ -145,6 +149,7 @@ impl Collector {
             workbuddy_live: HashMap::new(),
             workbuddy_hook_count: 0,
             workbuddy_log_watch: Default::default(),
+            dsh_log_watch: Default::default(),
             closed_monitor_sessions: HashSet::new(),
             workbuddy_presence: crate::host_process::HostPresence::for_host("workbuddy"),
             ide_presence: crate::host_process::HostPresence::for_host("codebuddy-ide"),
@@ -180,6 +185,7 @@ impl Collector {
             let result = match id {
                 "codex" => self.poll_codex(),
                 "workbuddy" => self.poll_workbuddy(),
+                "dsh" => self.poll_dsh(),
                 _ => self.poll_ide(),
             };
             if let Err(e) = result {
@@ -258,6 +264,10 @@ impl Collector {
                     self.ide_live.remove(sid);
                 } else if source == "workbuddy" {
                     self.workbuddy_live.remove(sid);
+                } else if source == "dsh" {
+                    // 记住被关掉的轮次：日志轮询还要用它区分「同一 turn 的后续
+                    // 事件」（丢弃）和「下一个 turn」（正常建档）。
+                    self.dsh_log_watch.close(sid, round);
                 } else if source.starts_with(crate::custom::SOURCE_PREFIX) {
                     self.custom_engine.forget(&id);
                 }
@@ -265,7 +275,7 @@ impl Collector {
                 self.hub
                     .events
                     .retain(|event| event["sessionId"] != id || event["roundId"] != round);
-                if matches!(source, "workbuddy" | "codeg") {
+                if matches!(source, "workbuddy" | "codeg" | "dsh") {
                     if self.closed_monitor_sessions.len() >= 512 {
                         self.closed_monitor_sessions.clear();
                     }
@@ -311,6 +321,10 @@ impl Collector {
                             self.workbuddy_live.clear();
                             self.workbuddy_hook_count = 0;
                         }
+                        if id == "dsh" {
+                            // 路径/开关变了：丢掉偏移量与已建档会话，下一轮重新首扫。
+                            self.reset_dsh();
+                        }
                     }
                 }
                 self.settings = next;
@@ -327,7 +341,7 @@ impl Collector {
                 let paths: Vec<_> = settings::paths(&self.home, &v, id)
                     .into_iter()
                     .filter(|p| {
-                        if matches!(id, "codex" | "workbuddy" | "codebuddy-ide") {
+                        if matches!(id, "codex" | "workbuddy" | "codebuddy-ide" | "dsh") {
                             std::fs::read_dir(p).is_ok()
                         } else {
                             std::fs::File::open(p).is_ok()

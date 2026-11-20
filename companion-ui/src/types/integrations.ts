@@ -2,7 +2,8 @@ import type { SourceId } from './settings.js';
 
 export interface IntegrationStatus {
   source: SourceId;
-  kind: 'hooks' | 'webhook';
+  /** `hooks`: 装 hook；`webhook`: 注册回调；`log`: 只读轮询本地日志（DSH）。 */
+  kind: 'hooks' | 'webhook' | 'log';
   status: 'installed' | 'not_installed' | 'partial' | 'error' | 'unavailable' | 'pending';
   message: string;
   locations: string[];

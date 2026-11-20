@@ -103,9 +103,12 @@ export function IntegrationManager({disabled, acquire, release, enabled, onEnabl
     <div className="settings-group">
     {agents.map(([source, name]) => {
       const item = sources.find(item => item.source === source);
-      const webhook = source === 'codeg';
+      // 三种接入类型：Codeg 注册 Webhook，DSH 只读本地会话日志，其余装 Hooks。
+      const kind = item?.kind ?? (source === 'codeg' ? 'webhook' : source === 'dsh' ? 'log' : 'hooks');
+      const webhook = kind === 'webhook';
+      const logOnly = kind === 'log';
       const expanded = expandedSource === source;
-      const status = loading ? '检查中' : readFailed ? '读取失败' : item ? labels[item.status] : '状态未知';
+      const status = loading ? '检查中' : readFailed ? '读取失败' : item ? (logOnly && item.status === 'installed' ? '已连接（只读）' : labels[item.status]) : '状态未知';
       return <Collapsible open={expanded} onOpenChange={open => setExpandedSource(open ? source : null)} className="integration-item" key={source} data-integration={source} data-expanded={expanded}>
         <div className="integration-title">
           <span className="integration-identity"><img src={`${import.meta.env.BASE_URL}icons/agents/${source}.png`} alt="" /><strong>{name}</strong></span>
@@ -116,6 +119,8 @@ export function IntegrationManager({disabled, acquire, release, enabled, onEnabl
         <CollapsibleContent className="integration-content">
           {item ? <div className="integration-detail-panel">
             {item.status !== 'installed' && <p className="integration-detail" data-state={item.status}>{item.message}</p>}
+            {/* 只读来源就算「已连接」也要显示会话数量/暂无记录。 */}
+            {item.status === 'installed' && logOnly && <p className="integration-detail" data-state={item.status}>{item.message}</p>}
             <div className="integration-metadata">
               <div className="integration-event"><span>最近事件</span><span>{item.lastEventAt ? <time dateTime={new Date(item.lastEventAt).toISOString()}>{new Date(item.lastEventAt).toLocaleString('zh-CN', {year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false})}</time> : '尚无事件记录'}</span></div>
               {!!item.locations.length && <div className="integration-locations">
@@ -129,24 +134,24 @@ export function IntegrationManager({disabled, acquire, release, enabled, onEnabl
               </div>}
             </div>
             <div className="integration-detail-footer">
-            <p className="integration-policy">{webhook ? '关闭监听会注销 Webhook。' : '关闭监听会保留 Hooks。'}{item.automatic ? '卸载后不会自动安装。' : '已关闭自动接入。'}</p>
+            <p className="integration-policy">{webhook ? '关闭监听会注销 Webhook。' : logOnly ? '只读监听，不会写入 DSH 的任何文件。' : '关闭监听会保留 Hooks。'}{item.automatic ? '卸载后不会自动安装。' : '已关闭自动接入。'}</p>
             <div className="integration-actions">
               <Button className="integration-repair" type="button" variant="outline" disabled={disabled || active !== null || loading} onClick={() => void run({source, action: 'install'})}>
-                {active === `${source}-install` ? '正在处理…' : webhook ? (item.status === 'installed' ? '重新注册' : '注册 / 重试') : item.status === 'installed' || item.status === 'partial' ? '修复 Hooks' : '安装 Hooks'}
+                {active === `${source}-install` ? '正在处理…' : webhook ? (item.status === 'installed' ? '重新注册' : '注册 / 重试') : logOnly ? (item.status === 'installed' ? '重新连接' : '连接（只读）') : item.status === 'installed' || item.status === 'partial' ? '修复 Hooks' : '安装 Hooks'}
               </Button>
               <AlertDialog open={confirmSource === source} onOpenChange={open => { if (!running.current) setConfirmSource(open ? source : null); }}>
                 <AlertDialogTrigger asChild>
-                  <Button className="integration-remove" type="button" variant="outline" disabled={disabled || active !== null || loading || (!item.automatic && item.status === 'not_installed')}>{webhook ? '注销' : '卸载'}</Button>
+                  <Button className="integration-remove" type="button" variant="outline" disabled={disabled || active !== null || loading || (!item.automatic && item.status === 'not_installed')}>{webhook ? '注销' : logOnly ? '断开' : '卸载'}</Button>
                 </AlertDialogTrigger>
                 <AlertDialogContent onEscapeKeyDown={event => { event.stopPropagation(); if (running.current) event.preventDefault(); }}>
-                  <AlertDialogTitle>{webhook ? `注销 ${name} Webhook？` : `卸载 ${name} Hooks？`}</AlertDialogTitle>
-                  <AlertDialogDescription>此应用将停止通过{webhook ? ' Webhook' : ' Hooks'}上报新事件，且不会自动重新接入。之后可在这里重新{webhook ? '注册' : '安装'}。</AlertDialogDescription>
+                  <AlertDialogTitle>{webhook ? `注销 ${name} Webhook？` : logOnly ? `断开 ${name} 只读监听？` : `卸载 ${name} Hooks？`}</AlertDialogTitle>
+                  <AlertDialogDescription>{logOnly ? `${name} 的会话将不再出现在悬浮窗中。此操作只读本地会话日志，不会改动 DSH 的任何文件；之后可以在这里重新连接。` : `此应用将停止通过${webhook ? ' Webhook' : ' Hooks'}上报新事件，且不会自动重新接入。之后可在这里重新${webhook ? '注册' : '安装'}。`}</AlertDialogDescription>
                   <div className="settings-dialog-actions">
                     <AlertDialogCancel disabled={active !== null}>取消</AlertDialogCancel>
                     <AlertDialogAction disabled={disabled || active !== null} onClick={event => {
                       event.preventDefault();
                       if (!running.current) void run({source, action: 'uninstall'}).then(() => setConfirmSource(null));
-                    }}>{active === `${source}-uninstall` ? '正在处理…' : webhook ? '确认注销' : '确认卸载'}</AlertDialogAction>
+                    }}>{active === `${source}-uninstall` ? '正在处理…' : webhook ? '确认注销' : logOnly ? '确认断开' : '确认卸载'}</AlertDialogAction>
                   </div>
                 </AlertDialogContent>
               </AlertDialog>

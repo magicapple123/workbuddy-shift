@@ -46,6 +46,32 @@
 `CustomIntegrationManager` UI 入口当前被注释停用（见 `SettingsForm.tsx` 的说明）。
 恢复入口前先确认前后端契约与演示构建都覆盖到；不要把它当成死代码删除。
 
+## 监听来源
+
+| 来源 ID | 名称 | 事件通道 | 写用户文件 |
+| --- | --- | --- | --- |
+| `codex` | Codex | `~/.codex/hooks.json`（命令 hooks） | 安装/修复 hooks 时写 |
+| `workbuddy` | WorkBuddy | `settings.json` hooks + 运行日志兜底（沙箱审批不发 hook） | 安装/修复 hooks 时写 |
+| `codebuddy-ide` | CodeBuddy | IDE 的 `settings.json` hooks | 安装/修复 hooks 时写 |
+| `codeg` | Codeg | 本地 Webhook 回调 | 不写用户文件 |
+| `dsh` | DSH（DeepSeek Harness） | **只读**轮询 `$DSH_HOME/sessions/<project>/<session-dir>/session*.jsonl.zstd` | **不写任何文件** |
+
+DSH 的接入类型是 `kind: "log"`（另外两种是 `hooks` / `webhook`）：接入页不装 hook，
+`install` / `uninstall` 只切换「自动接入」开关。状态判定读目录——`sessions` 可读即
+「已连接（只读）」，目录不存在即「暂不可用」，存在但没有日志则提示「暂无会话记录」。
+
+DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-core/src/adapters/dsh/`）：
+
+- 会话日志是**多帧** zstd；按字节偏移增量解码，尾部半帧不推进 offset，下一轮重试。
+- 只接**当前活跃**会话：启用监听后的首扫只登记偏移，不导入历史会话；例外是 `mtime`
+  在 2 分钟内（说明刚打开或还在跑）的会话会被完整解析一次。
+- header 带 `parentSession` 的**子代理会话不建档**，与 Codex 子会话隐藏策略一致。
+- 格式版本白名单 v1–v4，未知版本明确报错「DSH 会话格式已更新（vN），请升级」，
+  不猜字段。
+- **没有「等待确认」态**：v4 日志里不存在审批/提问事件（`approval/policy` 与
+  `permission/preset` 是启动配置，不是请求），因此 DSH 只有「进行中 / 已完成 / 空闲」。
+- DSH 桌面端没有会话 URL scheme，卡片不提供「进入对话」。
+
 ## 用户目录
 
 | 路径 | 内容 |
