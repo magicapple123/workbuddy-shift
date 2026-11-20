@@ -2,8 +2,11 @@
 
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// 归一化时替代「本副本 sessionId」的固定标记。其余 sessionId 一律保留原文。
 pub const SESSION_ID_MARKER: &str = "__wb_shift_session_id__";
@@ -179,6 +182,7 @@ fn serde_error_detail(error: &serde_json::Error) -> String {
 
 /// 读取正文快照并做完整性校验；读取期间文件被改动时判定为不可验证。
 pub fn read_content_snapshot(path: &Path, own_session_id: &str) -> ContentState {
+    note_real_read();
     let before = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == ErrorKind::NotFound => return ContentState::Missing,
@@ -481,3 +485,307 @@ pub fn is_ordered_prefix(prefix: &[String], full: &[String]) -> bool {
 pub fn is_strict_ordered_extension(prefix: &[String], full: &[String]) -> bool {
     prefix.len() < full.len() && is_ordered_prefix(prefix, full)
 }
+
+// ---------------------------------------------------------------------------
+// 预览用的内容指纹与进程内缓存（R5-16）
+// ---------------------------------------------------------------------------
+//
+// 背景：切号弹窗打开即逐组预览，而预览原本逐组全量读取双方正文（某账号 106 个组、
+// 约 988 MB）。第二次打开同一账号时内容根本没变，却又要重算一遍，用户看到的就是
+// 「点切换、还没开始切就很卡」。
+//
+// 做法：只缓存**摘要指纹**（每条几百字节），正文读完立即丢弃。全库正文 2.28 GB，
+// 缓存快照等于把整库正文留在内存里，**明令禁止**；因此这里的类型都没有 `text` 字段，
+// 执行路径（真正要落盘的那几条）拿不到正文，也就无法顺手复用预览缓存。
+
+/// 固定上限的进程内缓存：插入序淘汰（超出上限时丢弃最早的一半），不引入 LRU 依赖。
+///
+/// 只允许放**小值**（摘要指纹、判定标量）。容量按条目数计算，放进正文会让内存随会话
+/// 体量线性增长；这条约束由 [`ContentFingerprint`] 与 `sync::preview` 的判定键共同保证。
+pub(crate) struct BoundedCache<K, V> {
+    inner: Mutex<BoundedCacheInner<K, V>>,
+}
+
+struct BoundedCacheInner<K, V> {
+    entries: HashMap<K, V>,
+    /// 插入顺序（重复写同一个键不会重复登记）。
+    order: VecDeque<K>,
+    capacity: usize,
+}
+
+impl<K, V> BoundedCache<K, V> {
+    /// `capacity` 至少为 1：淘汰一次至少移除一条，否则永远缩不回去。
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(BoundedCacheInner {
+                entries: HashMap::new(),
+                order: VecDeque::new(),
+                capacity: capacity.max(1),
+            }),
+        }
+    }
+
+    /// 锁中毒时继续使用现有数据：缓存里只有整条插入的值，没有半写入状态。
+    fn lock(&self) -> MutexGuard<'_, BoundedCacheInner<K, V>> {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> BoundedCache<K, V> {
+    /// 命中返回值副本；未命中返回 `None`。
+    pub(crate) fn get(&self, key: &K) -> Option<V> {
+        self.lock().entries.get(key).cloned()
+    }
+
+    /// 写入并维持上限；超出上限时按插入顺序淘汰最早的一半。
+    pub(crate) fn insert(&self, key: K, value: V) {
+        let mut inner = self.lock();
+        if inner.entries.insert(key.clone(), value).is_none() {
+            inner.order.push_back(key);
+        }
+        let capacity = inner.capacity;
+        if inner.entries.len() > capacity {
+            let drop_count = (capacity / 2).max(1);
+            for _ in 0..drop_count {
+                match inner.order.pop_front() {
+                    Some(oldest) => {
+                        inner.entries.remove(&oldest);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// 当前条目数（单测断言淘汰行为用）。
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+}
+
+/// 预览判定用的内容指纹：**只有摘要与计数，绝不含正文**。
+///
+/// `normalized_digest` 按本副本的 `session_id` 归一，因此 `session_id` 是身份的一部分：
+/// 缓存键漏掉它，不同成员的归一化摘要就会串味（R5-16 记的最危险错误）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentFingerprint {
+    /// 实读字节数（与 [`ContentStamp`] 里的 `len` 应一致；不一致说明读取期间被追加）。
+    pub len: u64,
+    /// 文件 mtime（纳秒）；探测不到时记 0，此时指纹不参与缓存。
+    pub mtime_ns: i128,
+    /// 本副本的会话 id（归一化摘要的输入）。
+    pub session_id: String,
+    /// 原始字节摘要（含空白），与 [`ContentSnapshot::full_digest`] 同口径。
+    pub full_digest: String,
+    /// 归一化总摘要，与 [`NormalizedContent::total_digest`] 同口径。
+    pub normalized_digest: String,
+    /// 记录数（非空行数）。
+    pub record_count: usize,
+}
+
+/// 正文文件的身份（一次 `metadata`）：缓存键的全部要素，**不读正文**。
+///
+/// `len` 与 `mtime_ns` 任一变化即视为内容已变；不做内容比对兜底——客户端写入必然改变
+/// size，而同一 tick 内等长改写且 mtime 不变的概率可以忽略（design R5-16 §2）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ContentStamp {
+    /// 找不到正文文件（`projects/` 下没有对应的 `<sessionId>.jsonl`）。
+    Missing,
+    /// 文件存在且元数据可读。
+    Stamped {
+        /// 规范化后的绝对路径：同一文件的不同写法必须落在同一个键上。
+        path: PathBuf,
+        session_id: String,
+        len: u64,
+        mtime_ns: i128,
+    },
+    /// 元数据读不出来（权限 / IO 异常）：没有可靠的失效依据，因此不参与缓存。
+    Unavailable(String),
+}
+
+/// 指纹口径的正文状态：与 [`ContentState`] 一一对应，但**没有 `text` 字段**。
+///
+/// 执行路径（复制 / 同步写正文）必须拿正文，因此天然无法复用预览缓存——这是编译期
+/// 保证，不是注释约定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FingerprintedContent {
+    Missing,
+    Ready(ContentFingerprint),
+    Unavailable(String),
+}
+
+impl FingerprintedContent {
+    /// 可验证时的指纹。
+    pub fn ready(&self) -> Option<&ContentFingerprint> {
+        match self {
+            Self::Ready(fingerprint) => Some(fingerprint),
+            _ => None,
+        }
+    }
+
+    /// 记录数（不可验证时为 0，仅用于展示，口径同原先的 `record_count_of`）。
+    pub fn record_count(&self) -> usize {
+        self.ready()
+            .map_or(0, |fingerprint| fingerprint.record_count)
+    }
+
+    /// 由一次真实读取结果与读前的身份探测拼出指纹视图（正文不保留）。
+    pub fn from_state(state: &ContentState, session_id: &str, stamp: &ContentStamp) -> Self {
+        match state {
+            ContentState::Missing => Self::Missing,
+            ContentState::Unavailable(reason) => Self::Unavailable(reason.clone()),
+            ContentState::Ready(snapshot) => {
+                Self::Ready(fingerprint_of(stamp, session_id, snapshot))
+            }
+        }
+    }
+}
+
+/// 指纹缓存的条目上限。每条几百字节（路径 + 两个 64 字符摘要 + 计数），
+/// 1024 条约 0.4 MB，远低于「RSS 增长 < 30 MB」的验收口径。
+pub const FINGERPRINT_CACHE_CAPACITY: usize = 1024;
+
+/// 进程内共享的内容指纹缓存（不落盘：缓存与磁盘不一致会导致误判）。
+pub struct FingerprintCache {
+    entries: BoundedCache<ContentStamp, ContentFingerprint>,
+}
+
+impl FingerprintCache {
+    pub fn new() -> Self {
+        Self {
+            entries: BoundedCache::with_capacity(FINGERPRINT_CACHE_CAPACITY),
+        }
+    }
+
+    /// 命中返回指纹；未命中、`Missing`、`Unavailable` 一律 `None`。
+    pub fn lookup(&self, stamp: &ContentStamp) -> Option<ContentFingerprint> {
+        self.entries.get(stamp)
+    }
+
+    /// 回填指纹。返回是否真的写进了缓存。
+    ///
+    /// 落缓存前再核一次身份：读取期间被改写的指纹不能挂在旧键上（挂上去就会在下次
+    /// 预览把这具「过期摘要」当成最新结果）；`Missing` / `Unavailable` 一律不缓存——
+    /// 文件可能马上被创建或修复（design R5-16 §4）。
+    pub fn store(&self, stamp: &ContentStamp, fingerprint: ContentFingerprint) -> bool {
+        let ContentStamp::Stamped {
+            path,
+            session_id,
+            len,
+            mtime_ns,
+        } = stamp
+        else {
+            return false;
+        };
+        if fingerprint.session_id != *session_id {
+            return false;
+        }
+        let Ok(current) = std::fs::metadata(path) else {
+            return false;
+        };
+        if current.len() != *len || mtime_nanos(&current) != Some(*mtime_ns) {
+            return false;
+        }
+        self.entries.insert(stamp.clone(), fingerprint);
+        true
+    }
+}
+
+impl Default for FingerprintCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 进程内唯一的指纹缓存。预览是顺序执行，单锁的竞争可以忽略。
+pub fn fingerprint_cache() -> &'static FingerprintCache {
+    static CACHE: OnceLock<FingerprintCache> = OnceLock::new();
+    CACHE.get_or_init(FingerprintCache::new)
+}
+
+/// 探测正文文件的身份：一次 `metadata`，不读正文。
+pub fn stamp_content(path: &Path, own_session_id: &str) -> ContentStamp {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == ErrorKind::NotFound => return ContentStamp::Missing,
+        Err(error) => return ContentStamp::Unavailable(format!("内容无法读取：{error}")),
+    };
+    let Some(mtime_ns) = mtime_nanos(&meta) else {
+        // 没有 mtime 就没有失效依据：走非缓存路径（调用方用真实读取兜底）。
+        return ContentStamp::Unavailable("无法获取内容的修改时间".to_string());
+    };
+    ContentStamp::Stamped {
+        path: normalize_cache_path(path),
+        session_id: own_session_id.trim().to_string(),
+        len: meta.len(),
+        mtime_ns,
+    }
+}
+
+/// mtime 的纳秒表示（早于 1970 的时钟用负值表达，仍是可比较、可区分变化的值）。
+fn mtime_nanos(meta: &std::fs::Metadata) -> Option<i128> {
+    let modified = meta.modified().ok()?;
+    Some(match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => delta.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    })
+}
+
+/// 缓存键里的路径统一成规范化的绝对路径；规范化失败时退回原路径（键仍可比）。
+fn normalize_cache_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 由读前的身份探测与真实读取结果拼出指纹。
+fn fingerprint_of(
+    stamp: &ContentStamp,
+    own_session_id: &str,
+    snapshot: &ContentSnapshot,
+) -> ContentFingerprint {
+    let mtime_ns = match stamp {
+        ContentStamp::Stamped { mtime_ns, .. } => *mtime_ns,
+        _ => 0,
+    };
+    ContentFingerprint {
+        // `ContentSnapshot::text` 是本次实读的全部字节，长度即文件字节数。
+        len: snapshot.text.len() as u64,
+        mtime_ns,
+        session_id: own_session_id.trim().to_string(),
+        full_digest: snapshot.full_digest.clone(),
+        normalized_digest: snapshot.normalized.total_digest.clone(),
+        record_count: snapshot.normalized.record_count,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 单测用的真实读取计数（仅测试构建存在）
+// ---------------------------------------------------------------------------
+//
+// R5-16 的验收要求「预览命中缓存时不再触发文件读取」。只比对返回值证明不了这件事
+// （陈旧判定与新鲜判定的取值可能恰好相同），所以直接在 `read_content_snapshot`
+// 入口计数：用例里取「前后差值」即可断言是否真的读了正文。
+//
+// 用线程局部而不是全局原子：cargo test 每个用例跑在独立线程里，线程局部计数让
+// 前后差值不受并行用例干扰。
+
+#[cfg(test)]
+thread_local! {
+    /// 当前线程累计的真实正文读取次数。
+    static REAL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 当前线程累计的真实读取次数（仅测试构建存在）。
+#[cfg(test)]
+pub(crate) fn real_read_count() -> usize {
+    REAL_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn note_real_read() {
+    REAL_READS.with(|count| count.set(count.get() + 1));
+}
+
+/// 生产构建：计数不存在，调用点保持零开销。
+#[cfg(not(test))]
+fn note_real_read() {}

@@ -292,3 +292,211 @@ fn ordered_prefix_helpers() {
     assert!(is_strict_ordered_extension(&base, &extended));
     assert!(!is_strict_ordered_extension(&base, &base));
 }
+
+// ---------------------------------------------------------------------------
+// R5-16 预览用的内容指纹与进程内缓存
+// ---------------------------------------------------------------------------
+
+fn write_body(dir: &TempDir, cid: &str, text: &str) -> PathBuf {
+    let path = dir.path().join(format!("{cid}.jsonl"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// 把 mtime 推到 1 小时后：与刚写入的时刻一定可区分，不受系统时钟粒度影响。
+fn bump_mtime(path: &Path) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+        .unwrap();
+}
+
+/// 真实读取一次并拼出指纹（正文读完即丢，测试侧也只留摘要）。
+fn fingerprint_read(path: &Path, session_id: &str, stamp: &ContentStamp) -> ContentFingerprint {
+    let state = read_content_snapshot(path, session_id);
+    match FingerprintedContent::from_state(&state, session_id, stamp) {
+        FingerprintedContent::Ready(fingerprint) => fingerprint,
+        other => panic!("正文应可验证，实际 {other:?}"),
+    }
+}
+
+/// 缓存键的全部要素：len 与 mtime 任一变化都必须换键（否则会返回陈旧判定）。
+#[test]
+fn content_stamp_tracks_length_and_mtime() {
+    let dir = TempDir::new("stamp");
+    let path = write_body(&dir, "sess-1", &sample_body("sess-1"));
+    let stamp = stamp_content(&path, "sess-1");
+    let ContentStamp::Stamped {
+        session_id,
+        len,
+        mtime_ns,
+        ..
+    } = stamp.clone()
+    else {
+        panic!("正文文件存在时应为 Stamped，实际 {stamp:?}");
+    };
+    assert_eq!(session_id, "sess-1");
+    assert_eq!(len, sample_body("sess-1").len() as u64);
+    assert!(mtime_ns > 0, "mtime 应可探测：{mtime_ns}");
+
+    // len 变化（追加一条记录）→ 换键。
+    let appended = format!(
+        "{}{}\n",
+        sample_body("sess-1"),
+        r#"{"type":"user","sessionId":"sess-1","text":"again"}"#
+    );
+    std::fs::write(&path, &appended).unwrap();
+    let longer = stamp_content(&path, "sess-1");
+    assert_ne!(stamp, longer, "len 变化必须换键");
+    let ContentStamp::Stamped { len: longer_len, .. } = &longer else {
+        panic!("追加后仍应为 Stamped");
+    };
+    assert!(*longer_len > len);
+
+    // len 不变、只改 mtime → 同样必须换键（等长改写靠 mtime 失效）。
+    let text = std::fs::read_to_string(&path).unwrap();
+    let patched = text.replacen("\"text\":\"hi\"", "\"text\":\"ho\"", 1);
+    assert_eq!(patched.len(), text.len(), "本用例只允许等长改写");
+    std::fs::write(&path, &patched).unwrap();
+    let rewritten = stamp_content(&path, "sess-1");
+    let ContentStamp::Stamped { len: rewritten_len, .. } = &rewritten else {
+        panic!("等长改写后仍应为 Stamped");
+    };
+    assert_eq!(*rewritten_len, *longer_len, "等长改写不得改变 len");
+    bump_mtime(&path);
+    let touched = stamp_content(&path, "sess-1");
+    assert_ne!(rewritten, touched, "mtime 变化必须换键");
+}
+
+/// 命中返回同一份指纹；len / mtime 变化后必须 miss（不得沿用陈旧摘要）。
+#[test]
+fn fingerprint_cache_hits_until_identity_changes() {
+    let dir = TempDir::new("fp-hit");
+    let path = write_body(&dir, "sess-1", &sample_body("sess-1"));
+    let stamp = stamp_content(&path, "sess-1");
+    let fingerprint = fingerprint_read(&path, "sess-1", &stamp);
+    assert_eq!(fingerprint.record_count, 2);
+    assert!(
+        fingerprint_cache().store(&stamp, fingerprint.clone()),
+        "身份完整时应写入成功"
+    );
+    assert_eq!(
+        fingerprint_cache().lookup(&stamp),
+        Some(fingerprint.clone()),
+        "同键必须命中"
+    );
+
+    // len 变化 → 换键 → miss。
+    let appended = format!(
+        "{}{}\n",
+        sample_body("sess-1"),
+        r#"{"type":"user","sessionId":"sess-1","text":"again"}"#
+    );
+    std::fs::write(&path, &appended).unwrap();
+    let longer = stamp_content(&path, "sess-1");
+    assert_eq!(
+        fingerprint_cache().lookup(&longer),
+        None,
+        "len 变化必须 miss"
+    );
+    let ContentStamp::Stamped { len: longer_len, .. } = &longer else {
+        panic!("追加后仍应为 Stamped");
+    };
+
+    // 回到原长度但 mtime 不同 → 仍然 miss（不得因为「看起来没变长」而命中）。
+    let text = std::fs::read_to_string(&path).unwrap();
+    let patched = text.replacen("\"text\":\"hi\"", "\"text\":\"ho\"", 1);
+    assert_eq!(patched.len(), text.len(), "本用例只允许等长改写");
+    std::fs::write(&path, &patched).unwrap();
+    bump_mtime(&path);
+    let touched = stamp_content(&path, "sess-1");
+    let ContentStamp::Stamped { len: touched_len, .. } = &touched else {
+        panic!("等长改写后仍应为 Stamped");
+    };
+    assert_eq!(*touched_len, *longer_len, "失效只能来自 mtime，len 没变");
+    assert_eq!(
+        fingerprint_cache().lookup(&touched),
+        None,
+        "mtime 变化必须 miss"
+    );
+}
+
+/// 归一化摘要按本副本 session_id 归一：换 session_id 必须换键，且摘要不得串味。
+#[test]
+fn fingerprint_cache_isolates_session_ids() {
+    let dir = TempDir::new("fp-sid");
+    let path = write_body(&dir, "sess-1", &sample_body("sess-1"));
+    let stamp_a = stamp_content(&path, "sess-1");
+    let stamp_b = stamp_content(&path, "sess-other");
+    assert_ne!(stamp_a, stamp_b, "session_id 必须进键");
+
+    let a = fingerprint_read(&path, "sess-1", &stamp_a);
+    let b = fingerprint_read(&path, "sess-other", &stamp_b);
+    assert_eq!(
+        a.full_digest, b.full_digest,
+        "原始字节摘要与 sessionId 无关"
+    );
+    assert_ne!(
+        a.normalized_digest, b.normalized_digest,
+        "正文含本副本 sessionId，换 id 后归一化摘要必须不同"
+    );
+    assert!(fingerprint_cache().store(&stamp_a, a.clone()));
+    assert!(fingerprint_cache().store(&stamp_b, b.clone()));
+    assert_eq!(fingerprint_cache().lookup(&stamp_a), Some(a.clone()));
+    assert_eq!(fingerprint_cache().lookup(&stamp_b), Some(b.clone()));
+    assert_ne!(
+        fingerprint_cache().lookup(&stamp_a),
+        Some(b),
+        "不同成员的归一化摘要不得串味"
+    );
+}
+
+/// Missing / Unavailable 从不入缓存（文件可能马上被创建或修复）。
+#[test]
+fn fingerprint_cache_never_stores_unverifiable_identities() {
+    let dummy = ContentFingerprint {
+        len: 1,
+        mtime_ns: 1,
+        session_id: "sess-1".to_string(),
+        full_digest: "full".to_string(),
+        normalized_digest: "normalized".to_string(),
+        record_count: 1,
+    };
+    assert!(
+        !fingerprint_cache().store(&ContentStamp::Missing, dummy.clone()),
+        "Missing 不得入缓存"
+    );
+    assert_eq!(fingerprint_cache().lookup(&ContentStamp::Missing), None);
+
+    let unavailable = ContentStamp::Unavailable("permission denied".to_string());
+    assert!(
+        !fingerprint_cache().store(&unavailable, dummy),
+        "Unavailable 不得入缓存"
+    );
+    assert_eq!(fingerprint_cache().lookup(&unavailable), None);
+
+    // 正文文件不存在时身份探测必然是 Missing，不会伪装成 Stamped。
+    let dir = TempDir::new("fp-missing");
+    assert_eq!(
+        stamp_content(&dir.path().join("nope.jsonl"), "sess-1"),
+        ContentStamp::Missing
+    );
+}
+
+/// 上限淘汰：插入序淘汰最早的一半，重复写同一个键不重复登记。
+#[test]
+fn bounded_cache_evicts_oldest_half_when_full() {
+    let cache: BoundedCache<u32, u32> = BoundedCache::with_capacity(4);
+    for index in 1..=4u32 {
+        cache.insert(index, index * 10);
+    }
+    assert_eq!(cache.len(), 4);
+    cache.insert(4, 40);
+    assert_eq!(cache.len(), 4, "重复写同一个键不重复登记");
+    cache.insert(5, 50);
+    assert!(cache.len() <= 4, "超过上限必须淘汰");
+    assert_eq!(cache.get(&1), None, "最早的一半应被淘汰");
+    assert_eq!(cache.get(&2), None, "最早的一半应被淘汰");
+    assert_eq!(cache.get(&3), Some(30));
+    assert_eq!(cache.get(&4), Some(40));
+    assert_eq!(cache.get(&5), Some(50));
+}

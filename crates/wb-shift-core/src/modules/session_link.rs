@@ -32,6 +32,13 @@ mod sync_decision;
 // 本模块的 re-export 只服务本 crate（`session` / `session_backup` 等模块），没有跨 crate 使用者，
 // 因此内部项一律 `pub(crate)`；只有其它模块的单测仍按旧路径 `session_link::X` 取的少数项保留 pub
 // （见下方单独分组，生产路径不直接使用），本模块单测则直接 import 对应子模块。
+// 预览摘要缓存（R5-16）：只读判定可命中，执行路径不提供正文因此无法复用。
+pub(crate) use content::{
+    fingerprint_cache, stamp_content, BoundedCache, ContentStamp, FingerprintedContent,
+};
+// 单测专用的真实读取计数：证明预览缓存命中时不再触发正文读取（R5-16 验收口径）。
+#[cfg(test)]
+pub(crate) use content::real_read_count;
 pub(crate) use content::{
     full_digest_of, line_digest_of, normalize_jsonl, normalize_last_incomplete,
     read_content_snapshot, to_hex, total_digest_of, ContentSnapshot, ContentState,
