@@ -45,6 +45,12 @@ fn has_unexpired_plain_token(acc: &Value) -> bool {
 ///
 /// 白名单的一致性由 `tests/store.rs` 的 `local_account_fields_*` 不变量测试守住：
 /// 加字段而忘了给样例值时，那条测试会直接失败并指出字段名。
+///
+/// **反向约束：认证状态字段不能进这里。** `needs_relogin` / `needs_relogin_reason` /
+/// `needs_relogin_since` 这类「标记」靠**删键**清除，而 `inherit_local_fields` 的语义是
+/// 「`incoming` 缺键就用旧值补回」——把它们当本地字段加进来，续期成功删掉的标记会被旧值
+/// 复活，表现为「换了 Token 还是显示需重新登录」，且无编译错误、无运行时报错、无日志。
+/// 该反向约束由 `refresh::tests::marker_fields_are_not_local_account_fields` 求交守住。
 pub const LOCAL_ACCOUNT_FIELDS: [&str; 3] = ["note", "displayField", "mark"];
 
 /// 把 `existing` 里的本地字段补进 `incoming`：`incoming` 已有的键保持原样（以新数据为准）。
