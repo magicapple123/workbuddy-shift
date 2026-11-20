@@ -1281,6 +1281,28 @@ mod tests {
         assert!(!should_spawn_verify(false, true, false));
     }
 
+    /// 标记字段**不得**进入「本地字段继承白名单」。
+    ///
+    /// `account::LOCAL_ACCOUNT_FIELDS` 的语义是「`incoming` 缺该键时用旧值补回」
+    /// （`inherit_local_fields`）。而续期成功清除标记靠的是**删键**，一旦把
+    /// `needs_relogin` 之类加进白名单，删掉的键会被旧值原样补回 —— 标记复活，
+    /// 上游 issue #190 会静默回归，且没有任何编译或运行期报错。这条用例把它变成红灯。
+    #[test]
+    fn marker_fields_are_not_local_account_fields() {
+        for key in RELOGIN_FIELDS.iter().chain(TEMPORARY_FIELDS.iter()) {
+            assert!(
+                !crate::modules::account::LOCAL_ACCOUNT_FIELDS.contains(key),
+                "`{key}` 不得进入 LOCAL_ACCOUNT_FIELDS：刷新成功靠删键清标记，\
+                 白名单会把旧标记复活（issue #190 回归）"
+            );
+        }
+        // 反证：白名单确实只装「展示类」字段，标记类字段一律不在此列。
+        assert!(
+            !crate::modules::account::LOCAL_ACCOUNT_FIELDS.is_empty(),
+            "白名单为空说明已被清空，本用例失去意义，需同步调整"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // 冷却 / 退避（R5-08 B）
     // -----------------------------------------------------------------------
