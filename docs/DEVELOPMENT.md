@@ -141,6 +141,11 @@ cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p compa
    Windows `UPDATE_OS=windows UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh`；
    最后 `python3 scripts/merge-update-manifests.py <产物目录>` 合并 `latest.json`。
    CI 的 tag 发版流程会自动完成这些步骤并上传 GitHub Release。
+   清单里的 `notes` 是**应用内卡片摘要（纯文本，≤600 字符）**，不是 Release 说明全文；
+   `gen-update-json.sh` 会优先取 `.md` 里的 `<!-- card:begin -->` … `<!-- card:end -->`
+   区块，没有标记时按行清洗整份正文（丢表格 / 标题 / 引用 / 强调标记）。完整说明仍由
+   Release 页承载。规则细节见 `scripts/README.md` 的「更新清单的 `notes` 口径」。
+   写下一版发布说明时记得补这段摘要区块。
 
 > 注意：`createUpdaterArtifacts` 只会为当前版本生成签名安装包；CI 每次构建前会清掉
 > `target/**/release/bundle`，避免 cargo cache 把旧安装包带进 Release。
@@ -224,3 +229,15 @@ AGENTS.md            # 工程约定与验证入口（人 + AI agent 共用）
 
 - 仓库不提交本地数据（accounts.json、认证文件、密钥、token 由 `.gitignore` 排除）
 - 发布前用 `git grep` 扫描 token 模式（`ghp_`/`npm_`/`gho_` 等）
+
+## CLI 子命令与退出码
+
+`workbuddy-shift` 除 `serve` / `status` / `version` / `help` 外，还有一组面向 AI 的
+JSON 子命令（`accounts` / `limits` / `credits` / `inspect` / `switch`），
+定义与 JSON 契约见 [`docs/cli.md`](./cli.md)，实现见 `crates/wb-shift-server/src/cli/`。
+
+工程侧只需要记住两条：
+
+- **stdout 只输出 JSON**，进度与警告走 stderr；新增子命令必须遵守。
+- 退出码：`0` 成功（含 `partial`）/ `1` 目标不存在 / `2` 用法错误 /
+  `3` 拒绝执行（有活跃 CLI 会话时切号）/ `4` 致命错误。

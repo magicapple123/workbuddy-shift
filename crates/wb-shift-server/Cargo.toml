@@ -18,7 +18,9 @@ path = "src/main.rs"
 [dependencies]
 wb-shift-core = { path = "../wb-shift-core" }
 axum = "0.7"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# "time" 显式声明：CLI 的积分查询预算（tokio::time::timeout）与既有后台循环的
+# tokio::time::sleep 都依赖它。以前是靠 axum 传递启用的，不写死会在换依赖时炸。
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # 请求体 DTO：把 WebUI 的 JSON 形状变成明确类型（见 src/api/dto.rs）。
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

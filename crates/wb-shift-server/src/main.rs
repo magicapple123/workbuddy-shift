@@ -3,16 +3,25 @@
 //! ```bash
 //! workbuddy-shift              # 启动本地服务（仅 127.0.0.1）+ 打开浏览器 webui
 //! workbuddy-shift serve        # 同默认行为；配合 --port / --no-open 使用
-//! workbuddy-shift status       # 终端输出当前账号
+//! workbuddy-shift status       # 终端输出当前账号（--json 输出供 AI 解析的 JSON）
+//! workbuddy-shift accounts     # 账号列表（JSON）
+//! workbuddy-shift limits       # 各账号观察到的模型限额（JSON）
+//! workbuddy-shift credits      # 各账号积分（JSON，默认实时）
+//! workbuddy-shift inspect      # 整池只读体检（JSON）
+//! workbuddy-shift switch <id>  # 切 CodeBuddy CLI 账号（--dry-run 只预览）
 //! workbuddy-shift version      # 版本号
 //! workbuddy-shift help         # 用法说明（--help / -h 等价）
 //! ```
-
-// 生产路径（lib/bin 的非测试编译）禁止 unwrap/expect：宿主层只做协议适配，
-// 任何失败都必须变成稳定的错误文案。测试目标（cfg(test)）不受此限制。
+//!
+//! AI 友好子命令（`accounts` / `limits` / `credits` / `inspect` / `switch`）的实现在
+//! [`cli`]：stdout 只输出 JSON、进度走 stderr、退出码见 `docs/cli.md`。
+//!
+//! 生产路径（lib/bin 的非测试编译）禁止 unwrap/expect：宿主层只做协议适配，
+//! 任何失败都必须变成稳定的错误文案。测试目标（cfg(test)）不受此限制。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod api;
+mod cli;
 
 use serde_json::json;
 
@@ -30,7 +39,12 @@ workbuddy-shift — WorkBuddy 账号切换工具（本地 webui）
 用法:
   workbuddy-shift [选项]          启动本地服务并打开浏览器（默认命令）
   workbuddy-shift serve [选项]    同默认行为
-  workbuddy-shift status          终端输出当前账号
+  workbuddy-shift status          终端输出当前账号；加 --json 输出 JSON
+  workbuddy-shift accounts        账号列表（JSON，不含密钥）
+  workbuddy-shift limits          各账号观察到的模型限额（JSON）
+  workbuddy-shift credits         各账号积分（JSON，默认实时查询）
+  workbuddy-shift inspect         整池只读体检：账号 + 积分 + 限额（JSON）
+  workbuddy-shift switch <id>     切 CodeBuddy CLI 账号（--dry-run 只预览）
   workbuddy-shift version         输出版本号
   workbuddy-shift help            显示本帮助
 
@@ -38,6 +52,17 @@ workbuddy-shift — WorkBuddy 账号切换工具（本地 webui）
   --port <端口>      监听端口（默认 57910；也可写 --port=<端口>；始终只绑定 127.0.0.1）
   --no-open          启动服务后不自动打开浏览器
   --variant <档位>   cn（默认）或 ai；仅影响 status 的档位选择
+
+AI 友好子命令的选项:
+  --json             stdout 只输出 JSON（accounts/limits/credits/inspect 始终输出 JSON）
+  --cached           积分只读本地快照，不联网（credits / inspect）
+  --timeout <秒>     实时积分查询的总预算，默认 8，上限 120（credits / inspect）
+  --no-credits       跳过积分网络查询（inspect）
+  --summary          强制整池汇总视图（inspect，默认行为）
+  --dry-run          只输出「将会发生什么」，不写任何状态（switch）
+  --force            有活跃 CLI 会话时仍然切号（会关闭 CLI 进程，当前会话中断且不自动重开）
+
+退出码: 0 成功 / 1 目标不存在 / 2 用法错误 / 3 拒绝执行（有活跃 CLI 会话） / 4 致命错误
 ";
 
 fn print_usage() {
@@ -128,7 +153,7 @@ fn variant_arg(args: &[String]) -> WbVariant {
     WbVariant::parse(raw.as_deref())
 }
 
-/// 取第一个非选项子命令（`status` / `version` / `help` / `serve`）。
+/// 取第一个非选项子命令的**下标**（`status` / `version` / `help` / `serve` / AI 子命令）。
 ///
 /// 全局选项允许写在子命令前面（如 `workbuddy-shift --variant ai status`）：
 /// 解析时跳过 `--variant` / `--port` 及其值、`--variant=…` / `--port=…`、`--no-open`；
@@ -136,7 +161,7 @@ fn variant_arg(args: &[String]) -> WbVariant {
 /// 由 `main` 落到改造前的 serve 行为（不新增对未知命令的拒绝，避免破坏既有调用）。
 ///
 /// `args` 是去掉程序名后的参数列表（与单测里的 `args(...)` 同口径）。
-fn subcommand_of(args: &[String]) -> Option<&str> {
+fn subcommand_index(args: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         if matches!(arg.as_str(), "--variant" | "--port") {
@@ -148,9 +173,19 @@ fn subcommand_of(args: &[String]) -> Option<&str> {
             index += 1;
             continue;
         }
-        return Some(arg.as_str());
+        return Some(index);
     }
     None
+}
+
+/// 子命令名（`subcommand_index` 的便捷包装）。
+///
+/// 只有单测用得到（`main` 需要下标才能切出子命令之后的参数），因此只在测试目标里编译。
+#[cfg(test)]
+fn subcommand_of(args: &[String]) -> Option<&str> {
+    subcommand_index(args)
+        .and_then(|index| args.get(index))
+        .map(String::as_str)
 }
 
 fn print_status(variant: WbVariant) {
@@ -183,9 +218,24 @@ fn print_status(variant: WbVariant) {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let cmd = subcommand_of(&args[1..]).unwrap_or("serve");
+    let rest = &args[1..];
+    let command_index = subcommand_index(rest);
+    let cmd = command_index
+        .and_then(|index| rest.get(index))
+        .map(String::as_str)
+        .unwrap_or("serve");
+    // 子命令之后的参数交给 cli 自己解析（全局选项的跳过规则只在 subcommand_index 里实现一次）。
+    let command_args: &[String] = command_index.map(|index| &rest[index + 1..]).unwrap_or(&[]);
     match cmd {
+        // 裸 `status` 保持改造前的终端文本；`status --json` 走 AI 友好输出。
+        "status" if cli::wants_json(command_args) => {
+            std::process::exit(cli::run("status", command_args).await)
+        }
         "status" => print_status(variant_arg(&args)),
+        // AI 友好子命令：stdout 纯 JSON，退出码即进程退出码。
+        "accounts" | "limits" | "credits" | "inspect" | "switch" => {
+            std::process::exit(cli::run(cmd, command_args).await)
+        }
         "version" | "--version" | "-V" => {
             println!("workbuddy-shift {}", env!("CARGO_PKG_VERSION"));
         }
@@ -263,7 +313,7 @@ fn open_browser(addr: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{subcommand_of, variant_arg};
+    use super::{subcommand_index, subcommand_of, variant_arg};
     use wb_shift_core::modules::variant::WbVariant;
 
     fn args(items: &[&str]) -> Vec<String> {
@@ -328,5 +378,37 @@ mod tests {
         assert_eq!(subcommand_of(&args(&["serve", "--no-open"])), Some("serve"));
         assert_eq!(subcommand_of(&args(&["--port"])), None);
         assert_eq!(subcommand_of(&args(&["--variant"])), None);
+    }
+
+    /// AI 友好子命令不得落到 `serve`（否则 CLI 会挂住监听端口而不是输出 JSON）。
+    #[test]
+    fn ai_subcommands_are_recognized_before_serve() {
+        for command in ["accounts", "limits", "credits", "inspect", "switch"] {
+            assert_eq!(subcommand_of(&args(&[command])), Some(command));
+        }
+        assert_eq!(
+            subcommand_of(&args(&["inspect", "--summary"])),
+            Some("inspect")
+        );
+        assert_eq!(
+            subcommand_of(&args(&["switch", "acct_1", "--dry-run"])),
+            Some("switch")
+        );
+        assert_eq!(
+            subcommand_of(&args(&["--variant", "ai", "credits", "--cached"])),
+            Some("credits")
+        );
+        // 全局选项仍正常：`--port` 与其值被跳过，子命令下标指向真正的命令。
+        let tokens = args(&["--port", "59000", "accounts", "--json"]);
+        assert_eq!(subcommand_index(&tokens), Some(2));
+        assert_eq!(subcommand_of(&tokens), Some("accounts"));
+    }
+
+    /// `main` 用下标切出子命令之后的参数：全局选项不能被带进子命令参数里。
+    #[test]
+    fn command_args_are_sliced_after_subcommand() {
+        let tokens = args(&["--variant=ai", "switch", "acct_1", "--dry-run"]);
+        let index = subcommand_index(&tokens).expect("应识别到 switch");
+        assert_eq!(&tokens[index + 1..], &args(&["acct_1", "--dry-run"])[..]);
     }
 }
