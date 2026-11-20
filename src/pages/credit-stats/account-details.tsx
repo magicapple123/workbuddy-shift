@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Card, CardDescription, CardHeader } from "@/components/ui/card";
 import { formatDateTime } from "@/lib/format";
 import type {
@@ -50,10 +50,9 @@ export function SelectedAccountDetails({
     return latest;
   }, null);
 
-  useEffect(() => {
-    setDetailTab("credits");
-  }, [effectiveFilter]);
-
+  // R5-15：不随账号切换重置 detailTab。切号后保持当前子 Tab，
+  // 无数据 / 查询失败由 OfficialUsageBreakdown 自身的空态与错误态覆盖，
+  // 分页仍由该组件在 accountId 变化时回到第 1 页。
   return (
     <div className="flex min-w-0 flex-col gap-12">
       <section className="min-w-0 space-y-2.5" aria-labelledby="credit-detail-title">
