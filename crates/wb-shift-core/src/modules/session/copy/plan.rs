@@ -277,6 +277,7 @@ pub(in crate::modules::session) fn run_copy(
                     source_repaired,
                     aux_note,
                     space_note,
+                    expert,
                 }) => {
                     let mut item = json!({
                         "id": cid,
@@ -299,6 +300,14 @@ pub(in crate::modules::session) fn run_copy(
                     // 同一目录命中多个目标空间：本次按目录新建了分组，别让用户以为串组了。
                     if let Some(note) = space_note {
                         item["spaceNote"] = json!(note);
+                    }
+                    // 专家在目标账号不可用只提示：默认仍勾选、仍复制（R5-13 的决策）。
+                    if expert.state != "unknown" {
+                        item["expert"] = json!({
+                            "state": expert.state,
+                            "plugin": expert.plugin,
+                            "name": expert.name,
+                        });
                     }
                     copied.push(item);
                 }
@@ -425,6 +434,8 @@ pub(in crate::modules::session) enum CopyOutcome {
         aux_note: Option<&'static str>,
         /// 空间归属的诊断说明（报告里为 `spaceNote`）：同目录多分组时按目录新建。
         space_note: Option<&'static str>,
+        /// 专家绑定判定（报告里为 `expert`）：只用于提示，不影响复制结果。
+        expert: super::sync::expert_binding::ExpertBinding,
     },
     AlreadyLinked {
         session_id: String,

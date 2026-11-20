@@ -12,6 +12,7 @@
 use super::copy::*;
 use super::*;
 
+pub(in crate::modules::session) mod expert_binding;
 mod liveness;
 mod plan;
 mod preview;

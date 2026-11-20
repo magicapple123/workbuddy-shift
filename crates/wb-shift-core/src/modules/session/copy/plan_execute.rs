@@ -35,6 +35,14 @@ pub(in crate::modules::session) fn copy_one_session(
         ContentState::Missing => return Err("会话内容不存在，未复制".to_string()),
         ContentState::Unavailable(reason) => repair_source_snapshot(&source_path, cid, &reason)?,
     };
+    // 专家绑定只做**展示判定**（R5-13）：不改写任何列、不复制专家包、不参与跳过决策。
+    let (expert_id, expert_identity) = read_expert_ref(context.source_paths, cid);
+    let expert = super::sync::expert_binding::detect(
+        &context.paths.data_root,
+        context.target_uid,
+        expert_id.as_deref(),
+        expert_identity.as_deref(),
+    );
     let source_owner = session_row_owner(context.source_paths, cid);
     match source_owner.as_deref() {
         Some(owner) if owner == context.source_uid => {}
@@ -144,6 +152,7 @@ pub(in crate::modules::session) fn copy_one_session(
         source_repaired,
         aux_note,
         space_note,
+        expert,
     })
 }
 

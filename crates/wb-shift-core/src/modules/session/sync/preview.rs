@@ -522,6 +522,18 @@ pub(in crate::modules::session) fn session_links_preview_at(
                     preview_group_item(paths, &fixed_paths, group, &source_uid, &target_uid)
                 })
                 .collect();
+            // 汇总：让用户一眼看到「有几条会话换号后不能再以原专家身份对话」。
+            // 只计数不筛选，前端可据此给出筛选项；0 条时不出现该字段。
+            let expert_missing = groups
+                .iter()
+                .filter(|item| {
+                    item.get("expert")
+                        .is_some_and(|expert| expert["state"] == "missing")
+                })
+                .count();
+            if expert_missing > 0 {
+                report["expertMissing"] = json!(expert_missing);
+            }
             report["groups"] = json!(groups);
         }
     }
@@ -752,6 +764,17 @@ pub(in crate::modules::session) fn preview_group_item(
         || decision.verdict == SyncVerdict::Ahead
         || (archive_action.is_some() && decision.verdict == SyncVerdict::Identical);
 
+    // R5-13：专家绑定只做**展示判定**——目标账号不能用该专家时标黄提示，
+    // 但默认仍勾选、仍复制（不改写任何 expert_* 列，也不复制专家包）。
+    let (expert_id, expert_identity) =
+        super::super::copy::read_expert_ref(&source_paths, &source_member.session_id);
+    let expert = super::expert_binding::detect(
+        &target_paths.data_root,
+        target_uid,
+        expert_id.as_deref(),
+        expert_identity.as_deref(),
+    );
+
     let mut item = json!({
         "groupId": group.id,
         "title": title,
@@ -771,6 +794,13 @@ pub(in crate::modules::session) fn preview_group_item(
         "source": source_summary,
         "target": target_summary,
     });
+    if expert.state != "unknown" {
+        item["expert"] = json!({
+            "state": expert.state,
+            "plugin": expert.plugin,
+            "name": expert.name,
+        });
+    }
     if let Some(action) = archive_action.as_deref() {
         item["archiveAction"] = json!(action);
     }

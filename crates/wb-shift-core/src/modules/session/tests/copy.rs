@@ -2838,3 +2838,88 @@ fn space_insert_failure_rolls_back_without_orphan_space() {
     assert!(space_row_ids(&db, "uid-b").is_empty(), "不得残留空分组");
     assert_eq!(env.rows_for("uid-b").len(), 0, "会话行也要回滚");
 }
+
+// ---------------------------------------------------------------------------
+// R5-13：专家绑定判定（只提示，不改变复制结果）
+// ---------------------------------------------------------------------------
+
+/// 会话带一个目标账号没有的专家 → 报告带 `expert.state = missing`，但**照常复制**。
+#[test]
+fn copy_reports_missing_expert_but_still_copies() {
+    let env = ready_env("expert-missing");
+    let db = env.paths.workbuddy_db();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("ALTER TABLE sessions ADD COLUMN expert_id TEXT", [])
+        .unwrap();
+    conn.execute(
+        "ALTER TABLE sessions ADD COLUMN expert_runtime_identity TEXT",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE sessions SET expert_id = 'ex_NOT_EXIST', expert_runtime_identity = ?1 WHERE id = 'sess-1'",
+        [r#"expert-v2:{"v":2,"kind":"expert","expertId":"ex_NOT_EXIST","pluginRegisteredName":"no-such-plugin","agentName":"不存在的专家","source":"custom"}"#],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["copied"][0]["expert"]["state"], "missing");
+    assert_eq!(
+        report["copied"][0]["expert"]["plugin"], "no-such-plugin",
+        "必须按 pluginName 报，不按 expert_id"
+    );
+    // 决策：missing 只提示，不跳过。
+    let new_id = env.first_copy_id(&report);
+    assert_eq!(env.rows_for("uid-b"), vec![new_id]);
+}
+
+/// 插件已装在目标数据根 → 判 `available`（零误报），且列按原样搬运不被改写。
+#[test]
+fn copy_keeps_expert_columns_untouched_when_available() {
+    let env = ready_env("expert-available");
+    let db = env.paths.workbuddy_db();
+    // 目标档数据根里放一个插件缓存目录（测试用临时 data_root，不碰真实 ~/.workbuddy）。
+    std::fs::create_dir_all(
+        env.paths
+            .data_root
+            .join("plugins")
+            .join("cache")
+            .join("experts")
+            .join("software-company"),
+    )
+    .unwrap();
+    let identity = r#"expert-v2:{"v":2,"kind":"expert","expertId":"SoftwareCompany","marketExpertId":"ex_jPdPfIC04OKD","pluginRegisteredName":"software-company","agentName":"SoftwareCompany","source":"builtin"}"#;
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("ALTER TABLE sessions ADD COLUMN expert_id TEXT", [])
+        .unwrap();
+    conn.execute(
+        "ALTER TABLE sessions ADD COLUMN expert_runtime_identity TEXT",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE sessions SET expert_id = 'SoftwareCompany', expert_runtime_identity = ?1 WHERE id = 'sess-1'",
+        [identity],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(
+        report["copied"][0]["expert"]["state"], "available",
+        "{report}"
+    );
+    // 原样搬运：副本的两列与源逐字相同。
+    let conn = Connection::open(&db).unwrap();
+    let (expert_id, copied_identity): (String, String) = conn
+        .query_row(
+            "SELECT expert_id, expert_runtime_identity FROM sessions WHERE id = ?1",
+            [env.first_copy_id(&report)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(expert_id, "SoftwareCompany");
+    assert_eq!(copied_identity, identity);
+}

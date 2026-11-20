@@ -198,6 +198,35 @@ fn write_session_aux(
 /// `deleted_at` 列按存在性拼 SQL：历史库没有软删除标记时套 `deleted_at IS NULL` 会让
 /// prepare 失败 → 所有行都被判成「行缺失」，与存活索引（缺列按全部存活读）的结论分叉。
 /// 与 `session::sync::preview::session_row_info` 必须同口径。
+/// 读源会话的专家绑定字段（`expert_id` + `expert_runtime_identity`，只读）。
+///
+/// 只用于「目标账号能不能继续以该专家身份对话」的**展示判定**（R5-13）；两列都缺失时返回
+/// `(None, None)`，判定侧据此给 `unknown`（不提示）。列不存在（老库）同样是 None。
+pub(in crate::modules::session) fn read_expert_ref(
+    paths: &SessionPaths,
+    cid: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(conn) = open_db(&paths.workbuddy_db(), true) else {
+        return (None, None);
+    };
+    if !column_exists(&conn, "sessions", "expert_id") {
+        return (None, None);
+    }
+    let has_identity = column_exists(&conn, "sessions", "expert_runtime_identity");
+    let sql = if has_identity {
+        "SELECT expert_id, expert_runtime_identity FROM sessions WHERE id = ?1"
+    } else {
+        "SELECT expert_id, NULL FROM sessions WHERE id = ?1"
+    };
+    conn.query_row(sql, [cid], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0).unwrap_or(None),
+            row.get::<_, Option<String>>(1).unwrap_or(None),
+        ))
+    })
+    .unwrap_or((None, None))
+}
+
 pub(in crate::modules::session) fn session_row_owner(
     paths: &SessionPaths,
     cid: &str,
