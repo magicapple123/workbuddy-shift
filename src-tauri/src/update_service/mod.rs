@@ -120,6 +120,11 @@ pub async fn check<R: Runtime>(app: &AppHandle<R>, proxy: Option<&str>, force: b
         snapshot.phase, snapshot.latest
     );
 
+    // R5-03：主窗口不在前台（最小化 / 隐藏到托盘 / 轻量模式下窗口已销毁）时补一条
+    // 系统通知。窗口在前台时不发——卡片已经在右下角。同版本只发一次，见
+    // `notify_decision` 的去重规则。
+    let _ = notify_available(app, &snapshot);
+
     // 有新版时后台预热 updater 句柄：下载阶段直接复用，避免「检查通过、下载再 check 失败」。
     // 异步进行且失败只记日志——预热失败不应让检查结果变成错误。
     if result.get("ok").and_then(Value::as_bool) == Some(true)
@@ -210,6 +215,9 @@ mod tests {
         BUSY_SINCE.store(0, Ordering::Release);
         BUSY_KIND.store(0, Ordering::Release);
         *LAST_CHECK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *NOTIFIED_VERSION
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
@@ -549,5 +557,133 @@ mod tests {
     fn download_tooltip_reports_percent_or_unknown() {
         assert_eq!(download_tooltip(Some(42)), "正在下载更新 42%");
         assert_eq!(download_tooltip(None), "正在下载更新…");
+    }
+
+    // -----------------------------------------------------------------
+    // R5-03 系统通知：前台判定 + 版本去重（纯函数）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn notify_only_when_window_not_in_foreground() {
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, Some("0.2.3"), true, false, None),
+            None,
+            "主窗口在前台时不发通知（卡片已经可见）"
+        );
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, Some("0.2.3"), false, false, None),
+            Some("0.2.3".to_string()),
+            "隐藏 / 最小化 / 轻量模式（无主窗口）都要发"
+        );
+    }
+
+    #[test]
+    fn notify_skips_demo_mode_and_non_available_phases() {
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, Some("0.2.3"), false, true, None),
+            None,
+            "演示 / 截图模式不发"
+        );
+        for phase in [
+            UpdatePhase::Idle,
+            UpdatePhase::Checking,
+            UpdatePhase::UpToDate,
+            UpdatePhase::Downloading,
+            UpdatePhase::ReadyToRestart,
+            UpdatePhase::Error,
+        ] {
+            assert_eq!(
+                notify_decision(phase, Some("0.2.3"), false, false, None),
+                None,
+                "{phase:?} 阶段不该发「发现新版本」"
+            );
+        }
+    }
+
+    #[test]
+    fn notify_dedupes_same_version_and_rearms_on_newer() {
+        // 同版本只发一次：v 前缀与空白归一化后仍算同一版本。
+        assert_eq!(
+            notify_decision(
+                UpdatePhase::Available,
+                Some("0.2.3"),
+                false,
+                false,
+                Some("v0.2.3")
+            ),
+            None
+        );
+        assert_eq!(
+            notify_decision(
+                UpdatePhase::Available,
+                Some(" 0.2.3 "),
+                false,
+                false,
+                Some("0.2.3")
+            ),
+            None
+        );
+        // 发现更高版本：再发一次。
+        assert_eq!(
+            notify_decision(
+                UpdatePhase::Available,
+                Some("0.2.4"),
+                false,
+                false,
+                Some("0.2.3")
+            ),
+            Some("0.2.4".to_string())
+        );
+    }
+
+    #[test]
+    fn notify_requires_a_target_version() {
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, None, false, false, None),
+            None
+        );
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, Some("   "), false, false, None),
+            None
+        );
+        assert_eq!(
+            notify_decision(UpdatePhase::Available, Some("v"), false, false, None),
+            None
+        );
+    }
+
+    /// 进程内去重状态：写一次后读回同一版本（归一化），需要新版本时才覆盖。
+    #[test]
+    fn notified_version_state_roundtrip() {
+        let _guard = lock();
+        reset();
+        assert_eq!(notified_version(), None);
+        remember_notified_version("v0.2.3");
+        assert_eq!(notified_version().as_deref(), Some("0.2.3"));
+        // 同一版本不再触发；新版本覆盖后再触发。
+        assert_eq!(
+            notify_decision(
+                UpdatePhase::Available,
+                Some("0.2.3"),
+                false,
+                false,
+                notified_version().as_deref(),
+            ),
+            None
+        );
+        remember_notified_version("0.2.4");
+        assert_eq!(notified_version().as_deref(), Some("0.2.4"));
+        assert_eq!(
+            notify_decision(
+                UpdatePhase::Available,
+                Some("0.2.4"),
+                false,
+                false,
+                notified_version().as_deref(),
+            ),
+            None
+        );
+        reset();
+        assert_eq!(notified_version(), None);
     }
 }

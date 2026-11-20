@@ -33,7 +33,12 @@ pub struct UpdateSnapshot {
     pub percent: Option<u8>,
     /// 错误 / 提示文案。
     pub message: Option<String>,
-    /// 新版本的发布说明（后端已 trim 并按 8000 字符截断）。
+    /// 新版本的**卡片摘要**（纯文本；生成侧 `scripts/gen-update-json.sh` 已清洗，
+    /// core 侧只做 trim + 8000 字符兜底截断）。
+    ///
+    /// 语义是「能放进 360px 卡片的几行摘要」，不是 Release 说明全文——完整说明由
+    /// `GITHUB_RELEASE_URL` 承载。已发布的老清单里这个字段仍是整份 Markdown，
+    /// 前端 `cleanNotes()` 会再兜底清洗一次。
     ///
     /// 只在 `available` 阶段有值：`idle` / `upToDate` 清空，避免下一次检查后卡片
     /// 拿着上一个版本的说明。老 Release 没有 notes 字段时为 None（卡片只显示版本 + 日期）。
@@ -383,4 +388,62 @@ pub(crate) fn advance_progress(downloaded: u64, total: Option<u64>) -> Option<u8
 pub(crate) fn should_rebuild_menu(percent: u8) -> bool {
     let bucket = percent / 10;
     MENU_PROGRESS_BUCKET.swap(bucket, Ordering::AcqRel) != bucket
+}
+
+// ---------------------------------------------------------------------------
+// 「发现新版本」系统通知：去重状态与决策（R5-03）
+// ---------------------------------------------------------------------------
+
+/// 进程内「已通知版本」：同一版本只发一次系统通知。
+///
+/// 后台每 30 分钟检查一轮，同一个 `available` 结果会反复出现；没有这份去重，
+/// 托盘里挂一夜就是十几条重复通知。发现更高版本时才覆盖并再发一次。
+pub(crate) static NOTIFIED_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+/// 归一化版本号：去首尾空白与 `v` 前缀（`v0.2.3` 与 `0.2.3` 视为同一版本）。
+pub(crate) fn normalize_version(version: &str) -> String {
+    version.trim().trim_start_matches(['v', 'V']).to_string()
+}
+
+/// 「发现新版本」通知的决策（纯函数，不碰宿主，便于单测）。
+///
+/// 返回 `Some(version)` 表示要发通知（值为归一化后的版本号），`None` 表示不发：
+/// - 只有 `available` 阶段且有目标版本才可能发；
+/// - 主窗口在前台不发：卡片就在右下角，再弹一条系统通知纯属打扰；
+/// - 演示 / 截图模式不发：README 截图里不能冒出系统通知气泡；
+/// - 同一版本只发一次，发现更高版本时再发。
+pub(crate) fn notify_decision(
+    phase: UpdatePhase,
+    latest: Option<&str>,
+    in_foreground: bool,
+    demo: bool,
+    notified: Option<&str>,
+) -> Option<String> {
+    if demo || in_foreground || phase != UpdatePhase::Available {
+        return None;
+    }
+    let version = normalize_version(latest?);
+    if version.is_empty() {
+        return None;
+    }
+    if notified.map(normalize_version).as_deref() == Some(version.as_str()) {
+        return None;
+    }
+    Some(version)
+}
+
+/// 读「已通知版本」。
+pub(crate) fn notified_version() -> Option<String> {
+    NOTIFIED_VERSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// 记下刚通知过的版本，供下一轮去重。
+pub(crate) fn remember_notified_version(version: &str) {
+    let mut guard = NOTIFIED_VERSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(normalize_version(version));
 }

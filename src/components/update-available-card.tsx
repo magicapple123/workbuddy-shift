@@ -6,12 +6,12 @@ import { Button } from "@/components/ui/button";
 import { GITHUB_RELEASE_URL, openReleaseUrl } from "@/lib/update";
 import { cn } from "@/lib/utils";
 
-import { notesNeedToggle, publishedLabel } from "./update-prompt";
+import { notesNeedToggle, publishedLabel, cleanNotes } from "./update-prompt";
 
 interface UpdateAvailableCardProps {
   /** 目标版本号（无 `v` 前缀）。 */
   version: string;
-  /** 发布说明（后端已 trim / 截断）；没有说明时为 null。 */
+  /** 发布说明（清单原文，可能是一整份 Release Markdown）；没有说明时为 null。 */
   notes?: string | null;
   /** 发布日期（ISO 8601 原文）。 */
   publishedAt?: string | null;
@@ -26,12 +26,16 @@ interface UpdateAvailableCardProps {
 /**
  * 右下角「发现新版本」非模态卡片。
  *
- * 三条硬约束：
+ * 四条硬约束：
  * 1. **非模态**：`role="status"` + 不铺遮罩、不抢焦点，主界面照常可操作；
  * 2. **层级低于 Dialog**（`z-40` < 弹窗的 `z-50`）：点「立即更新」后弹窗盖住卡片，
  *    卡片本身在下载阶段自动让位（只在 `available` 阶段出现）；
  * 3. **说明可折叠**：默认三行（`line-clamp-3`），溢出才给「展开/收起」。
  *    老 Release 没有说明 → 整块不渲染，只留版本号与日期。
+ * 4. **不超过视口**（R5-02）：根容器 `max-h-[calc(100vh-2rem)]` + 三段式布局
+ *    （header `shrink-0` / notes 区 `min-h-0` 独立滚动 / footer `shrink-0`）。
+ *    展开 40+ 行时标题、关闭 ×、三个按钮都还在原位，说明区自己滚，
+ *    而不是让卡片长到窗口外——那样被裁掉的头部是滚不回来的。
  */
 export function UpdateAvailableCard({
   version,
@@ -46,7 +50,9 @@ export function UpdateAvailableCard({
   const [overflowing, setOverflowing] = useState<boolean | null>(null);
   const notesRef = useRef<HTMLParagraphElement | null>(null);
 
-  const text = notes?.trim() ?? "";
+  // 渲染前兜底清洗：已发布的清单（0.2.2）里 `notes` 是整份 Release Markdown，
+  // 生成侧改不了历史清单，只能在这里把 `##` / `**` / 表格挡住。
+  const text = cleanNotes(notes);
   const dateLabel = publishedLabel(publishedAt);
 
   useEffect(() => {
@@ -79,9 +85,10 @@ export function UpdateAvailableCard({
       role="status"
       aria-live="polite"
       aria-label={`发现新版本 v${version}`}
-      className="fixed bottom-4 right-4 z-40 flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-lg"
+      className="fixed bottom-4 right-4 z-40 flex max-h-[calc(100vh-2rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-3 overflow-hidden rounded-xl border border-border bg-card p-4 text-left shadow-lg"
     >
-      <div className="flex items-start gap-2">
+      {/* header：`shrink-0`，说明再长也不许把标题与关闭 × 挤出去。 */}
+      <div className="flex shrink-0 items-start gap-2">
         <ArrowUpCircle className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-medium leading-5">发现新版本 v{version}</div>
@@ -102,20 +109,33 @@ export function UpdateAvailableCard({
       </div>
 
       {text ? (
-        <div className="space-y-1">
-          <p
-            ref={notesRef}
+        <div className="flex min-h-0 flex-1 flex-col gap-1">
+          {/* 说明区：`min-h-0` 让它在 flex 列里可以收缩，展开时自身滚动。
+              `overscroll-contain` 滚到尽头不带动下面的页面；`tabIndex` + `aria-label`
+              保证键盘能进入并滚动（验收项：Tab 可达）。 */}
+          <div
             className={cn(
-              "whitespace-pre-line break-words text-xs leading-5 text-muted-foreground",
-              !expanded && "line-clamp-3",
+              "min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1",
+              expanded && "max-h-[min(45vh,360px)]",
             )}
+            tabIndex={0}
+            aria-label="更新说明"
+            role="group"
           >
-            {text}
-          </p>
+            <p
+              ref={notesRef}
+              className={cn(
+                "whitespace-pre-line break-words text-xs leading-5 text-muted-foreground",
+                !expanded && "line-clamp-3",
+              )}
+            >
+              {text}
+            </p>
+          </div>
           {toggleable ? (
             <button
               type="button"
-              className="text-xs text-primary underline-offset-2 hover:underline"
+              className="shrink-0 self-start text-xs text-primary underline-offset-2 hover:underline"
               onClick={() => setExpanded((current) => !current)}
             >
               {expanded ? "收起" : "展开"}
@@ -124,7 +144,8 @@ export function UpdateAvailableCard({
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center gap-2">
+      {/* footer：`shrink-0`，三个按钮永远留在可见范围内。 */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <DemoAction>
           <Button size="sm" onClick={onInstall}>
             <ArrowUpCircle />
