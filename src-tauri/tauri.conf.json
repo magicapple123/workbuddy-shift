@@ -51,6 +51,9 @@
     "externalBin": [
       "binaries/companion-runtime"
     ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico"

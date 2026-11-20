@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
-import { Database, Link2, Loader2, MessagesSquare, Settings, Sparkles, User } from "lucide-react";
+import { Database, Link2, Loader2, MessagesSquare, Settings, Sparkles, TriangleAlert, User, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -19,6 +19,14 @@ import { UpdateCenter } from "@/components/app-shell/update-center";
 import { UpdateHost } from "@/components/update-host";
 import { demoModeEnabled, pagesDemoHostingEnabled } from "@/lib/demo-mode";
 import { useSessionsNavEnabled } from "@/lib/nav-prefs";
+import {
+  degradedNoticeMessage,
+  dismissDegradedNotice,
+  isDegradedNoticeDismissed,
+  readWebviewSupport,
+  shouldShowDegradedNotice,
+  webviewVersionToken,
+} from "@/lib/webview-support";
 import { useCreditAutoRefresh } from "@/hooks/use-credit-auto-refresh";
 import { useRotateDeferredNotice } from "@/hooks/use-rotate-deferred-notice";
 import { useStatsWarmup } from "@/hooks/use-stats-warmup";
@@ -36,6 +44,54 @@ function sidebarNavItemClass(isActive: boolean): string {
     isActive
       ? "bg-primary-soft font-medium text-primary-soft-foreground [&>svg]:text-primary"
       : "text-muted-foreground hover:bg-primary-soft/60 hover:text-foreground",
+  );
+}
+
+/**
+ * R5-17：WebKit 能力「能用但不完整」（`degraded`，15.4–16.3 缺 `color-mix()` / `@property`）
+ * 时在应用顶部渲染一条**可关闭**的提醒条。
+ *
+ * - `ok`（例如 Windows 的 WebView2）返回 `null`：既有布局零变化，启动无任何提示；
+ * - `blocked` 由 `index.html` 的整页提示 + `main.tsx` 的不挂载兜住，这里不再参与；
+ * - 关闭状态写 localStorage，键含检测到的 WebKit 版本（见清单 §2.2）：升级 Safari 后
+ *   版本变化会再提示一次，不写死一个全局「已关闭」。
+ * - 提醒条用项目自身样式（15.4+ 样式正常），不需要内联。
+ */
+function WebviewDegradedNotice({ insetForTitleBar }: { insetForTitleBar: boolean }) {
+  const versionToken =
+    typeof navigator === "undefined" ? "unknown" : webviewVersionToken(navigator.userAgent);
+  const [visible, setVisible] = useState(() => {
+    if (typeof window === "undefined") return false;
+    if (!shouldShowDegradedNotice(readWebviewSupport())) return false;
+    return !isDegradedNoticeDismissed(versionToken);
+  });
+
+  if (!visible) return null;
+
+  return (
+    <div
+      data-webview-degraded="true"
+      role="status"
+      // macOS 统一标题栏时顶部 32px 是固定拖拽区（fixed z-50），提醒条下移避免被盖住。
+      className={cn(
+        "flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-soft px-4 py-1.5 text-[11px] leading-5 text-warning",
+        insetForTitleBar && "mt-8",
+      )}
+    >
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+      <p className="min-w-0 flex-1">{degradedNoticeMessage(navigator.userAgent)}</p>
+      <button
+        type="button"
+        aria-label="关闭此提醒"
+        className="-mr-1 shrink-0 rounded-md p-1 text-warning transition-colors hover:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-warning-border focus-visible:outline-none"
+        onClick={() => {
+          dismissDegradedNotice(versionToken);
+          setVisible(false);
+        }}
+      >
+        <X className="size-3.5" aria-hidden="true" />
+      </button>
+    </div>
   );
 }
 
@@ -74,112 +130,117 @@ function Layout() {
   }, []);
 
   return (
-    <div className="flex h-screen min-h-0 overflow-hidden bg-background">
-      {hasUnifiedTitleBar ? (
-        <div
-          data-tauri-drag-region
-          className="fixed inset-x-0 top-0 z-50 h-8"
-          aria-hidden="true"
-        />
-      ) : null}
-      <aside
-        className={cn(
-          "flex min-h-0 w-[220px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 pb-4",
-          hasUnifiedTitleBar ? "pt-20" : "pt-4",
-        )}
-      >
-        <div className="flex items-center gap-2.5 px-1 pb-5">
-          <AppIconMark size={36} className="drop-shadow-sm" />
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <div
-                className="truncate text-[15px] leading-5 tracking-[-0.02em] text-sidebar-foreground/90"
-                style={{
-                  fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif',
-                  fontWeight: 640,
-                }}
-              >
-                WorkBuddy Shift
-              </div>
-              {/* dev 构建被 WB_SHIFT_HOME 重定向时标记沙箱：数据全部来自沙箱副本，
-                  必须和正式版一眼可分。警告赭黄刻意避开「演示模式」的绿色。 */}
-              {devEnv?.sandboxed && (
-                <Badge
-                  variant="secondary"
-                  title={`开发沙箱：${devEnv.home}（真实数据：${devEnv.realHome}）`}
-                  className="h-5 shrink-0 border border-warning-border bg-warning-soft px-1.5 text-[10px] text-warning shadow-none"
+    // R5-17：外层改成纵向容器，只为在 App 顶部放一条降级提醒条。
+    // 提醒条在 `ok` 档位返回 null，此时外层只剩一个 flex-1 子元素，高度与布局与原来完全一致。
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
+      <WebviewDegradedNotice insetForTitleBar={hasUnifiedTitleBar} />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {hasUnifiedTitleBar ? (
+          <div
+            data-tauri-drag-region
+            className="fixed inset-x-0 top-0 z-50 h-8"
+            aria-hidden="true"
+          />
+        ) : null}
+        <aside
+          className={cn(
+            "flex min-h-0 w-[220px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 pb-4",
+            hasUnifiedTitleBar ? "pt-20" : "pt-4",
+          )}
+        >
+          <div className="flex items-center gap-2.5 px-1 pb-5">
+            <AppIconMark size={36} className="drop-shadow-sm" />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <div
+                  className="truncate text-[15px] leading-5 tracking-[-0.02em] text-sidebar-foreground/90"
+                  style={{
+                    fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif',
+                    fontWeight: 640,
+                  }}
                 >
-                  沙箱
+                  WorkBuddy Shift
+                </div>
+                {/* dev 构建被 WB_SHIFT_HOME 重定向时标记沙箱：数据全部来自沙箱副本，
+                    必须和正式版一眼可分。警告赭黄刻意避开「演示模式」的绿色。 */}
+                {devEnv?.sandboxed && (
+                  <Badge
+                    variant="secondary"
+                    title={`开发沙箱：${devEnv.home}（真实数据：${devEnv.realHome}）`}
+                    className="h-5 shrink-0 border border-warning-border bg-warning-soft px-1.5 text-[10px] text-warning shadow-none"
+                  >
+                    沙箱
+                  </Badge>
+                )}
+              </div>
+              {demoModeEnabled && (
+                <Badge variant="secondary" className="mt-1 h-5 border-0 px-1.5 text-[10px] text-sidebar-foreground/60 shadow-none">
+                  演示模式
                 </Badge>
               )}
             </div>
-            {demoModeEnabled && (
-              <Badge variant="secondary" className="mt-1 h-5 border-0 px-1.5 text-[10px] text-sidebar-foreground/60 shadow-none">
-                演示模式
-              </Badge>
-            )}
           </div>
-        </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-0.5" aria-label="主导航">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) => sidebarNavItemClass(isActive)}
-          >
-            <User className="size-4" />
-            账号管理
-          </NavLink>
-          {sessionsNavEnabled && (
+          <nav className="flex min-h-0 flex-1 flex-col gap-0.5" aria-label="主导航">
             <NavLink
-              to="/sessions"
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                  isActive
-                    ? "bg-foreground/[0.06] font-medium text-foreground"
-                    : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-                )
-              }
+              to="/"
+              end
+              className={({ isActive }) => sidebarNavItemClass(isActive)}
             >
-              <Link2 className="size-4" />
-              关联会话
+              <User className="size-4" />
+              账号管理
             </NavLink>
+            {sessionsNavEnabled && (
+              <NavLink
+                to="/sessions"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    isActive
+                      ? "bg-foreground/[0.06] font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                  )
+                }
+              >
+                <Link2 className="size-4" />
+                关联会话
+              </NavLink>
+            )}
+            <NavLink to="/token-stats" className={({ isActive }) => sidebarNavItemClass(isActive)}><MessagesSquare className="size-4" />Token 统计</NavLink>
+            <NavLink
+              to="/credit-stats"
+              className={({ isActive }) => sidebarNavItemClass(isActive)}
+            >
+              <Sparkles className="size-4" />
+              积分统计
+            </NavLink>
+            <NavLink
+              to="/storage"
+              className={({ isActive }) => sidebarNavItemClass(isActive)}
+            >
+              <Database className="size-4" />
+              存储管理
+            </NavLink>
+            <NavLink
+              to="/settings"
+              className={({ isActive }) => sidebarNavItemClass(isActive)}
+            >
+              <Settings className="size-4" />
+              设置
+            </NavLink>
+          </nav>
+          {api.isWebui() && !demoModeEnabled ? null : <UpdateCenter running={running} />}
+        </aside>
+        <main
+          className={cn(
+            "min-w-0 flex-1 overflow-y-auto bg-background overscroll-contain",
+            hasUnifiedTitleBar && "pt-16 [&>div]:pt-4",
           )}
-          <NavLink to="/token-stats" className={({ isActive }) => sidebarNavItemClass(isActive)}><MessagesSquare className="size-4" />Token 统计</NavLink>
-          <NavLink
-            to="/credit-stats"
-            className={({ isActive }) => sidebarNavItemClass(isActive)}
-          >
-            <Sparkles className="size-4" />
-            积分统计
-          </NavLink>
-          <NavLink
-            to="/storage"
-            className={({ isActive }) => sidebarNavItemClass(isActive)}
-          >
-            <Database className="size-4" />
-            存储管理
-          </NavLink>
-          <NavLink
-            to="/settings"
-            className={({ isActive }) => sidebarNavItemClass(isActive)}
-          >
-            <Settings className="size-4" />
-            设置
-          </NavLink>
-        </nav>
-        {api.isWebui() && !demoModeEnabled ? null : <UpdateCenter running={running} />}
-      </aside>
-      <main
-        className={cn(
-          "min-w-0 flex-1 overflow-y-auto bg-background overscroll-contain",
-          hasUnifiedTitleBar && "pt-16 [&>div]:pt-4",
-        )}
-      >
-        <Outlet />
-      </main>
-      {/* 更新宿主：右下角「发现新版本」卡片 + 全局更新弹窗（与托盘同一状态机）。 */}
-      <UpdateHost />
+        >
+          <Outlet />
+        </main>
+        {/* 更新宿主：右下角「发现新版本」卡片 + 全局更新弹窗（与托盘同一状态机）。 */}
+        <UpdateHost />
+      </div>
     </div>
   );
 }

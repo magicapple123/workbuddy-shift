@@ -22,8 +22,10 @@ mod storage;
 mod switch;
 mod system;
 mod update;
+mod webview;
 
 pub use accounts::*;
+pub use automation::*;
 pub use checkin::*;
 pub use clients::*;
 pub use groups::*;
@@ -36,6 +38,7 @@ pub use switch::*;
 pub(crate) use system::relaunch_app_inner;
 pub use system::*;
 pub use update::*;
+pub use webview::*;
 
 /// 序列化字段必须与前端 `AppStatus`（src/lib/types/account.ts）及 webui
 /// `GET /api/status` 的 camelCase 契约一致；缺省 serde 会输出 auth_file / app_path，

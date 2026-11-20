@@ -81,6 +81,130 @@
         }
       }
     </style>
+
+    <!--
+      R5-17 运行时 WebView 能力检测（未分层、自包含，紧跟首屏样式之后）。
+
+      为什么不用 @layer / 外部文件：老 WebKit（WebKit < 15.4）不认识 `@layer`，会丢弃整块，
+      于是 Tailwind 的 theme/base/utilities 全没了，只剩未分层自定义 CSS —— 用户看到裸 HTML。
+      所以这段提示必须**只依赖未分层内联样式**：这里不用 class，全部写 style 属性。
+
+      三项能力（与 src/lib/webview-support.ts 的判定一一对应，改一处必须改另一处）：
+        - CSSLayerBlockRule      → 认识 `@layer`（WebKit 15.4+），缺了直接阻断
+        - CSS.registerProperty   → `@property`（WebKit 16.4+），缺了降级提醒
+        - color-mix()            → 半透明背景 / 边框 / hover（WebKit 16.2+），缺了降级提醒
+
+      结果写给 src/main.tsx：blocked 时它**不挂载 React**（首次渲染会清空 #root，
+      把这里注入的提示页顶掉）。
+    -->
+    <script>
+      (function () {
+        var hasLayer = typeof CSSLayerBlockRule !== "undefined";
+        var hasProperty = typeof CSS !== "undefined" && typeof CSS.registerProperty === "function";
+        var hasMix =
+          typeof CSS !== "undefined" &&
+          !!CSS.supports &&
+          CSS.supports("color", "color-mix(in srgb, red, blue)");
+
+        var support = !hasLayer ? "blocked" : !hasProperty || !hasMix ? "degraded" : "ok";
+        window.__WB_SUPPORT__ = support;
+        window.__WB_CAPABILITIES__ = {
+          hasLayer: hasLayer,
+          hasProperty: hasProperty,
+          hasColorMix: hasMix,
+        };
+
+        if (support !== "blocked") return;
+
+        var FONT =
+          "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif";
+
+        /** 从 UA 取 Safari / WebKit 版本；取不到就写「未知版本」。 */
+        function versionLabel() {
+          var ua = navigator.userAgent || "";
+          var safari = /Version\/(\d+(?:\.\d+)*)/.exec(ua);
+          if (safari) return "Safari " + safari[1];
+          var webkit = /AppleWebKit\/(\d+(?:\.\d+)*)/.exec(ua);
+          if (webkit) return "WebKit " + webkit[1];
+          return "未知版本";
+        }
+
+        /** 老 WebKit 上没有 flex gap / inset 简写，全部用块级 + margin 与四向定位。 */
+        function mountBlockedLayer() {
+          if (document.querySelector("[data-webview-blocked]")) return;
+
+          var layer = document.createElement("div");
+          layer.setAttribute("data-webview-blocked", "true");
+          layer.setAttribute("role", "alertdialog");
+          layer.setAttribute("aria-label", "当前系统版本过低，界面无法正常显示");
+          layer.style.cssText =
+            "position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483647;" +
+            "background:#ffffff;color:#18181b;overflow:auto;padding:40px 28px;" +
+            "box-sizing:border-box;font-family:" +
+            FONT +
+            ";font-size:13px;line-height:1.7;";
+
+          var card = document.createElement("div");
+          card.style.cssText = "max-width:520px;margin:0 auto;";
+
+          var title = document.createElement("div");
+          title.style.cssText = "font-size:17px;font-weight:600;margin-bottom:12px;";
+          title.textContent = "当前系统版本过低，界面无法正常显示";
+
+          var detected = document.createElement("div");
+          detected.style.cssText = "color:#71717a;margin-bottom:12px;";
+          detected.textContent = "检测到的浏览器内核：" + versionLabel();
+
+          var requirement = document.createElement("div");
+          requirement.style.cssText = "margin-bottom:12px;";
+          requirement.textContent =
+            "本应用界面需要 Safari / WebKit 16.4 及以上（最低 15.4；15.4–16.3 可用但颜色与边框可能异常）。当前内核缺少 CSS @layer 支持，样式表会被整块丢弃，因此这里只显示这条纯文本提示。";
+
+          var howto = document.createElement("div");
+          howto.style.cssText = "margin-bottom:12px;";
+          howto.textContent =
+            "macOS：打开「系统设置 → 通用 → 软件更新」升级到 macOS 13.3 或更高；无法升级系统时，可在 App Store 里单独更新 Safari（Safari 16.4+ 随系统更新提供）。升级后重新打开本应用即可。";
+
+          var footer = document.createElement("div");
+          footer.style.cssText =
+            "color:#71717a;border-top:1px solid #e4e4e7;padding-top:12px;margin-top:16px;";
+
+          var hint = document.createElement("div");
+          hint.style.cssText = "margin-bottom:10px;";
+          hint.textContent = "现在可以按 ⌘Q（Windows / Linux 为 Alt+F4）退出本应用。";
+
+          var reload = document.createElement("button");
+          reload.type = "button";
+          reload.setAttribute("data-webview-blocked-reload", "true");
+          reload.style.cssText =
+            "display:inline-block;padding:7px 14px;border:1px solid #d4d4d8;border-radius:8px;" +
+            "background:#fafafa;color:#18181b;font-size:13px;font-family:" +
+            FONT +
+            ";cursor:pointer;";
+          reload.textContent = "已升级，重新加载";
+          reload.addEventListener("click", function () {
+            window.location.reload();
+          });
+
+          footer.appendChild(hint);
+          footer.appendChild(reload);
+
+          card.appendChild(title);
+          card.appendChild(detected);
+          card.appendChild(requirement);
+          card.appendChild(howto);
+          card.appendChild(footer);
+          layer.appendChild(card);
+
+          // 便于 DevTools / 截图脚本断言
+          document.documentElement.setAttribute("data-webview-blocked", "true");
+          (document.body || document.documentElement).appendChild(layer);
+        }
+
+        if (document.body) mountBlockedLayer();
+        else document.addEventListener("DOMContentLoaded", mountBlockedLayer);
+      })();
+    </script>
   </head>
 
   <body>
@@ -121,6 +245,9 @@
 
         window.setTimeout(function () {
           if (window.__WB_MOUNTED__) return;
+          // R5-17：blocked 时不挂载 React（__WB_MOUNTED__ 永远不会置位），
+          // 这里必须早退，否则 10 秒后会把内联的能力不足提示页换成「应用启动失败」。
+          if (window.__WB_SUPPORT__ === "blocked") return;
           var root = document.getElementById("root");
           if (!root) return;
 

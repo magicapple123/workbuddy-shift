@@ -284,6 +284,7 @@ pub fn run() {
             commands::switch_account,
             commands::list_sessions,
             commands::list_account_sessions,
+            commands::report_unsupported_webview,
             commands::automation_sync_enabled,
             commands::automation_sync_set_enabled,
             commands::automation_tasks_summary,
