@@ -282,6 +282,7 @@ fn copy(env: &Env, target_uid: &str, ids: &[&str]) -> Value {
         WbVariant::Cn,
         &env.target(target_uid),
         &ids,
+        false,
         |_| false,
     )
     .unwrap()

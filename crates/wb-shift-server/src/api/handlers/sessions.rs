@@ -57,7 +57,11 @@ pub(crate) async fn api_copy_sessions(
     // 档位取目标账号自身（源 uid 也从该档位的登录态读）。
     let variant = account::variant_of(&target);
     // 与桌面端同形：直接返回 core 的复制报告（copied / alreadyLinked / errors / needsRecovery）。
-    let mut report = match session::copy_sessions_for_switch(&target, &request.session_ids) {
+    let mut report = match session::copy_sessions_for_switch(
+        &target,
+        &request.session_ids,
+        request.ignore_aux_data,
+    ) {
         Ok(report) => report,
         Err(error) => {
             return json_err(error, StatusCode::BAD_REQUEST);
@@ -86,7 +90,12 @@ pub(crate) async fn api_copy_sessions_cross(
         return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
     };
     let target_variant = account::variant_of(&target);
-    let mut report = match session::copy_sessions_cross(&source, &target, &request.session_ids) {
+    let mut report = match session::copy_sessions_cross(
+        &source,
+        &target,
+        &request.session_ids,
+        request.ignore_aux_data,
+    ) {
         Ok(report) => report,
         Err(error) => {
             return json_err(error, StatusCode::BAD_REQUEST);

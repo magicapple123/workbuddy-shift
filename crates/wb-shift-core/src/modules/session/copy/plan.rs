@@ -10,6 +10,7 @@ use super::*;
 pub fn copy_sessions_for_switch(
     target_acc: &Value,
     session_ids: &[String],
+    ignore_aux: bool,
 ) -> Result<Value, String> {
     let variant = account::variant_of(target_acc);
     let paths = SessionPaths::for_variant(variant);
@@ -18,6 +19,7 @@ pub fn copy_sessions_for_switch(
         variant,
         target_acc,
         session_ids,
+        ignore_aux,
         process::is_workbuddy_running,
     )
 }
@@ -31,6 +33,7 @@ pub fn copy_sessions_cross(
     source_acc: &Value,
     target_acc: &Value,
     session_ids: &[String],
+    ignore_aux: bool,
 ) -> Result<Value, String> {
     let source_variant = account::variant_of(source_acc);
     let target_variant = account::variant_of(target_acc);
@@ -70,6 +73,7 @@ pub fn copy_sessions_cross(
         source,
         target,
         session_ids,
+        ignore_aux,
         process::is_workbuddy_running,
         SessionPaths::for_variant,
     )
@@ -81,6 +85,7 @@ pub(in crate::modules::session) fn copy_sessions_cross_at(
     source: CopySide<'_>,
     target: CopySide<'_>,
     session_ids: &[String],
+    ignore_aux: bool,
     is_app_running: impl Fn(WbVariant) -> bool,
     resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
 ) -> Result<Value, String> {
@@ -99,6 +104,7 @@ pub(in crate::modules::session) fn copy_sessions_cross_at(
         &source,
         &target,
         session_ids,
+        ignore_aux,
         is_app_running,
         resolve_source_paths,
     )
@@ -114,6 +120,7 @@ pub(in crate::modules::session) fn copy_sessions_for_switch_at(
     variant: WbVariant,
     target_acc: &Value,
     session_ids: &[String],
+    ignore_aux: bool,
     is_app_running: impl Fn(WbVariant) -> bool,
 ) -> Result<Value, String> {
     // 探测只对国际版生效（design D6 针对的是国际版数据根不同构）。国内版数据根与
@@ -154,6 +161,7 @@ pub(in crate::modules::session) fn copy_sessions_for_switch_at(
         &source,
         &target,
         session_ids,
+        ignore_aux,
         is_app_running,
         SessionPaths::for_variant,
     )
@@ -191,6 +199,7 @@ pub(in crate::modules::session) fn run_copy(
     source: &CopySide<'_>,
     target: &CopySide<'_>,
     session_ids: &[String],
+    ignore_aux: bool,
     is_app_running: impl Fn(WbVariant) -> bool,
     resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
 ) -> Result<Value, String> {
@@ -216,6 +225,11 @@ pub(in crate::modules::session) fn run_copy(
     if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
         return Err(SESSION_COPY_APP_RUNNING.to_string());
     }
+    // 「仍然复制（不带用量）」的重试：上一次失败时操作停在 BodyWritten，本次请求要把
+    // 忽略标记**先落到操作记录**，随后的恢复重放才会跳过账本并补完同一条会话。
+    if ignore_aux {
+        mark_aux_skipped_for_requests(target, source, session_ids);
+    }
     let recovery = recover_pending_session_operations_at_with(
         target.paths,
         target.variant,
@@ -233,11 +247,14 @@ pub(in crate::modules::session) fn run_copy(
         target_uid: &target.uid,
         target_account_id: target.account_id.clone(),
         pending: &pending,
+        ignore_aux,
     };
 
     let mut copied: Vec<Value> = Vec::new();
     let mut already_linked: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
+    // 可「显式忽略」的失败（账本写入）：前端据此给「仍然复制」按钮。
+    let mut aux_failed: Vec<Value> = Vec::new();
     // 解析失败的操作日志无法对应到具体会话：继续复制会绕过 pending 去重，
     // 可能对同一请求再写出第二个副本。
     if let Some(issue) = recovery
@@ -258,6 +275,7 @@ pub(in crate::modules::session) fn run_copy(
                     cleanup_state,
                     cleanup_error,
                     source_repaired,
+                    aux_note,
                 }) => {
                     let mut item = json!({
                         "id": cid,
@@ -273,6 +291,10 @@ pub(in crate::modules::session) fn run_copy(
                     if let Some(note) = source_repaired {
                         item["sourceRepaired"] = json!(note);
                     }
+                    // 目标库缺账本表/列：不算失败，但要让用户知道「共消耗」为什么还是少。
+                    if let Some(note) = aux_note {
+                        item["auxNote"] = json!(note);
+                    }
                     copied.push(item);
                 }
                 Ok(CopyOutcome::AlreadyLinked {
@@ -283,7 +305,14 @@ pub(in crate::modules::session) fn run_copy(
                     "sessionId": session_id,
                     "groupId": group_id,
                 })),
-                Err(error) => errors.push(json!({"id": cid, "error": error})),
+                Err(error) => {
+                    // 账本写入失败是唯一带「显式忽略」出口的失败：报告里点明可忽略，
+                    // 前端据此给「仍然复制（不带用量与中断记录）」按钮。
+                    if is_aux_write_failure(&error) {
+                        aux_failed.push(json!(cid));
+                    }
+                    errors.push(json!({"id": cid, "error": error}));
+                }
             }
         }
     }
@@ -304,6 +333,21 @@ pub(in crate::modules::session) fn run_copy(
     }
     if !errors.is_empty() {
         report["errors"] = json!(errors);
+    }
+    // 只有账本写入失败才可忽略：给出「仍然复制（不带用量与中断记录）」入口所需的
+    // 会话 id；其它失败一律没有这个出口（不该用忽略掩盖数据缺失）。
+    if !aux_failed.is_empty() {
+        report["canIgnoreAux"] = json!(true);
+        report["auxFailed"] = json!(aux_failed);
+    }
+    // 本次请求本身带了忽略标记：让前端能把「已按忽略处理」如实提示出来。
+    if ignore_aux {
+        report["auxSkipped"] = json!(true);
+    }
+    // 恢复重放补完的会话：重试「仍然复制」时它们不会出现在 copied 里（已是既有副本），
+    // 不说明的话用户会以为没生效。
+    if !recovery.recovered.is_empty() {
+        report["recovered"] = json!(recovery.recovered);
     }
     if unusable {
         report["needsRecovery"] = json!(true);
@@ -332,6 +376,34 @@ pub(in crate::modules::session) struct CopyContext<'a> {
     pub(in crate::modules::session) target_uid: &'a str,
     pub(in crate::modules::session) target_account_id: Option<String>,
     pub(in crate::modules::session) pending: &'a [Operation],
+    /// 用户显式忽略账本（用量 + 中断记录）：本次新建的操作记录带 `auxSkipped`。
+    pub(in crate::modules::session) ignore_aux: bool,
+}
+
+/// 把「忽略账本」标记落到**未完成**操作的记录上（「仍然复制」的重试路径）。
+///
+/// 只改与本次请求一一对应的操作（同源会话、同目标账号、未完成），不做全量清理；
+/// 保存失败不阻断本次流程——后面同一处会再失败一次，错误照样报给用户。
+fn mark_aux_skipped_for_requests(
+    target: &CopySide<'_>,
+    source: &CopySide<'_>,
+    session_ids: &[String],
+) {
+    for operation in session_link::pending_operations(target.paths, target.variant) {
+        if operation.aux_skipped
+            || operation.source.uid != source.uid
+            || operation.target.uid != target.uid
+            || !session_ids
+                .iter()
+                .any(|cid| *cid == operation.source.session_id)
+        {
+            continue;
+        }
+        let mut skipped = operation;
+        skipped.aux_skipped = true;
+        skipped.updated_at = now_ms();
+        let _ = session_link::save_operation(target.paths, &skipped);
+    }
 }
 
 /// 单个会话的一次复制结果。
@@ -346,6 +418,8 @@ pub(in crate::modules::session) enum CopyOutcome {
         /// 源正文有坏行、复制时做了容错修复时的人话说明（报告里为 `sourceRepaired`）。
         /// `None` 表示源正文严格校验一次通过，副本与原会话逐字同源。
         source_repaired: Option<String>,
+        /// 账本搬运的诊断说明（报告里为 `auxNote`）：目标客户端不支持时为 `Some`。
+        aux_note: Option<&'static str>,
     },
     AlreadyLinked {
         session_id: String,

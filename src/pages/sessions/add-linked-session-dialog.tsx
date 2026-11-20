@@ -45,6 +45,11 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  /**
+   * 账本写入失败（可显式忽略）：`count` 是可忽略的会话数。
+   * 忽略是**不可逆**选择——副本永久不含用量与中断记录，不做后台补写，所以必须点一次确认。
+   */
+  const [auxBlocked, setAuxBlocked] = useState<{ count: number } | null>(null);
   const requestId = useRef(0);
   /** 复制请求代号。关窗换代后，晚到的结果不得再关闭或改写当前这次弹窗。 */
   const copyRequestId = useRef(0);
@@ -198,12 +203,13 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
       if (copyRequestId.current === copyId) setBusy(false);
     }
   }
-  async function copyAndLinkWorkbuddy() {
+  async function copyAndLinkWorkbuddy(ignoreAux = false) {
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
     const copyId = ++copyRequestId.current;
     setBusy(true);
+    setAuxBlocked(null);
     try {
-      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [...selected]);
+      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [...selected], ignoreAux);
       const copied = report.copied?.length ?? 0;
       const alreadyLinked = report.alreadyLinked?.length ?? 0;
       const errors = report.errors ?? [];
@@ -217,8 +223,16 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
           description: errors.map((item) => `${sessions.find((session) => session.id === item.id)?.title || item.id}：${item.error}`).join("；"),
         });
       }
+      // 恢复重放补完的会话不会出现在 copied 里：不说明的话用户会以为「仍然复制」没生效。
+      const recovered = report.recovered?.length ?? 0;
+      if (recovered > 0) toast.success(`已补完 ${recovered} 个会话的复制`);
+      if (ignoreAux && copied + recovered > 0) {
+        toast.info("本次复制未带用量与中断记录", { description: "之后不会自动补上：目标账号里这些会话的「共消耗」仍会比源账号少。" });
+      }
+      // 账本写入失败是唯一带「显式忽略」出口的失败：不在报告层吞掉，摆在弹窗里让用户选。
+      if (report.canIgnoreAux) setAuxBlocked({ count: report.auxFailed?.length ?? errors.length });
       if (report.needsRecovery) toast.error("会话操作待恢复", { description: "已保留恢复所需材料。" });
-      if (copied === 0 && alreadyLinked === 0 && errors.length === 0 && !report.needsRecovery) {
+      if (copied === 0 && alreadyLinked === 0 && recovered === 0 && errors.length === 0 && !report.needsRecovery) {
         toast.error("复制并关联失败", report.error ? { description: report.error } : undefined);
       }
       // 关窗换代后，结果已经提示过；不要把新打开的弹窗关掉，也不要清掉新一次执行的 busy。
@@ -227,7 +241,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
         return;
       }
       // 有成功复制，或没有 errors 的已存在副本：关闭并刷新。纯失败留在弹窗。
-      if (copied > 0 || (alreadyLinked > 0 && errors.length === 0)) {
+      if (copied > 0 || recovered > 0 || (alreadyLinked > 0 && errors.length === 0 && !report.canIgnoreAux)) {
         requestId.current += 1;
         setSessionsLoading(false);
         setOpen(false);
@@ -291,6 +305,11 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
                     className={`max-h-[min(22rem,45vh)] overflow-y-auto pr-1 ${LINKED_TREE_MIN_H}`}
                   />}
         </div>
+        {auxBlocked && <div role="alert" className="rounded-md border border-danger/40 bg-danger/5 p-2.5 text-xs">
+          <p className="font-medium text-danger">有 {auxBlocked.count} 个会话的用量记录没能写入</p>
+          <p className="mt-1 text-muted-foreground">可以仍然复制，但副本不带用量与中断记录：目标账号里这些会话的「共消耗」会比源账号少，<span className="font-medium text-foreground">之后不会自动补上</span>。</p>
+          <Button variant="outline" size="sm" className="mt-2" onClick={() => void copyAndLinkWorkbuddy(true)} disabled={busy}>仍然复制（不带用量与中断记录）</Button>
+        </div>}
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">目标账号</p>
           <Select value={targetAccountId} onValueChange={setTargetAccountId} disabled={busy || !sourceAccountId || targetOptions.length === 0}>
             <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>

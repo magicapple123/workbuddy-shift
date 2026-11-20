@@ -64,6 +64,10 @@ export interface CopyResult {
    * （第 1000 行），已跳过」）。缺字段表示源正文一次校验通过，副本与原会话逐字同源。
    */
   sourceRepaired?: string;
+  /**
+   * 目标客户端缺账本表/列，副本不含会话用量（「共消耗」仍会偏少）。不算失败，只说明原因。
+   */
+  auxNote?: string;
 }
 
 /** 目标账号上已有真实有效的副本：复用而不是重复复制。 */
@@ -85,6 +89,17 @@ export interface SessionCopyReport {
   errors?: { id: string; error: string }[];
   /** 仍有未完成的会话写入时为 true（失败项可重试，不会产生第二个副本）。 */
   needsRecovery?: boolean;
+  /**
+   * 有会话因「账本（用量 + 中断记录）写入失败」而整次失败时为 true：
+   * 前端据此给「仍然复制（不带用量与中断记录）」的显式忽略入口。
+   */
+  canIgnoreAux?: boolean;
+  /** 可忽略失败的会话 id（与 `errors` 一一对应，仅供「仍然复制」按钮使用）。 */
+  auxFailed?: string[];
+  /** 本次请求带了显式忽略：副本永久不含账本，不会后台补写。 */
+  auxSkipped?: boolean;
+  /** 本次请求由恢复重放补完的会话 id（重试「仍然复制」时它们不会出现在 copied 里）。 */
+  recovered?: string[];
   /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
   temporaryFiles?: TemporaryFileInfo[];
   error?: string;

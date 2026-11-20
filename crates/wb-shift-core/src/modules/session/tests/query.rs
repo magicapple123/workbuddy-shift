@@ -380,6 +380,7 @@ fn copy_sessions_for_switch_rejects_unsupported_root() {
         WbVariant::Ai,
         &json!({"id": "ai-1", "uid": "u-ai", "variant": "ai"}),
         &["cid-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("不支持的档位必须返回错误");
@@ -404,6 +405,7 @@ fn session_copy_probe_only_gates_ai() {
         WbVariant::Cn,
         &json!({"id": "cn-1", "variant": "cn", "uid": "   "}),
         &["cid-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("缺 uid 仍必须返回错误");
@@ -418,6 +420,7 @@ fn session_copy_probe_only_gates_ai() {
         WbVariant::Ai,
         &json!({"id": "ai-1", "uid": "u-ai", "variant": "ai"}),
         &["cid-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("国际版不满足能力探测必须返回错误");
@@ -433,6 +436,7 @@ fn copy_sessions_for_switch_requires_target_uid() {
         WbVariant::Cn,
         &json!({"id": "a-1", "variant": "cn", "uid": "   "}),
         &["sess-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("缺 uid 必须返回错误");
@@ -449,6 +453,7 @@ fn copy_rejects_missing_login_and_same_account() {
         WbVariant::Cn,
         &env.target("uid-b"),
         &["sess-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("缺登录态必须报错");
@@ -460,6 +465,7 @@ fn copy_rejects_missing_login_and_same_account() {
         WbVariant::Cn,
         &env.target("uid-b"),
         &["sess-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("同一账号必须报错");

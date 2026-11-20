@@ -45,8 +45,15 @@ export function copySessionsCross(
   sourceAccountId: string,
   targetAccountId: string,
   sessionIds: string[],
+  ignoreAuxData?: boolean,
 ): Promise<SessionCopyReport & { variant?: WbVariant }> {
-  return call("copy_sessions_cross", { sourceAccountId, targetAccountId, sessionIds });
+  return call("copy_sessions_cross", {
+    sourceAccountId,
+    targetAccountId,
+    sessionIds,
+    // 只由「仍然复制（不带用量与中断记录）」传 true：忽略后不会后台补写账本。
+    ...(ignoreAuxData ? { ignoreAuxData: true } : {}),
+  });
 }
 
 /**

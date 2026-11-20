@@ -70,7 +70,7 @@ pub fn switch_account(
             // 复制失败本身只记进报告、不阻断切换；但若本次留下了未完成的写入，
             // 会在复制与同步都跑完后统一暂停切换与启动（见下方 pending 差集检查）。
             copy_report = Some(
-                match session::copy_sessions_for_switch(&acc, copy_session_ids) {
+                match session::copy_sessions_for_switch(&acc, copy_session_ids, false) {
                     Ok(report) => report,
                     // 档位锁被占用或无法建立互斥：此时可能另有会话写入正在进行，
                     // 不能当成普通复制失败后继续写认证并启动 App。锁失败文案前缀

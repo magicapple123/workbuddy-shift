@@ -103,6 +103,7 @@ pub fn add_member(
                 &source_acc,
                 &target,
                 std::slice::from_ref(&source.session_id),
+                false,
             )?;
             let copied = report
                 .get("copied")

@@ -397,8 +397,9 @@ pub(super) fn recover_copy_operation(
                 &operation.source.session_id,
                 &operation.source.uid,
                 &operation.target.uid,
+                operation.aux_skipped,
             ) {
-                Ok(DbCopyOutcome::Inserted) => {}
+                Ok(DbCopyOutcome::Inserted { .. }) => {}
                 Ok(outcome) => {
                     let error = format!("会话记录保存失败（{outcome:?}），保留操作待重试");
                     fail_operation(paths, &mut operation, &error);

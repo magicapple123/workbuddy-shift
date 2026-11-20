@@ -34,10 +34,161 @@ pub(in crate::modules::session) fn backup_workbuddy_db(
 /// 数据库插入结果：`No*` 与 `SourceRowMissing` 都不允许被当成成功。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::modules::session) enum DbCopyOutcome {
-    Inserted,
+    /// `aux_note` 非空表示目标库缺账本表/列，副本不含用量记录（不算失败，只说明原因）。
+    Inserted {
+        aux_note: Option<&'static str>,
+    },
     SourceRowMissing,
     NoSessionsTable,
     NoDb,
+}
+
+/// 会话级账本写入失败的错误前缀：前端据此给出「仍然复制（不带用量）」的显式忽略入口。
+pub(in crate::modules::session) const AUX_WRITE_FAILED_PREFIX: &str = "会话用量记录保存失败：";
+
+/// 目标客户端不支持会话账本时的诊断文案（旧版库缺表/缺列）。
+const AUX_UNSUPPORTED_NOTE: &str = "目标客户端不支持会话用量记录，副本不含账本";
+
+/// 该错误是否属于可以「显式忽略」的账本写入失败。
+pub(in crate::modules::session) fn is_aux_write_failure(error: &str) -> bool {
+    error.starts_with(AUX_WRITE_FAILED_PREFIX)
+}
+
+/// 源会话的账本（用量 + 中断记录），由 [`insert_session_copy`] 在同一事务里搬运。
+#[derive(Debug, Default)]
+struct SessionAux {
+    usage: Option<SessionUsageRow>,
+    interruptions: Vec<SessionInterruptionRow>,
+}
+
+#[derive(Debug)]
+struct SessionUsageRow {
+    used: i64,
+    size: i64,
+    credit_json: Option<String>,
+}
+
+#[derive(Debug)]
+struct SessionInterruptionRow {
+    request_id: String,
+    reason_code: Option<String>,
+    presentation: Option<String>,
+}
+
+fn aux_error(error: &rusqlite::Error) -> String {
+    format!("{AUX_WRITE_FAILED_PREFIX}{error}")
+}
+
+/// 读取源会话的账本。
+///
+/// 三种「没有数据可搬」的情况返回空账本而不是失败：表不存在、缺关键列、该会话无行
+/// （旧库/未产生用量）。表存在但查询报错才算失败——那种情况静默跳过会让副本悄悄少数据。
+fn read_session_aux(conn: &Connection, sid: &str) -> Result<SessionAux, String> {
+    let mut aux = SessionAux::default();
+    if table_exists(conn, "session_usage")
+        && column_exists(conn, "session_usage", "used")
+        && column_exists(conn, "session_usage", "size")
+        && column_exists(conn, "session_usage", "credit_json")
+    {
+        match conn.query_row(
+            "SELECT used, size, credit_json FROM session_usage WHERE session_id = ?1",
+            [sid],
+            |row| {
+                Ok(SessionUsageRow {
+                    used: row.get::<_, Option<i64>>(0)?.unwrap_or_default(),
+                    size: row.get::<_, Option<i64>>(1)?.unwrap_or_default(),
+                    credit_json: row.get(2)?,
+                })
+            },
+        ) {
+            Ok(usage) => aux.usage = Some(usage),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(aux_error(&error)),
+        }
+    }
+    if table_exists(conn, "session_turn_interruptions")
+        && column_exists(conn, "session_turn_interruptions", "request_id")
+    {
+        let has_reason = column_exists(conn, "session_turn_interruptions", "reason_code");
+        let has_presentation = column_exists(conn, "session_turn_interruptions", "presentation");
+        let reason_col = if has_reason { "reason_code" } else { "NULL" };
+        let presentation_col = if has_presentation {
+            "presentation"
+        } else {
+            "NULL"
+        };
+        let sql = format!(
+            "SELECT request_id, {reason_col}, {presentation_col} \
+             FROM session_turn_interruptions WHERE session_id = ?1 ORDER BY request_id"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| aux_error(&e))?;
+        let rows = stmt
+            .query_map([sid], |row| {
+                Ok(SessionInterruptionRow {
+                    request_id: row.get(0)?,
+                    reason_code: row.get(1)?,
+                    presentation: row.get(2)?,
+                })
+            })
+            .map_err(|e| aux_error(&e))?;
+        for row in rows {
+            aux.interruptions.push(row.map_err(|e| aux_error(&e))?);
+        }
+    }
+    Ok(aux)
+}
+
+/// 在写事务内搬运账本；目标库缺表/缺列时跳过并返回 `false`（不算失败）。
+///
+/// 本函数只写两张账本表：不碰 `automations` / `automation_runs` / `workspaces` /
+/// `cloud_sync_ledger`，也不改写 `credit_json` 的键与数值（原样搬运，不重算不取整）。
+fn write_session_aux(
+    tx: &rusqlite::Transaction<'_>,
+    sid: &str,
+    aux: &SessionAux,
+    now: i64,
+) -> Result<bool, String> {
+    let mut supported = true;
+    if let Some(usage) = &aux.usage {
+        let usable = table_exists(tx, "session_usage")
+            && column_exists(tx, "session_usage", "used")
+            && column_exists(tx, "session_usage", "size")
+            && column_exists(tx, "session_usage", "updated_at")
+            && column_exists(tx, "session_usage", "credit_json");
+        if usable {
+            tx.execute(
+                "INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(session_id) DO UPDATE SET \
+                   used = excluded.used, size = excluded.size, \
+                   updated_at = excluded.updated_at, credit_json = excluded.credit_json",
+                rusqlite::params![sid, usage.used, usage.size, now, usage.credit_json],
+            )
+            .map_err(|e| aux_error(&e))?;
+        } else {
+            supported = false;
+        }
+    }
+    if !aux.interruptions.is_empty() {
+        let usable = table_exists(tx, "session_turn_interruptions")
+            && column_exists(tx, "session_turn_interruptions", "request_id")
+            && column_exists(tx, "session_turn_interruptions", "reason_code")
+            && column_exists(tx, "session_turn_interruptions", "presentation");
+        if usable {
+            // 复合主键 (session_id, request_id)：重放同一操作必须幂等，不能产生重复行。
+            for row in &aux.interruptions {
+                tx.execute(
+                    "INSERT OR REPLACE INTO session_turn_interruptions \
+                     (session_id, request_id, reason_code, presentation) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![sid, row.request_id, row.reason_code, row.presentation],
+                )
+                .map_err(|e| aux_error(&e))?;
+            }
+        } else {
+            supported = false;
+        }
+    }
+    Ok(supported)
 }
 
 /// 会话行归属（未删除时）。
@@ -96,6 +247,7 @@ pub(in crate::modules::session) fn insert_session_copy(
     cid: &str,
     source_uid: &str,
     target_uid: &str,
+    ignore_aux: bool,
 ) -> Result<DbCopyOutcome, String> {
     let dst_db = target_paths.workbuddy_db();
     if !dst_db.is_file() {
@@ -103,7 +255,7 @@ pub(in crate::modules::session) fn insert_session_copy(
     }
     let src_db = source_paths.workbuddy_db();
     let same_db = src_db == dst_db;
-    let source_row = if src_db.is_file() {
+    let (source_row, source_aux) = if src_db.is_file() {
         // 同档沿用读写连接（与改造前一致）；跨档对源档只读，不触碰源档 WAL 恢复。
         let Some(conn) = open_db(&src_db, !same_db) else {
             return Err("会话数据无法打开".to_string());
@@ -111,9 +263,16 @@ pub(in crate::modules::session) fn insert_session_copy(
         if !table_exists(&conn, "sessions") {
             return Ok(DbCopyOutcome::NoSessionsTable);
         }
-        read_source_session_row(&conn, cid, source_uid)?
+        let row = read_source_session_row(&conn, cid, source_uid)?;
+        // 账本与 sessions 行同源读取：行缺失时不必再读，忽略模式下降级为不搬。
+        let aux = if ignore_aux || row.is_none() {
+            SessionAux::default()
+        } else {
+            read_session_aux(&conn, cid)?
+        };
+        (row, aux)
     } else {
-        None
+        (None, SessionAux::default())
     };
     let Some(source_row) = source_row else {
         return Ok(DbCopyOutcome::SourceRowMissing);
@@ -151,6 +310,9 @@ pub(in crate::modules::session) fn insert_session_copy(
 
     let mut cols: Vec<String> = Vec::with_capacity(target_cols.len());
     let mut vals: Vec<rusqlite::types::Value> = Vec::with_capacity(target_cols.len());
+    // 会话行与账本用同一个时间戳：两表时序必须一致，否则客户端可能按「用量更新更晚」
+    // 把副本判成另一个状态。
+    let copy_now = now_ms();
     for col in &target_cols {
         let Some((_, value)) = source_row.iter().find(|(name, _)| name == col) else {
             continue;
@@ -166,7 +328,7 @@ pub(in crate::modules::session) fn insert_session_copy(
             },
             // 防御性处理：project_id 在跨账号复制后一定指向不存在的项目。
             "project_id" => rusqlite::types::Value::Null,
-            "created_at" | "updated_at" => rusqlite::types::Value::Integer(now_ms()),
+            "created_at" | "updated_at" => rusqlite::types::Value::Integer(copy_now),
             "deleted_at" => rusqlite::types::Value::Null,
             // 行状态与正文口径必须一致：正文末条已归一到 completed（见
             // [`normalize_copy_tail`]），行还写着 working/active 客户端照样显示思考中。
@@ -185,8 +347,17 @@ pub(in crate::modules::session) fn insert_session_copy(
     let params: Vec<&rusqlite::types::Value> = vals.iter().collect();
     tx.execute(&sql, rusqlite::params_from_iter(params))
         .map_err(|e| format!("会话记录保存失败：{e}"))?;
+    // 账本与 sessions 行同事务：要么全有、要么全无。失败时事务回滚 → 目标库不留
+    // sessions 行，操作停在 BodyWritten 可安全重试（正文已在上一阶段落盘）。
+    let aux_note = if ignore_aux {
+        // 显式忽略是**不可逆**选择：该会话永久不带账本，不做后台补写。
+        None
+    } else {
+        let supported = write_session_aux(&tx, new_cid, &source_aux, copy_now)?;
+        (!supported).then_some(AUX_UNSUPPORTED_NOTE)
+    };
     tx.commit().map_err(|e| format!("会话记录保存失败：{e}"))?;
-    Ok(DbCopyOutcome::Inserted)
+    Ok(DbCopyOutcome::Inserted { aux_note })
 }
 
 /// 复制时归一目标行的 `sessions.status`（与正文口径对齐）。

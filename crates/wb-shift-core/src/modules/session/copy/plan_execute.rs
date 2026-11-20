@@ -106,12 +106,14 @@ pub(in crate::modules::session) fn copy_one_session(
         lifecycle_version: Some(OPERATION_LIFECYCLE_VERSION),
         cleanup_state: None,
         last_error: None,
+        // 显式忽略要落盘：恢复重放读同一个标记，不会每次恢复都在同一处再失败一次。
+        aux_skipped: context.ignore_aux,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
     session_link::save_operation(paths, &operation)?;
 
-    if let Err(error) = finish_copy_from_body(
+    let aux_note = match finish_copy_from_body(
         paths,
         context.variant,
         context.source_paths,
@@ -119,9 +121,12 @@ pub(in crate::modules::session) fn copy_one_session(
         &snapshot,
         &source_path,
     ) {
-        fail_operation(paths, &mut operation, &error);
-        return Err(error);
-    }
+        Ok(aux_note) => aux_note,
+        Err(error) => {
+            fail_operation(paths, &mut operation, &error);
+            return Err(error);
+        }
+    };
     let _ = session_link::prune_operations(
         paths,
         context.variant,
@@ -137,6 +142,7 @@ pub(in crate::modules::session) fn copy_one_session(
         cleanup_state: cleanup_state.to_string(),
         cleanup_error,
         source_repaired,
+        aux_note,
     })
 }
 
@@ -144,6 +150,8 @@ pub(in crate::modules::session) fn copy_one_session(
 ///
 /// 源行读取与目标行写入的档位经 `source_paths` 分离（跨档复制时与 `paths` 不同，
 /// 同档时相同）；正文只从 `source_path` 读、只往目标档写。
+///
+/// 返回值是账本搬运的诊断说明（`Some` = 目标客户端不支持，副本不含账本）。
 pub(in crate::modules::session) fn finish_copy_from_body(
     paths: &SessionPaths,
     variant: WbVariant,
@@ -151,7 +159,7 @@ pub(in crate::modules::session) fn finish_copy_from_body(
     operation: &mut Operation,
     snapshot: &ContentSnapshot,
     source_path: &Path,
-) -> Result<(), String> {
+) -> Result<Option<&'static str>, String> {
     // 复制可能归一最后一条 assistant 消息的 `incomplete`，所以「本次写入的正文摘要」
     // 不一定等于源快照摘要：
     // 校验基准与关联基线一律用待写入文本算出的那一份（见 `copy_body`）。
@@ -175,21 +183,22 @@ pub(in crate::modules::session) fn finish_copy_from_body(
     advance_operation(paths, operation, OpPhase::BodyWritten)?;
     let normalized = body.normalized;
 
-    match insert_session_copy(
+    let aux_note = match insert_session_copy(
         source_paths,
         paths,
         &operation.target.session_id,
         &operation.source.session_id,
         &operation.source.uid,
         &operation.target.uid,
+        operation.aux_skipped,
     )? {
-        DbCopyOutcome::Inserted => {}
+        DbCopyOutcome::Inserted { aux_note } => aux_note,
         DbCopyOutcome::SourceRowMissing => {
             return Err("数据库中找不到源会话记录，未复制".to_string())
         }
         DbCopyOutcome::NoSessionsTable => return Err("会话数据缺少数据表，未复制".to_string()),
         DbCopyOutcome::NoDb => return Err("会话数据不存在，未复制".to_string()),
-    }
+    };
     verify_session_row(paths, &operation.target.session_id, &operation.target.uid)?;
     advance_operation(paths, operation, OpPhase::DbWritten)?;
 
@@ -202,7 +211,7 @@ pub(in crate::modules::session) fn finish_copy_from_body(
     operation.group_id = group_id;
     advance_operation(paths, operation, OpPhase::LinksCommitted)?;
     advance_operation(paths, operation, OpPhase::Completed)?;
-    Ok(())
+    Ok(aux_note)
 }
 
 /// 推进操作阶段。阶段只能前进：已经走到更靠后的阶段时不回写（恢复路径不得把

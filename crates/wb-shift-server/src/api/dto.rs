@@ -155,6 +155,8 @@ pub(crate) struct ImportAccountsRequest {
 pub(crate) struct CopySessionsRequest {
     pub(crate) target_account_id: String,
     pub(crate) session_ids: Vec<String>,
+    /// 显式忽略会话账本（用量 + 中断记录）：只由「仍然复制」按钮传 true。
+    pub(crate) ignore_aux_data: bool,
 }
 
 /// `POST /api/sessions/copy-cross`。
@@ -164,6 +166,8 @@ pub(crate) struct CopySessionsCrossRequest {
     pub(crate) source_account_id: String,
     pub(crate) target_account_id: String,
     pub(crate) session_ids: Vec<String>,
+    /// 显式忽略会话账本（用量 + 中断记录）：只由「仍然复制」按钮传 true。
+    pub(crate) ignore_aux_data: bool,
 }
 
 /// `POST /api/session-links/preview`。

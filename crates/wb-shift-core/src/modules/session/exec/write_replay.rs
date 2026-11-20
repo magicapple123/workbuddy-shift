@@ -225,6 +225,8 @@ pub(in crate::modules::session) fn execute_sync_item(
         lifecycle_version: Some(OPERATION_LIFECYCLE_VERSION),
         cleanup_state: None,
         last_error: None,
+        // 重放/同步写入不搬会话账本：本字段只对复制操作有意义。
+        aux_skipped: false,
         created_at: now_ms(),
         updated_at: now_ms(),
     };

@@ -47,6 +47,11 @@ pub struct Operation {
     pub cleanup_state: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// 用户显式忽略会话账本（用量 + 中断记录）：本次复制永久不带账本，不做后台补写。
+    ///
+    /// 旧记录没有这个字段，按 `false` 读——即旧副本仍按「应当带账本」处理。
+    #[serde(default)]
+    pub aux_skipped: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }

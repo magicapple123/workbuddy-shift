@@ -176,6 +176,7 @@ fn cross_copy(
         cross_side(&source_paths, source_variant, source_uid),
         cross_side(&target_paths, target_variant, target_uid),
         &ids,
+        false,
         |_| false,
         |variant| env.paths(variant),
     )
@@ -199,6 +200,7 @@ fn cross_copy_with_probe(
         cross_side(&source_paths, source_variant, source_uid),
         cross_side(&target_paths, target_variant, target_uid),
         &ids,
+        false,
         is_app_running,
         |variant| env.paths(variant),
     )
@@ -488,6 +490,7 @@ fn cross_recovery_reads_source_from_operation_variant() {
             lifecycle_version: None,
             cleanup_state: None,
             last_error: None,
+            aux_skipped: false,
             created_at: 1,
             updated_at: 1,
         },

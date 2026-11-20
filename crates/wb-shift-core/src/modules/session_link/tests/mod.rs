@@ -90,6 +90,7 @@ fn operation(id: &str, phase: OpPhase, target_uid: &str, target_session: &str) -
         lifecycle_version: None,
         cleanup_state: None,
         last_error: None,
+        aux_skipped: false,
         created_at: 1,
         updated_at: 1,
     }

@@ -458,6 +458,7 @@ fn variant_isolation_keeps_groups_separate() {
         WbVariant::Ai,
         &json!({"id": "acc-uid-b", "uid": "uid-b", "variant": "ai"}),
         &["ai-sess-1".to_string()],
+        false,
         |_| false,
     )
     .unwrap();
@@ -756,6 +757,7 @@ fn concurrent_request_is_rejected_without_second_copy() {
         WbVariant::Cn,
         &env.target("uid-b"),
         &["sess-1".to_string()],
+        false,
         |_| false,
     )
     .expect_err("持锁期间必须拒绝");
@@ -797,6 +799,7 @@ fn copy_runs_while_app_running_for_non_current_account() {
         WbVariant::Cn,
         &env.target("uid-b"),
         &["sess-1".to_string()],
+        false,
         probe,
     )
     .expect("目标非当前登录账号：运行中必须放行");
@@ -844,6 +847,7 @@ fn recovery_abandons_prepared_operation_when_source_is_gone() {
             lifecycle_version: None,
             cleanup_state: None,
             last_error: None,
+            aux_skipped: false,
             created_at: 1,
             updated_at: 1,
         },
@@ -1121,9 +1125,10 @@ fn insert_session_copy_duplicates_row_with_target_uid() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted);
+    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
 
     let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
     let (id, user_id, title, deleted_at, is_playground): (String, String, String, Option<i64>, i64) =
@@ -1150,7 +1155,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "new-1",
             "missing",
             "uid-a",
-            "uid-b"
+            "uid-b",
+            false
         )
         .unwrap(),
         DbCopyOutcome::SourceRowMissing,
@@ -1165,7 +1171,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "new-1",
             "sess-1",
             "uid-a",
-            "uid-b"
+            "uid-b",
+            false
         )
         .unwrap(),
         DbCopyOutcome::NoDb
@@ -1428,10 +1435,11 @@ fn insert_session_copy_normalizes_running_row_status() {
                 new_id,
                 source_id,
                 "uid-a",
-                "uid-b"
+                "uid-b",
+                false
             )
             .unwrap(),
-            DbCopyOutcome::Inserted
+            DbCopyOutcome::Inserted { aux_note: None }
         );
     }
 
@@ -1514,10 +1522,11 @@ fn insert_session_copy_without_status_column_still_works() {
             "new-no-status",
             "sess-1",
             "uid-a",
-            "uid-b"
+            "uid-b",
+            false
         )
         .unwrap(),
-        DbCopyOutcome::Inserted
+        DbCopyOutcome::Inserted { aux_note: None }
     );
     assert_eq!(env.status_of("new-no-status"), None);
 }
@@ -1642,9 +1651,10 @@ fn copy_remaps_space_id_to_target_account_space() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted);
+    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
 
     let (space_id, project_id) = space_of(&env, "new-1");
     assert_eq!(
@@ -1691,9 +1701,10 @@ fn copy_creates_space_for_target_when_missing() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted);
+    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
 
     let (space_id, _) = space_of(&env, "new-1");
     let space_id = space_id.expect("目标账号没有同名 space 时应当新建并回填");
@@ -1773,9 +1784,10 @@ fn copy_keeps_null_space_id_without_creating_space() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
-    assert_eq!(outcome, DbCopyOutcome::Inserted);
+    assert_eq!(outcome, DbCopyOutcome::Inserted { aux_note: None });
 
     let (space_id, _) = space_of(&env, "new-1");
     assert_eq!(space_id, None, "源无项目归属时不得凭空塞进同名 space");
@@ -1816,6 +1828,7 @@ fn copy_rejection_leaves_no_orphan_space() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap_err();
     assert!(error.contains("Claw"), "{error}");
@@ -1866,6 +1879,7 @@ fn copy_insert_failure_rolls_back_new_space() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap_err();
     assert!(error.contains("会话记录保存失败"), "{error}");
@@ -1910,6 +1924,7 @@ fn copy_new_space_inherits_create_folder_path() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
     let (space_id, _) = space_of(&env, "new-1");
@@ -1951,6 +1966,7 @@ fn copy_new_space_inherits_create_folder_path() {
         "src-1",
         "uid-a",
         "uid-b",
+        false,
     )
     .unwrap();
     let (space_id, _) = space_of(&env2, "new-1");
@@ -2005,8 +2021,10 @@ fn session_row_owner_tolerates_a_legacy_table_without_deleted_at() {
     let env = Env::new("row-owner-legacy");
     std::fs::create_dir_all(env.paths.data_root.clone()).unwrap();
     let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
-    conn.execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT);")
-        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT);",
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO sessions (id, user_id, title) VALUES ('sess-1', 'uid-a', '标题一')",
         [],
@@ -2161,4 +2179,331 @@ fn clean_source_copy_has_no_source_repaired_field() {
         report["copied"][0].get("sourceRepaired").is_none(),
         "{report}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R5-14：会话账本（session_usage + session_turn_interruptions）随副本搬运
+// ---------------------------------------------------------------------------
+
+/// 给环境加上两张账本表（真实 0.2.3 客户端库里有，测试夹具默认没有）。
+fn create_ledger_tables(db: &Path) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_usage (
+            session_id TEXT PRIMARY KEY,
+            used INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            credit_json TEXT
+        );
+        CREATE TABLE session_turn_interruptions (
+            session_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            reason_code TEXT,
+            presentation TEXT,
+            PRIMARY KEY (session_id, request_id)
+        );",
+    )
+    .unwrap();
+}
+
+fn write_ledger(
+    db: &Path,
+    sid: &str,
+    used: i64,
+    size: i64,
+    credit_json: &str,
+    interruptions: &[(&str, Option<&str>, Option<&str>)],
+) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO session_usage (session_id, used, size, updated_at, credit_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![sid, used, size, 111, credit_json],
+    )
+    .unwrap();
+    for (request_id, reason, presentation) in interruptions {
+        conn.execute(
+            "INSERT OR REPLACE INTO session_turn_interruptions \
+             (session_id, request_id, reason_code, presentation) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![sid, request_id, reason, presentation],
+        )
+        .unwrap();
+    }
+}
+
+fn ledger_usage(db: &Path, sid: &str) -> Option<(i64, i64, Option<String>)> {
+    let conn = Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT used, size, credit_json FROM session_usage WHERE session_id = ?1",
+        [sid],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .ok()
+}
+
+fn ledger_interruptions(db: &Path, sid: &str) -> Vec<(String, Option<String>, Option<String>)> {
+    let conn = Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT request_id, reason_code, presentation FROM session_turn_interruptions \
+             WHERE session_id = ?1 ORDER BY request_id",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([sid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .flatten()
+        .collect();
+    rows
+}
+
+/// 用量与中断记录原样搬到副本：`credit_json` 逐字节相等（含浮点尾数）、
+/// `used`/`size` 逐字段相等、中断记录的 `request_id` 集合完全一致。
+#[test]
+fn copy_carries_usage_and_interruptions_verbatim() {
+    let env = ready_env("aux-happy");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    // 真实库里 credit_json 的键是请求 id，值与账号无关；故意带浮点尾数验证不格式化。
+    let credit = r#"{"01a1f90d":8.569999999999999,"01a1f914":6.47}"#;
+    write_ledger(
+        &db,
+        "sess-1",
+        123_456,
+        7_890,
+        credit,
+        &[
+            ("req-b", Some("rate_limited"), Some("限流")),
+            ("req-a", None, None),
+        ],
+    );
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+
+    let (used, size, copied_credit) = ledger_usage(&db, &new_id).expect("副本必须有用量行");
+    assert_eq!((used, size), (123_456, 7_890));
+    assert_eq!(
+        copied_credit.as_deref(),
+        Some(credit),
+        "credit_json 必须逐字相等"
+    );
+    // 核对合计：json_each 求和相等（这就是客户端「共消耗」的口径）。
+    let conn = Connection::open(&db).unwrap();
+    let total: f64 = conn
+        .query_row(
+            "SELECT SUM(value) FROM session_usage, json_each(credit_json) WHERE session_id = ?1",
+            [&new_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!((total - (8.569999999999999 + 6.47)).abs() < 1e-9);
+
+    let interruptions = ledger_interruptions(&db, &new_id);
+    assert_eq!(interruptions.len(), 2);
+    assert_eq!(interruptions[0].0, "req-a");
+    assert_eq!(interruptions[1].0, "req-b");
+    // 未知 reason_code 原样保留，不做枚举校验。
+    assert_eq!(interruptions[1].1.as_deref(), Some("rate_limited"));
+
+    // 两表时序一致：账本 updated_at 与同一事务写的 sessions.updated_at 相等。
+    let (usage_updated, session_updated): (i64, i64) = conn
+        .query_row(
+            "SELECT u.updated_at, s.updated_at FROM session_usage u \
+             JOIN sessions s ON s.id = u.session_id WHERE u.session_id = ?1",
+            [&new_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(usage_updated, session_updated);
+    assert!(
+        report["copied"][0].get("auxNote").is_none(),
+        "有账本可搬时不应有诊断"
+    );
+}
+
+/// 源库有账本表但该会话没有用量行：不算失败，也不写空行。
+#[test]
+fn copy_without_usage_rows_is_not_a_failure() {
+    let env = ready_env("aux-empty");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    assert!(
+        ledger_usage(&db, &new_id).is_none(),
+        "没有源数据就不该造一行"
+    );
+    assert!(report["copied"][0].get("auxNote").is_none());
+}
+
+/// 源库连账本表都没有（旧客户端）：跳过，复制照旧成功。
+#[test]
+fn copy_skips_when_source_has_no_ledger_tables() {
+    let env = ready_env("aux-legacy");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"].as_array().map_or(0, Vec::len), 0);
+}
+
+/// 目标库缺账本表（跨档/跨库场景）：跳过并写诊断，不算失败。
+#[test]
+fn copy_reports_aux_note_when_target_lacks_ledger_tables() {
+    let source = ready_env("aux-target-legacy-src");
+    let target = ready_env("aux-target-legacy-dst");
+    let source_db = source.paths.workbuddy_db();
+    create_ledger_tables(&source_db);
+    write_ledger(&source_db, "sess-1", 10, 20, r#"{"r1":1.5}"#, &[]);
+
+    let outcome = insert_session_copy(
+        &source.paths(),
+        &target.paths(),
+        "new-legacy",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, DbCopyOutcome::Inserted { aux_note: Some(_) }),
+        "{outcome:?}"
+    );
+    // 会话行照写，只是没有账本。
+    assert!(ledger_usage(&target.paths.workbuddy_db(), "new-legacy").is_none());
+}
+
+/// 账本写入报错 → 整次失败且事务回滚（目标库不留 sessions 行）。
+#[test]
+fn aux_write_failure_rolls_back_the_session_row() {
+    let env = ready_env("aux-fail");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(&db, "sess-1", 5, 6, r#"{"r1":2.5}"#, &[]);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER aux_boom BEFORE INSERT ON session_usage \
+         BEGIN SELECT RAISE(ABORT, 'ledger down'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let error = insert_session_copy(
+        &env.paths(),
+        &env.paths(),
+        "new-boom",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        is_aux_write_failure(&error),
+        "错误必须带可忽略前缀：{error}"
+    );
+    let conn = Connection::open(&db).unwrap();
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE id = 'new-boom'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "账本失败必须回滚会话行");
+}
+
+/// 忽略账本：两张表零写入，操作记录落 `auxSkipped`。
+#[test]
+fn ignore_aux_writes_no_ledger_and_marks_operation() {
+    let env = ready_env("aux-ignore");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(
+        &db,
+        "sess-1",
+        7,
+        8,
+        r#"{"r1":3.5}"#,
+        &[("req-1", None, None)],
+    );
+
+    let report = copy_sessions_for_switch_at(
+        &env.paths(),
+        WbVariant::Cn,
+        &env.target("uid-b"),
+        &["sess-1".to_string()],
+        true,
+        |_| false,
+    )
+    .unwrap();
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["auxSkipped"], true);
+    let new_id = env.first_copy_id(&report);
+    assert!(ledger_usage(&db, &new_id).is_none(), "忽略模式不得写用量");
+    assert!(ledger_interruptions(&db, &new_id).is_empty());
+
+    // 操作记录必须持久化忽略标记，恢复重放才不会在同一处再失败。
+    let scan = session_link::scan_operations(&env.paths());
+    let operation = scan
+        .operations
+        .iter()
+        .find(|operation| operation.target.session_id == new_id)
+        .expect("必须有本次复制的操作记录");
+    assert!(operation.aux_skipped);
+}
+
+/// 重放幂等：同一目标 id 再写一次不产生重复中断行，`credit_json` 不被重复累加。
+#[test]
+fn aux_replay_is_idempotent() {
+    let env = ready_env("aux-replay");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(
+        &db,
+        "sess-1",
+        9,
+        10,
+        r#"{"r1":4.25}"#,
+        &[("req-1", None, None), ("req-2", Some("aborted"), None)],
+    );
+
+    insert_session_copy(
+        &env.paths(),
+        &env.paths(),
+        "new-replay",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap();
+    // 模拟恢复重放：会话行先被清掉，再按同一目标 id 补写一次。
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM sessions WHERE id = 'new-replay'", [])
+        .unwrap();
+    drop(conn);
+    insert_session_copy(
+        &env.paths(),
+        &env.paths(),
+        "new-replay",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        ledger_interruptions(&db, "new-replay").len(),
+        2,
+        "重放不得重复"
+    );
+    let (used, _, credit) = ledger_usage(&db, "new-replay").unwrap();
+    assert_eq!(used, 9);
+    assert_eq!(credit.as_deref(), Some(r#"{"r1":4.25}"#));
 }
