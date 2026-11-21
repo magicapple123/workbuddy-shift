@@ -338,6 +338,12 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/vscode_session_sync/tests/sync.rs` | 523 | 测试 | 插件侧同步/预览主题测试分组（含代表成员与存活过滤用例）。 | 保留；测试继续膨胀时按「复制登记」「预览」「同步执行」再拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/maintenance.rs` | 1131 | 测试 | 失效组清理与列表过滤的判定/备份/拒绝语义共用一套造数夹具（临时工具存储根、`sessions` 表、插件工作区索引）；补齐插件与 IDE 的清理、索引部分损坏（`Partial`）的拒绝与放行、无失效组时不重写主表、两客户端互不串用等用例后超过阈值，属测试分组而非生产逻辑。 | 继续膨胀时按「WorkBuddy（`sessions` 表）」与「插件 / IDE（工作区索引）」两个主题拆成 `maintenance.rs` + `plugin_prune.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/editor.rs` | 550 | 测试 | 管理页/客户端作用域/目标兼容性测试与共享夹具 `TempStore`（临时工具存储根、`sessions` 表、插件工作区索引造数）集中在一个文件；夹具被同模块多个 `include!` 的测试共用，按行数拆开只会把同一份造数逻辑复制多份。 | 夹具继续增长时抽到 `tests/support.rs`（与 `vscode_session_sync/tests/fixtures.rs` 同构）。 |
+| `scripts/smoke/assert-update-log.py` | 728 | 脚本（断言库） | `--smoke-self-update` 日志的断言入口：`phase` 词表必须与 `src-tauri/src/update_service/smoke.rs` 的 `PHASES` 逐字对照，所以词表、读取、分组、判定、CLI 刻意放同一个文件（拆开会出现第二份词表）；行数的六成是「为什么这样断言」的文档与 `--selftest` 内联的 3 份 JSONL 夹具（正常 / 缺阶段 / 含 error），`--selftest` 必须能在无网络、无 CI 环境的机器上一条命令跑完。 | 词表与断言口径稳定后，把 3 份夹具移到 `scripts/smoke/fixtures/update-log/` 下的 `.jsonl` 文件，正文可降到 500 行以内。 |
+| `scripts/smoke/common.py` | 945 | 脚本（结果契约唯一真源） | `artifacts/release-smoke/<form>.json` 的**所有**字段名 / 白名单 / 校验 / 读写都只在这里定义：`common.sh` / `common.ps1` / 5 个平台驱动 / `render-conclusion.py` 全部经它（import 或 CLI）取值。拆成「常量 + 校验 + 读写 + CLI」四份文件会让同一份白名单出现多个入口，而契约分叉的症状是「某平台的格子在 Gate 里静默变 ❓」——正是本文件头注释里记录的两次事故。文档（字段命名口径、两个层级 `upgradeMode` 的口径、`selftest` 的坏数据回归表）也占了不少篇幅，它们是这个契约能被正确使用的原因。 | 只有在契约要加第二个版本号（`schemaVersion=2` 双读）时才拆：届时按「v1 只读适配器 / v2 契约 / 公共工具」三份拆，白名单与 `validate_*` 仍留一份。 |
+| `scripts/smoke/preflight.py` | 895 | 脚本（预检） | 「能不能验」的判定全在一处：tag↔版本一致性、Release 是否正式版、资产清单（8 份 `latest*.json` 清单 + 5 个参与自动更新的包及其 `.sig` + 2 个 dmg）、上一版 tag（`git tag --sort=-v:refname`）、`isLatest`、GHCR manifests。六项都是「缺一项就该整条 run 跳过」的同级前置条件，且共用同一份 `--network on/off` 与 gh 探测封装；按检查项拆文件会把这份探测封装复制 6 份，而它的「失败也返回结构化结果、绝不抛异常」纪律正是预检能被 Gate 读懂的前提。 | 接入新的发布物形态（例如再出 arm64 dmg）时，先把「资产清单」抽成 `preflight/assets.py` 的数据表 + 断言函数，其余留在原文件。 |
+| `scripts/smoke/render-conclusion.py` | 907 | 脚本（Gate + 矩阵） | 两个阶段的**判定口径必须同一套**：`--gate`（每个验收 job 的最后一步）与 `--matrix`（triage 的结论）共用 `verdict_of` / `STATUS_MARKS` / `aggregate_cells`，矩阵的行列与结论首行又要与 `common.py` 的白名单对照。拆开会让「job 绿了但矩阵红」或反之（D2/D4 两个回归锁就是为此加的）。另外约 1/5 是自测：判定口径、符号表、跨文件版本一致性、坏文件与好文件同批。 | 只有当矩阵要支持「按形态自定义列」时才拆：那时把 `MATRIX_COLUMNS` + `aggregate_cells` + `render_matrix_cell` 抽成 `render/matrix.py`，`--gate` 留在原文件。 |
+| `scripts/smoke/classify.py` | 973 | 脚本（A–J 归类） | 归类是「结果 → 处置计划」的**唯一**决策点（不执行任何 gh 命令，因此归类错了也不会有副作用）。A–J 映射、关键词兜底、`issue_title()`（issue 去重的唯一真源，`dispose.py` 也 import 它）、计划项的字段顺序、两类「读不到 vs 契约非法」的路由（DEF-4）都在这里；dispose / issue / render 三个下游都读同一份 `triage-plan.json`。拆开会让「什么算 A 类」出现第二份定义，而 A 类会触发自动重跑。 | 类别表稳定后按「类别判定（A–J 映射 + 推断）/ 计划构造（含 `issueTitle`）/ CLI + 自测」三份拆，`issue_title()` 与 `CATEGORY_ACTIONS` 必须留在同一份。 |
+| `scripts/smoke/dispose.py` | 818 | 脚本（处置闸门） | 整条链里**唯一**会改变仓库外部状态的一步，所以四道闸门（单 run ≤3 / 每类每版本 ≤1 / `attempt>=2` 不重跑 / 白名单动作）与「怎么拼 gh 命令」写在同一处：把它们分开就等于让「闸门」与「执行」之间出现可绕过的一层。约 1/4 是自测（优先级、上限、attempt 闸门、dry_run 零调用、rejected、命令形态）。 | 若将来引入新的处置动作（例如 `dispatch-build`），先把白名单 + `build_command` + 闸门抽成 `dispose/policy.py`，CLI 与报告渲染留在原文件。 |
 | `crates/wb-shift-core/src/modules/jetbrains/detect.rs` | 791 | 客户端识别 | WorkBuddy / CodeBuddy IDE / CLI / VS Code / JetBrains 五类客户端的安装路径、进程、插件目录与版本探测共用一组平台分支（同一路径要判多个客户端）；拆开会把同一份平台判断复制成多份。第三轮新增 JetBrains 诊断入口、第五轮（R5-19）加入双配置根与 16 产品识别后超过阈值；产品表已抽到 `jetbrains/products.rs`，本文件只剩安装根解析、配置目录映射与进程枚举。 | 下一轮改识别逻辑时按客户端抽 `jetbrains/detect/{workbuddy,codebuddy,jetbrains}.rs`，共用平台分支留在 `mod.rs`。 |
 | `crates/wb-shift-core/src/modules/jetbrains/tests/switch.rs` | 809 | 测试 | 切换流程用例（账号数据、IDE 状态、失败回滚、诊断输出）共用一套造数夹具，属测试分组而非生产逻辑。R5-19 的产品表 / 双配置根用例另放 `tests/products.rs`，本文件不再膨胀。 | 继续膨胀时按「正常切换」「失败回滚」「诊断」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/session_groups/graph.rs` | 502 | 批次编排 | 统一批次（复制/同步/登记/回滚）刚越过阈值；计划与实际执行共享同一份批次状态，拆开要跨文件传递可变状态。 | 新增客户端类型时先把批次计划抽到 `session_groups/graph/plan.rs`，执行留在原文件。 |
@@ -347,7 +353,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/token_stats/jsonl.rs` | 568 | 流式解码 | JSONL 解码与 per-account 聚合在同一遍流式解析里完成；拆开要么二次读盘，要么跨文件持有游标与累加器。 | 下一轮把 `SourceCollector` 的累加逻辑抽到 `token_stats/collector.rs`，解码留原位。 |
 | `crates/wb-shift-core/src/modules/token_stats/projection.rs` | 539 | 投影聚合 | 维度/账号/会话三套累加器共享同一份投影上下文，拆开会让口径分叉（第三轮刚补齐「全局 = 各账号之和」）。 | 保持单文件；新增维度时先抽 `projection/dims.rs`。 |
 | `crates/wb-shift-core/src/modules/update.rs` | 872 | 更新清单与状态 | 清单 URL 优先级、semver 比较、检查缓存键与失败退避共享同一组常量与状态；第三轮加入代理/并发/负缓存，第四轮加入 `notes` 截断与 `autoCheck` 配置后超过阈值。 | 下一轮把清单获取与解析抽 `update/manifest.rs`（`fetch_manifest`/`manifest_urls`/`manifest_notes`），状态机与配置留在 `update.rs`。 |
-| `src-tauri/src/update_service/mod.rs` | 689 | 更新状态机 | 检查（single-flight + 20s 预算）、阶段流转入口与单测共用同一份进程级状态（快照 / BUSY / 上次检查结果）；测试必须与状态机同文件才能复用 `TEST_LOCK` 串行化，拆开会引入跨文件竞态。第五轮 R5-03 在 `check()` 里加了「发现新版本」系统通知（前台判定 + 版本去重，判定逻辑在 `state.rs`，投递在 `tray_bridge.rs`），四组新单测也落在本文件。 | 下一轮把检查编排抽 `update_service/check.rs`，测试随之迁移。 |
+| `src-tauri/src/update_service/mod.rs` | 691 | 更新状态机 | 检查（single-flight + 20s 预算）、阶段流转入口与单测共用同一份进程级状态（快照 / BUSY / 上次检查结果）；测试必须与状态机同文件才能复用 `TEST_LOCK` 串行化，拆开会引入跨文件竞态。第五轮 R5-03 在 `check()` 里加了「发现新版本」系统通知（前台判定 + 版本去重，判定逻辑在 `state.rs`，投递在 `tray_bridge.rs`），四组新单测也落在本文件；发版后验收新增 `mod smoke`（2 行）。 | 下一轮把检查编排抽 `update_service/check.rs`，测试随之迁移。 |
 | `src/pages/settings/settings-sync-card.tsx` | 850 | 页面卡片 | 设置同步的预览/二次确认/备份还原/未登录账号出口共用同一份 `plan` 与 `config` 状态；拆成多个子组件会把「当前选中备份」「待确认计划」跨文件传递。第四轮补 3 个 P0 与还原入口后超过阈值。 | 下一轮把「备份列表 + 还原对话框」抽到 `settings/settings-backup-section.tsx`，主卡片只保留状态与动作。 |
 
 | `crates/wb-shift-core/src/modules/limits/vscode_ext.rs` | 541 | 探针 | VS Code 插件日志的增量采样（偏移/大小/mtime、强信号、脱敏样本）与四个单测共用同一组信号判定；拆开会让「什么算限额」出现第二份定义。 | 保持单文件；若接入正式 ScanSource，把解析抽到 limits/parse/vscode.rs。 |
@@ -430,5 +436,31 @@ Tauri 配置在 [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)：`f
 | `.github/workflows/build.yml` | `v*` tag / 手动 | 四平台桌面矩阵 + `npm-linux-arm64` job（arm64 runner 原生编译 CLI，不参与桌面发布）：前端构建、server 二进制、npm 平台分包与主包发布、GitHub Packages scoped 镜像（`publish-github-packages` job，备用渠道）、桌面安装包、更新清单、GitHub Release |
 | `.github/workflows/github-packages.yml` | 手动（输入 `version`） | 回填：把 npmjs 上已发布的版本镜像到 GitHub Packages（脚本幂等，已存在则跳过） |
 | `.github/workflows/pages.yml` | push `main` / 手动 | `pnpm run build:demo` → GitHub Pages |
+| `.github/workflows/release-smoke.yml` | `release` published / 手动（`tag` + `dry_run`） | **发版后验收**，与发版流程解耦（不产出发布物、不改源码 / tag、失败不阻断发布）：`preflight`（tag↔版本一致性 + Release 正式版 + 必需资产 + 上一版 tag + `isLatest` + GHCR manifests，`scripts/smoke/preflight.py`）→ 5 个并行验收 job（Windows 真·应用内升级 / macOS `/Applications` 覆盖 / Linux deb + AppImage / npm 全局升级 / docker run+healthy，结果各写一份同构 JSON）→ `triage`（`classify.py` 归类 A–J → `dispose.py` 次数受限的处置 ≤3 → `render-conclusion.py --matrix` → `update-release-note.sh` 写回 Release 正文标记区块 → `issue.sh` 开 issue）。7 个 job 全部已接线；`triage` 的 `if` 是 `always()`，业务步骤要求 `preflight` 通过 |
 
 发版细节与签名密钥位置见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+### 发版后验收的隐藏启动参数（`--smoke-self-update`，**仅 CI 使用**）
+
+`release-smoke.yml` 的 Windows 格要验「0.2.4 的用户点更新 → 下载 → 签名校验 → 安装 → 0.2.5」
+这条真实链路，桌面壳没有对应入口，因此 `src-tauri/src/update_service/smoke.rs` 提供了一个
+**隐藏参数**，走真实的 `update_service` 链路（`check` → `start_download` → 轮询到
+`ReadyToRestart` → `restart`），过程写进 JSON Lines 供 CI 断言。**它不进任何用户文档**
+（桌面端没有 `--help`，也不写 `README.md` / `docs/cli.md` / `FAQ.md`），只在本节登记。
+
+- **三重闸门**（任一不满足即在产生任何副作用之前 `return`，默认启动零行为变化）：
+  ① `std::env::args()` 中存在**整参相等**的 `--smoke-self-update`（禁止子串匹配，与
+  `tray::is_silent_startup` 同口径，`--smoke-self-update-x` 不触发）；② `WB_SHIFT_SMOKE_SELF_UPDATE=1`；
+  ③ 非截图演示模式（`WB_SHIFT_SCREENSHOT_DEMO`）。
+- **日志**：`WB_SHIFT_SMOKE_LOG` 优先，否则 `<store_dir>/smoke-self-update.jsonl`；JSONL 一行一个
+  对象，字段 `ts / seq / phase / version / currentVersion / url / error / detail / pid`，每行 flush。
+- **`phase` 词表（固定，新增必须同步 `scripts/smoke/assert-update-log.py` 与本表）**：
+  `start` · `check` · `check_ok` · `up_to_date` · `download_start` · `download_progress` ·
+  `download_done` · `install_start` · `install_ok` · `relaunch` · `done` · `error` · `abort`。
+- **退出码**：`0` 走完 / `10` 已是最新 / `11` 检查失败 / `12` 下载或签名失败 / `13` 安装失败 /
+  `14` 环境不可用（日志不可写）/ `20` 平台不支持。CI **不用退出码判通过**（Windows 上 NSIS 会让
+  进程以不确定码退出），只用它做失败归类。
+- **不写持久化状态**：不读写 `github_config.json` 的开关、不落「已升级」标记、不注册到 autostart
+  参数；唯一的落盘是那份追加式日志。重启后的新进程若发现日志已有 `install_ok` / `done` 就跳过
+  （否则继承的参数与环境变量会让它重复跑一遍、污染 CI 的序列断言）。
+

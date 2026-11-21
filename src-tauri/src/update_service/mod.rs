@@ -27,11 +27,13 @@ use wb_shift_core::modules::update;
 
 mod download;
 mod install;
+mod smoke;
 mod state;
 mod tray_bridge;
 
 pub use download::*;
 pub use install::*;
+pub use smoke::*;
 pub use state::*;
 pub(crate) use tray_bridge::*;
 

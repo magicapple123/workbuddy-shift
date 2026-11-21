@@ -132,6 +132,45 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | `gen-tray-icon.py` / `gen-tray-template.py` / `gen-windows-rounded-icon.py` / `compare-icons.py` | 托盘图标 / Windows 圆角图标 / 图标对比工具（手动运行，不参与构建） |
 | `with-env.mjs` | 跨平台环境变量前缀执行（pnpm scripts 使用） |
 
+### 发版后验收（`scripts/smoke/`）
+
+`release-smoke.yml` 用的驱动脚本。**这里不做断言库的第二次实现**：结果 JSON 的字段名、
+`status` / `upgradeMode` 词表和校验只有 `common.py` 一份（设计 §9.2），shell / pwsh 侧
+一律转发 `python3 scripts/smoke/common.py` 的 CLI。
+
+| 脚本 | 用途 |
+|---|---|
+| `smoke/common.py` | 结果契约唯一真源：字段 / 白名单 / `validate` / 读写 + CLI（`emit` / `cell` / `set` / `finish` / `validate` / `probe` / `sha256` / `selftest`）。离线自测 `python3 scripts/smoke/common.py selftest` |
+| `smoke/common.sh` | bash 侧薄封装：日志分组、超时包装（macOS 无 `timeout` 时内置兜底）、`WB_SHIFT_HOME` 沙箱、「记一格不中断」的 `smoke_pass/fail/skip/blocked` |
+| `smoke/preflight.py` | 预检：tag↔版本一致性（Cargo / package.json / npm 平台包 / tauri.conf）、Release 是正式版、必需资产齐全（复用 `check-release-assets.py` 的清单常量）、上一版 tag、`isLatest`（历史回填时决定 Windows 升级格是否 `skipped`）、GHCR manifests；写 `preflight.json` + `$GITHUB_OUTPUT` |
+| `smoke/render-conclusion.py` | 两用：① `--gate`（单个 job 的 Gate）校验结果 JSON、渲染格子表进 job summary，有 `fail` 才 exit 1、`blocked` 只告警；② `--matrix`（triage）渲染 6 形态 × 10 动作的结论矩阵，首行恒为 `**结论：PASS\|FAIL\|BLOCKED**`，并做跨文件版本一致性断言（`form=consistency` + `H`） |
+| `smoke/classify.py` | 归类：读全部 `<form>.json` → `triage-plan.json`（每项含 `form` / `cell` / `category` / `severity` / `action` / `reason` / `issueTitle`）。驱动已写的 `category` 优先，其次关键词兜底，**兜不出来 fail-closed 走 issue**；缺形态 / 零格归 A（重跑），而「文件在但契约非法」（缺 `category` / 类型错 / JSON 坏）归 `category=null` + `issue` + `severity=high`（流水线缺陷，重跑无用） |
+| `smoke/dispose.py` | 处置：按计划执行白名单动作（`gh run rerun --failed` / `gh workflow run docker.yml` / 重跑 build 的 release|publish job），守四级闸门（单 run ≤3、每类每版本 ≤1、`run_attempt>=2` 不重跑、`--dry-run` 零副作用——连 job 定位的两条只读 GET 也跳过）；白名单外的动作记进 `rejected[]` 并打 `::warning::`，不静默丢弃 |
+| `smoke/split-note.py` | 剥 / 取 Release 正文里的 `<!-- release-smoke:begin -->…<!-- release-smoke:end -->` 区块；无区块逐字原样返回，多区块全剥，幂等 |
+| `smoke/update-release-note.sh` | 幂等写回结论区块：`gh release view` → `split-note.py --strip` → 拼新区块（含「本次处置」行）→ `gh release edit --notes-file`，每次重试都重读正文（3 次） |
+| `smoke/issue.sh` | 开 issue（E–I 类 + 无法归类 + 处置未完成）：label `release-smoke`，标题 `[release-smoke] <tag> 验收失败：<形态> / <动作>`，**同标题已有 open 则只追加评论**；正文含断言原文 / 详情 / 日志 / 最小复现命令 |
+| `smoke/win/driver.ps1` | Windows 验收 W1–W12：装 0.2.4 → `--hidden --smoke-self-update` 真跑应用内升级 → 装完读版本 → 升级后启动四元证据（20s 存活 / 单实例退出 / 沙箱落盘 / error.log 无 crash）；`SMOKE_IS_LATEST=false` 时升级链三格标 `skipped` |
+| `smoke/win/read-version.ps1` | 卸载注册表 `DisplayVersion` + 安装目录 exe `ProductVersion` **双读**，输出 JSON（含 `match`：两者是否一致） |
+| `smoke/mac/driver.sh` | macOS 验收 M1–M10：dmg → `/Applications` 覆盖升级（`pkg-upgrade`），版本号变化作证；启动四元证据（含 `instance.lock`）；x86_64 dmg 记 `skipped` |
+| `smoke/mac/read-version.sh` | `PlistBuddy` 读 `CFBundleShortVersionString` / `CFBundleExecutable`，输出主程序绝对路径的 JSON |
+| `smoke/linux/driver.sh` | Linux 验收 L0–L8：`apt` 装依赖 → deb `dpkg -i` 升级（`pkg-upgrade`）→ `xvfb-run` 启动 → AppImage 同路径替换（`appimage-replace`，格子级 `upgradeMode`）+ sha256 比对 + `--appimage-extract-and-run` 启动 |
+| `smoke/linux/read-version.sh` | 从 deb 元数据（`dpkg-deb`）或已安装包（`dpkg-query` + `dpkg -L`）读包名 / 版本 / 主程序，输出 JSON（包名不写死） |
+| `smoke/npm/driver.sh` | npm 验收 N1–N6：官方源装 0.2.4 → 升 0.2.5（`npm-upgrade`）→ `serve --no-open` 后 `/api/status` 与 `/` 断言 |
+| `smoke/docker/driver.sh` | 容器验收 K1–K7：`:<ver>` 与 `:latest` digest 相同 → 90s 内 healthy → `/api/status` → `id -u == 1000` → 卷写读 |
+| `smoke/assert-update-log.py` | 断言 `--smoke-self-update` 的 JSONL：按 `pid` 分组取第一个进程、阶段序列齐全且有序、`version` 与目标一致、无 `error`；`--selftest` 用 3 份构造日志自测 |
+
+桌面三端共用的判定口径（写进单元格子的 `category`）：`blocked`(J) 只出现在「进程 20s 内退出 +
+沙箱目录完全未创建 + 命中环境特征（WebView2 缺失 / SessionId=0 / libwebkit 缺失 / 无 display）」
+三条同时成立时，其余启动失败一律 `fail`(F)——**不假装通过，也不把环境限制当产品故障**。
+
+约定（写驱动脚本前先看）：
+
+- 每个 driver **恒 exit 0**，断言结果写进 `<form>.json`；成败由 Gate 步骤判定——否则一格失败
+  会让整张矩阵缺格；
+- 驱动第一步 `common.py emit`，每个断言一步 `cell`，结尾 `finish`（回填 `durationMs`）；
+- 失败格子必须带 `category`（A–J，含义见 `docs/release-smoke.md`）；
+- 桌面三端统一 `WB_SHIFT_HOME=<临时空目录>`，不碰真实用户数据。
+
 ### 更新清单的 `notes` 口径（R5-01）
 
 `gen-update-json.sh` 产出的 `latest-*.json` 里，`notes` 的语义是**应用内卡片摘要（纯文本）**，

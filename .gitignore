@@ -70,3 +70,7 @@ npm/.npmrc
 # Python 诊断脚本的运行缓存
 __pycache__/
 *.pyc
+
+# 发版后验收（release-smoke）的本地运行产物：结果 JSON / 下载的安装包 / 日志。
+# CI 里由 upload-artifact 上传，不进仓库。
+artifacts/

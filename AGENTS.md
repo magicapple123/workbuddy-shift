@@ -188,6 +188,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 | 只用 pnpm（`pnpm-lock.yaml` 存在、无其它锁文件） | 同上脚本的锁文件检测 | 本机 + CI |
 | 悬浮窗演示桥一致 | `node scripts/check-companion-contract.mjs` | 本机 + CI |
 | 结构约束（长文件豁免表、core 依赖方向、旧名称、capability 最小化、lint 抑制棘轮） | `node scripts/check-structure.mjs` | test.yml · lint job |
+| 发版后验收结果契约（结果 JSON 字段 / `status` 词表 / `upgradeMode` 词表 / 禁用口径） | `python3 scripts/smoke/common.py selftest`（离线），Gate 用 `scripts/smoke/render-conclusion.py --gate` | release-smoke.yml · 各验收 job 的 Gate + triage |
 | 最低 Rust 版本 1.95 | `cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p companion-runtime --all-targets` | test.yml · msrv job |
 | 格式 | `cargo fmt --all -- --check` | 本机 + CI |
 
@@ -205,12 +206,26 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
   （`cargo +1.95 check --workspace --all-targets`，本机 Windows GNU）；CI 用 stable 构建，
   另有 msrv job 防止无意中使用更新语法。Node 要求见 `package.json` 的 `engines`；
   pnpm 版本由 `packageManager` 固定（12.21.0），安装只在仓库根执行。
-- 已知限制：`cargo test -p workbuddy-shift-desktop` 在部分 Windows GNU 环境启动即
-  `STATUS_ENTRYPOINT_NOT_FOUND`（CI 在 macOS 跑）；companion-desktop 的 macOS/ObjC 测试本地不可跑。
+- 已知限制（Windows GNU 测试产物）：`cargo test -p workbuddy-shift-desktop` 在部分 Windows GNU
+  环境下启动即 `STATUS_ENTRYPOINT_NOT_FOUND`。**根因**是 windows-gnu 的测试产物没有链接
+  comctl32 v6 的应用清单，而 `muda` 静态导入了 `TaskDialogIndirect`——该符号只在
+  comctl32 **v6**（SideBySide 清单激活）里存在，`System32` 下的 v5 没有它，于是加载期就失败。
+  **本机绕过**（仅用于验证，不入库）：给 test 产物嵌一个 comctl32 v6 清单，或临时把导入名
+  补丁成 `TaskDialogIndirect@…` 之外的可用符号。**CI 覆盖**：同一批测试在 macOS 上正常执行，
+  本轮已在上述绕过下跑通 58 个 desktop lib 测试（含 `smoke/tests.rs` 的闸门矩阵、日志序列化、
+  退出码映射）。companion-desktop 的 macOS/ObjC 测试本地不可跑，同理交给 CI。
+
 - 版本单一来源：根 `Cargo.toml` 的 `[workspace.package] version`；用 `scripts/bump-version.sh`
   统一 bump，用 `scripts/check-versions.mjs` 校验；tag 版本必须与之一致。
 - 发布产物名由 `productName` 决定（macOS `<productName>.app`、Windows
   `<productName>_<version>_<arch>-setup.exe`）；不要按旧 slug 写死路径。
+- **发版后验收**（`release-smoke.yml`，与发版解耦、不为 PR 提供门禁）：`release: published`
+  之后自动跑，结论写在 Release 正文的 `<!-- release-smoke:begin -->` 区块（首行
+  `**结论：PASS|FAIL|BLOCKED**`）+ 失败时开 `release-smoke` label 的 issue；某格 ⛔
+  （`blocked`，托管 runner 无桌面会话等环境限制）**既不算通过也不算失败**，要看区块里的
+  原因说明；失败类别 A–J 的含义见 `docs/release-smoke.md`。重跑用
+  `gh workflow run release-smoke.yml -f tag=vX.Y.Z -f dry_run=true`（`dry_run` 时零处置）。
+
 - 不提交、不推送、不建 PR/Release/Tag、不 npm publish，除非用户明确要求；CI 覆盖矩阵见
   `docs/DEVELOPMENT.md`。
 
@@ -220,6 +235,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 | --- | --- |
 | `docs/ARCHITECTURE.md` | 分层/模块职责、依赖方向、API 双通道、数据存储、权限边界、长文件豁免表 |
 | `docs/DEVELOPMENT.md` | 环境、开发命令、验证矩阵、CI 门禁、发版与 npm 流程 |
+| `docs/release-smoke.md` | 发版后验收：跑什么、怎么读结论区块与 ⛔、失败类别 A–J 与处置闸门、演练办法 |
 | `docs/docker.md` | Docker 形态：镜像构建、数据卷、局域网/反代访问、UID/GID、已知限制与安全须知 |
 | `docs/companion.md` | 内置悬浮窗的模块、构建、运行时标识、用户目录、演示桥 |
 | `scripts/README.md` | 一键启动/停止、构建/打包/图标/诊断脚本索引 |

@@ -240,6 +240,10 @@ pub fn run() {
                     app.handle(),
                     tray::is_silent_startup(std::env::args()),
                 );
+                // 发版后验收专用：`--smoke-self-update` + `WB_SHIFT_SMOKE_SELF_UPDATE=1`
+                // 双闸门满足时后台跑一遍真实的应用内升级（仅 CI 使用，不进任何用户文档）。
+                // 闸门不满足时 `maybe_spawn` 的第一条语句即返回，默认启动零行为变化。
+                update_service::maybe_spawn(app.handle());
             }
             // README 截图模式只渲染前端虚构数据，禁止读取账号后执行签到、轮换或保活。
             if !is_screenshot_demo() {

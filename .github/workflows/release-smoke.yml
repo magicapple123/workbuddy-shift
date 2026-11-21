@@ -1,0 +1,396 @@
+name: release-smoke
+
+# 发版后验收（Release Smoke）。设计见 delivery/design-release-smoke.md；
+# 运维手册 docs/release-smoke.md 由 T05 补齐（怎么读结论 / 类别含义 / 手动重跑 / dry-run）。
+#
+# 与 build.yml / test.yml **完全解耦**：本 workflow 不产出发布物、不写源码、不改 tag；
+# 只读 Release、跑验收、把结论写回 Release 正文的标记区块（T05 接线）。
+#
+# 当前进度：
+#   - preflight          ✅ T01（scripts/smoke/preflight.py）
+#   - 5 个验收 job       ✅ T03（win / mac / linux）+ T04（npm / docker）
+#   - triage             ✅ T05（classify → dispose → render --matrix → 写回 → issue）
+#
+# 每个验收 job 的形态固定为三步，缺一不可：
+#   1. `driver`：**恒 exit 0**，把每个断言写成 `artifacts/release-smoke/<form>.json` 的一格；
+#   2. `Gate`：读该 JSON 判定（任一 `fail` → 本 job 红；`blocked` 只告警），`if: always()`
+#      ——driver 崩了也要在这里红，而不是「静默跳过」；
+#   3. 上传 artifact：`if: always()`，triage 靠它拉结果。
+# 为什么不是「一个断言一个 step」：单格失败不能让后续格不出结果，否则矩阵永远缺格（设计 §2.2）。
+#
+# 关于 `dry_run`：它只关掉 **triage 里的自动处置与开 issue**（设计 §4.3 / §8.2 第 5 条），
+# **不关**验收 job —— `gh workflow run release-smoke.yml -f tag=v0.2.5 -f dry_run=true`
+# 正是设计里的「演练触发」路径，也是 T03/T04 的验收方式。若把验收 job 也关掉，
+# 演练就永远看不到真实结果，dry_run 会变成「什么都不验」。
+#
+# 演练下仍然发生的两件事（都是**有意**的，见 docs/release-smoke.md）：
+#   1. 写回 Release 正文的结论区块——幂等（整块替换）且可删，演练看不到区块就等于没演练；
+#   2. 上传 artifact。
+# 演练下**不会**发生的：`dispose.py` 的 gh 处置（`--dry-run`，连只读的 job 定位都不做）
+# 与 `issue.sh`（步骤 `if` 带 `inputs.dry_run != true`）。
+
+# 只在「正式版发布」后验收：draft 不会触发 published；prerelease 由 preflight 的 if 拦掉。
+# 本 workflow 必须在**默认分支**上才有 release 事件可触发（发布 checklist 项）。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要验收的 tag（如 v0.2.5）'
+        required: true
+        type: string
+      dry_run:
+        description: '只跑验收，不执行任何自动处置'
+        required: false
+        type: boolean
+        default: false
+
+# 最小权限：改 Release 正文 / 开 issue / 重跑或 dispatch 其它 workflow / 读 GHCR。
+permissions:
+  contents: write      # gh release view / edit（写回结论区块）
+  issues: write        # gh issue create / comment（E/F/G/H/I 类）
+  actions: write       # gh run rerun / gh workflow run（A/B/C/D 类处置）
+  packages: read       # 预检探测 ghcr.io manifests；容器 job 拉私有镜像也要它
+
+# 同 tag 只保留 1 个验收 run（新的取消旧的）；不同 tag 互不阻塞。
+concurrency:
+  group: release-smoke-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: true
+
+env:
+  # v0.2.5（release 事件）或 workflow_dispatch 的 inputs.tag
+  SMOKE_VERSION: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_REPO: ${{ github.repository }}
+  # 结果 JSON 的固定落点（契约见 scripts/smoke/common.py）
+  SMOKE_RESULT_DIR: artifacts/release-smoke
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 预检：能不能验？版本 / Release / 资产 / 上一版 tag / GHCR
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    # published 事件对 prerelease 也会发；PRD P0-1 要求只验正式版。
+    # preflight.py 里还有第二道（tag 后缀 + Release.prerelease），供 workflow_dispatch 演练时同样受约束。
+    if: ${{ !github.event.release.prerelease }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prev_version: ${{ steps.v.outputs.prev_version }}
+      has_prev: ${{ steps.v.outputs.has_prev }}
+      # `true` / `false` / 空串（未知）。只有字符串 `false` 会让 Windows 升级格标 skipped：
+      # 历史回填时更新器端点固定 releases/latest，无法定向升级到老 tag。
+      is_latest: ${{ steps.v.outputs.is_latest }}
+      ok: ${{ steps.v.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要完整 tag 历史：上一版 tag 由 `git tag --sort=-v:refname` 取。
+          fetch-depth: 0
+          fetch-tags: true
+      - name: 预检（tag / 版本一致性 / 资产清单 / 上一版 / GHCR）
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/smoke/preflight.py \
+            --tag "$SMOKE_VERSION" \
+            --repo "$GH_REPO" \
+            --out "$SMOKE_RESULT_DIR/preflight.json"
+      - name: 上传 preflight.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-preflight
+          path: ${{ env.SMOKE_RESULT_DIR }}/preflight.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 5 个验收 job：并行、互不阻塞（矩阵必须完整，任一失败其余照跑）
+  # 条件统一为「preflight 判定可以验」：`needs: preflight` 已隐含「preflight 成功」，
+  # 这里再要求 `ok == 'true'` 是为了把「预检发现资产缺失」的 run 直接跳过验收（省 runner）。
+  # ---------------------------------------------------------------------------
+  desktop-windows:
+    name: desktop-windows
+    needs: preflight
+    runs-on: windows-latest
+    # 有意放宽到 15 min（PRD P2-1 要求 10 min）：in-app 升级含下载 + NSIS 安装，见设计 R4。
+    timeout-minutes: 15
+    if: ${{ needs.preflight.outputs.ok == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验收驱动（恒 exit 0）
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 历史回填：`false` 时升级格标 skipped（更新器端点固定 releases/latest，无法定向升级）。
+          # 空串 = 未知，driver 按 true 处理（照旧跑）。
+          SMOKE_IS_LATEST: ${{ needs.preflight.outputs.is_latest }}
+        run: |
+          pwsh -NoProfile -File scripts/smoke/win/driver.ps1 `
+            -Version "${{ needs.preflight.outputs.version }}" `
+            -PrevVersion "${{ needs.preflight.outputs.prev_version }}" `
+            -Out "$env:SMOKE_RESULT_DIR/windows.json"
+      - name: Gate（读结果 JSON 判定）
+        if: always()
+        shell: pwsh
+        run: |
+          # windows-latest 上 python3 与 python 都存在，但不要赌：按可用性挑一个。
+          $py = 'python'
+          if (Get-Command python3 -ErrorAction SilentlyContinue) { $py = 'python3' }
+          & $py scripts/smoke/render-conclusion.py --gate "$env:SMOKE_RESULT_DIR/windows.json"
+      - name: 上传结果与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-windows
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  desktop-macos:
+    name: desktop-macos
+    needs: preflight
+    # macos-latest = arm64；x86_64 非目标（设计 D1），矩阵里记 skipped。
+    runs-on: macos-latest
+    timeout-minutes: 12
+    if: ${{ needs.preflight.outputs.ok == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验收驱动（恒 exit 0）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/smoke/mac/driver.sh \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --prev "${{ needs.preflight.outputs.prev_version }}"
+      - name: Gate（读结果 JSON 判定）
+        if: always()
+        run: |
+          python3 scripts/smoke/render-conclusion.py --gate "$SMOKE_RESULT_DIR/macos.json"
+      - name: 上传结果与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-macos
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  desktop-linux:
+    name: desktop-linux
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: ${{ needs.preflight.outputs.ok == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验收驱动（恒 exit 0）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/smoke/linux/driver.sh \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --prev "${{ needs.preflight.outputs.prev_version }}"
+      - name: Gate（读结果 JSON 判定）
+        if: always()
+        run: |
+          python3 scripts/smoke/render-conclusion.py --gate "$SMOKE_RESULT_DIR/linux.json"
+      - name: 上传结果与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-linux
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  npm-cli:
+    name: npm-cli
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    if: ${{ needs.preflight.outputs.ok == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 准备 Node 22（设计 §4.2 的运行时）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 验收驱动（恒 exit 0）
+        env:
+          # 只连官方源；镜像源的同步延迟会把「缺包」伪装成「网络抖动」。
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+        run: |
+          bash scripts/smoke/npm/driver.sh \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --prev "${{ needs.preflight.outputs.prev_version }}" \
+            --registry https://registry.npmjs.org
+      - name: Gate（读结果 JSON 判定）
+        if: always()
+        run: |
+          python3 scripts/smoke/render-conclusion.py --gate "$SMOKE_RESULT_DIR/npm.json"
+      - name: 上传结果与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-npm
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  container-docker:
+    name: container-docker
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    if: ${{ needs.preflight.outputs.ok == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验收驱动（恒 exit 0）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/smoke/docker/driver.sh \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --image "ghcr.io/${{ github.repository }}"
+      - name: Gate（读结果 JSON 判定）
+        if: always()
+        run: |
+          python3 scripts/smoke/render-conclusion.py --gate "$SMOKE_RESULT_DIR/docker.json"
+      - name: 上传结果与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-docker
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 汇总处置：归类 → 处置（≤3）→ 结论写回 → issue
+  #
+  # 顺序要求（设计 R5）：dispose → render → update-release-note，**最后一步恒为重写区块**，
+  # 因为 D 类处置会重跑 build.yml 的 release job 并以 body_path 整篇覆盖正文。
+  #
+# 每一步都 `if: always()` / `continue-on-error`：**有失败才最需要写回结论**。
+# `inputs.dry_run` 只影响 dispose（`--dry-run`）与 issue 步骤（不开 issue），不影响验收 job
+# （见文件头说明）。
+  # ---------------------------------------------------------------------------
+  triage:
+    name: triage
+    needs: [preflight, desktop-windows, desktop-macos, desktop-linux, npm-cli, container-docker]
+    # 任何一个验收 job 红/被跳过都要跑：结论区块是给人看的唯一入口。
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      # gh CLI 只认 GH_TOKEN / GITHUB_TOKEN 环境变量；permissions 里已给了 write。
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取全部验收结果（smoke-*）
+        # 业务步骤统一要求「预检通过」：preflight 自己红掉（资产缺失）或 prerelease 被跳过时
+        # 没有可比的结果，硬跑只会写出一堆「形态缺失」的假 FAIL。job 级的 `always()` 保证
+        # triage 本身一定会被调度（不会「静默跳过」），这里只是不做无意义的事。
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          # 各 job 上传的是 `artifacts/`（内含 release-smoke/<form>.json），preflight 上传的是
+          # `artifacts/release-smoke/preflight.json`。merge-multiple 后两者根目录不同，
+          # 所以下一步把 preflight.json 归一化到 artifacts/release-smoke/。
+          pattern: smoke-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: 归一化结果目录
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        run: |
+          mkdir -p "$SMOKE_RESULT_DIR"
+          if [ -f artifacts/preflight.json ] && [ ! -f "$SMOKE_RESULT_DIR/preflight.json" ]; then
+            cp artifacts/preflight.json "$SMOKE_RESULT_DIR/preflight.json"
+          fi
+          ls -la "$SMOKE_RESULT_DIR" || true
+
+      - name: 归类（A–J → triage-plan.json）
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        run: |
+          python3 scripts/smoke/classify.py \
+            --results "$SMOKE_RESULT_DIR" \
+            --preflight "$SMOKE_RESULT_DIR/preflight.json" \
+            --tag "$SMOKE_VERSION" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --out "$SMOKE_RESULT_DIR/triage-plan.json"
+
+      - name: 处置（白名单动作 · ≤3 · attempt 闸门）
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        # 处置失败（gh 403 / 定位不到 build job）不该让 triage 崩：它会进 dispose.json 的
+        # unresolved，由最后一步升级成 issue。
+        continue-on-error: true
+        run: |
+          extra=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then extra="--dry-run"; fi
+          python3 scripts/smoke/dispose.py \
+            --plan "$SMOKE_RESULT_DIR/triage-plan.json" \
+            --out "$SMOKE_RESULT_DIR/dispose.json" \
+            --tag "$SMOKE_VERSION" \
+            --repo "$GH_REPO" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            $extra
+
+      - name: 结论矩阵（写 step summary + conclusion.md）
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        # 有 fail 时它 exit 1（与 --gate 一致），但后面还要写回 Release，所以不能中断。
+        continue-on-error: true
+        run: |
+          python3 scripts/smoke/render-conclusion.py \
+            --matrix "$SMOKE_RESULT_DIR/windows.json" "$SMOKE_RESULT_DIR/macos.json" \
+              "$SMOKE_RESULT_DIR/linux.json" "$SMOKE_RESULT_DIR/npm.json" \
+              "$SMOKE_RESULT_DIR/docker.json" \
+            --preflight "$SMOKE_RESULT_DIR/preflight.json" \
+            --tag "$SMOKE_VERSION" \
+            --out "$SMOKE_RESULT_DIR/conclusion.md"
+
+      - name: 写回 Release 正文（幂等区块）
+        # `dry_run` 下**照旧写回**（设计 §7.2：整块替换，幂等且可删；演练要看的就是区块）。
+        # 唯一被 dry_run 关掉的是 dispose（`--dry-run`）与 issue（下一步的 if）。
+        if: ${{ needs.preflight.outputs.ok == 'true' }}
+        continue-on-error: true
+        run: |
+          bash scripts/smoke/update-release-note.sh \
+            --tag "$SMOKE_VERSION" \
+            --conclusion "$SMOKE_RESULT_DIR/conclusion.md" \
+            --dispatch "$SMOKE_RESULT_DIR/dispose.json" \
+            --repo "$GH_REPO"
+
+      - name: 需要人工介入的失败 → issue（同 tag 合并）
+        # dry_run 是「演练」：只跑验收 + 出结论，**不动仓库里的任何状态**（不开 issue）。
+        # 注意：上一步「写回 Release 正文」**有意不加** dry_run 条件——它是幂等的标记区块，
+        # 写错了删区块即可恢复；演练看不到结论区块，就等于没演练（docs/release-smoke.md）。
+        if: ${{ needs.preflight.outputs.ok == 'true' && inputs.dry_run != true }}
+        continue-on-error: true
+        run: |
+          prev="${{ needs.preflight.outputs.prev_version }}"
+          bash scripts/smoke/issue.sh \
+            --tag "$SMOKE_VERSION" \
+            --plan "$SMOKE_RESULT_DIR/triage-plan.json" \
+            --dispose "$SMOKE_RESULT_DIR/dispose.json" \
+            --repo "$GH_REPO" \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --prev "$prev"
+
+      - name: 上传 triage 产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-triage
+          path: artifacts/release-smoke/
+          retention-days: 30
+          if-no-files-found: warn

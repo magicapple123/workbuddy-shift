@@ -21,7 +21,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const problems = [];
 
-const SOURCE_EXTS = new Set([".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs"]);
+// `.py` 也算手写源码：`scripts/smoke/` 下的 Python（契约 / 预检 / 渲染 / 归类 / 处置）
+// 是本轮新增的**生产脚本**，不登记就没有任何规模约束（曾经 6 个文件、共 ~4900 行全在门槛外）。
+const SOURCE_EXTS = new Set([".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"]);
 const TEXT_EXTS = new Set([
   ...SOURCE_EXTS,
   ".json",
