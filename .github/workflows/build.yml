@@ -587,6 +587,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/check-release-assets.py "$GITHUB_REF_NAME"
 
+      # docker.yml 由同一个 tag **并行**触发，镜像通常比本 job 晚 10–25 分钟才推上去。
+      # 不等就派发验收，docker 形态会拿到 C（pull 失败）并白烧一次 C 类处置（v0.2.6 实测踩到：
+      # Release 20:54 转正、验收 20:57 开跑，镜像还在构建，docker 全红并开了 issue）。
+      - name: Wait for container image
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 60); do
+            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+              echo "镜像已就绪：$IMAGE（等待 $((i * 20 - 20))s）"
+              exit 0
+            fi
+            echo "等待镜像（$i/60）：$IMAGE"
+            sleep 20
+          done
+          echo "::warning::等待 20 分钟仍未看到 $IMAGE，仍会派发验收（docker 形态将记 C）"
+
       # 必须显式派发：GitHub 的防递归规则下，用 GITHUB_TOKEN 造成的 release:published
       # **不会**触发新的 workflow run（只有人工/第三方发布才会）。v0.2.6 首次发版即踩到：
       # Release 正常转正，但 release-smoke 一条都没跑。

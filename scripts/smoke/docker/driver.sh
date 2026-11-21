@@ -148,19 +148,37 @@ smoke_endgroup
 # K1：pull `:<version>` 与 `:latest`，digest 必须相同
 # ---------------------------------------------------------------------------
 smoke_group "K1 docker pull"
+# 镜像刚推上去时 registry 传播 + 网络抖动都可能让首次 pull 404/超时。
+# 给一个短重试窗口（6×20s）：既不会把「还差几十秒」记成 C 类并白烧一次处置，
+# 也不会把真正缺失的镜像无休止地等下去（3 分钟后再失败，证据里能看到 6 次尝试）。
+pull_with_retry() { # $1=image $2=log
+  _attempt=1
+  while [ "${_attempt}" -le 6 ]; do
+    if docker pull "$1" >"$2" 2>&1; then
+      return 0
+    fi
+    if [ "${_attempt}" -lt 6 ]; then
+      printf '[smoke] pull %s 失败（第 %s/6 次），20s 后重试\n' "$1" "${_attempt}" >>"$2"
+      sleep 20
+      _attempt=$((_attempt + 1))
+      continue
+    fi
+    return 1
+  done
+}
 PULL_VERSIONED_OK="no"
 PULL_LATEST_OK="no"
-if docker pull "${VERSIONED}" >"${EVID}/pull-versioned.log" 2>&1; then
+if pull_with_retry "${VERSIONED}" "${EVID}/pull-versioned.log"; then
   PULL_VERSIONED_OK="yes"
   smoke_pass pull "docker pull ${VERSIONED}"
 else
-  smoke_fail pull C "docker pull ${VERSIONED}" "manifest 缺失或网络失败，见 pull-versioned.log"
+  smoke_fail pull C "docker pull ${VERSIONED}" "manifest 缺失或网络失败（已重试 6 次），见 pull-versioned.log"
 fi
-if docker pull "${LATEST}" >"${EVID}/pull-latest.log" 2>&1; then
+if pull_with_retry "${LATEST}" "${EVID}/pull-latest.log"; then
   PULL_LATEST_OK="yes"
   smoke_pass pull "docker pull ${LATEST}"
 else
-  smoke_fail pull C "docker pull ${LATEST}" "manifest 缺失或网络失败，见 pull-latest.log"
+  smoke_fail pull C "docker pull ${LATEST}" "manifest 缺失或网络失败（已重试 6 次），见 pull-latest.log"
 fi
 
 if [ "${PULL_VERSIONED_OK}" = "yes" ] && [ "${PULL_LATEST_OK}" = "yes" ]; then
