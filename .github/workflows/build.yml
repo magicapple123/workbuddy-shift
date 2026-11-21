@@ -526,6 +526,9 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_APP != 'false'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 建 draft / 上传资产 / 转正
+      actions: write    # 派发 release-smoke（原因见下方 Dispatch 步骤的注释）
     steps:
       - uses: actions/checkout@v4
 
@@ -583,3 +586,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/check-release-assets.py "$GITHUB_REF_NAME"
+
+      # 必须显式派发：GitHub 的防递归规则下，用 GITHUB_TOKEN 造成的 release:published
+      # **不会**触发新的 workflow run（只有人工/第三方发布才会）。v0.2.6 首次发版即踩到：
+      # Release 正常转正，但 release-smoke 一条都没跑。
+      - name: Dispatch release-smoke
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release-smoke.yml -f tag="$GITHUB_REF_NAME" -f dry_run=false
+          echo "已派发 release-smoke：$GITHUB_REF_NAME"

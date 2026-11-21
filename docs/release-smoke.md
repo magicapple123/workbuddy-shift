@@ -3,6 +3,11 @@
 `release: published` 之后自动跑的一条独立 workflow（`.github/workflows/release-smoke.yml`），
 回答一个问题：**刚发出去的这一版，用户真的装得上、升得动、起得来吗？**
 
+> **它是怎么被触发的**：`build.yml` 的 `release` job 在转正并校验资产后，**显式**执行
+> `gh workflow run release-smoke.yml -f tag=<tag>`。不能只靠 `release: published` 事件：
+> GitHub 的防递归规则规定，用 `GITHUB_TOKEN` 造成的事件**不会**触发新的 workflow run
+> （v0.2.6 首次发版踩到：Release 正常转正，验收一条没跑）。人工在网页/CLI 发布仍会走事件。
+
 它和发版流程**完全解耦**：
 
 - 独立 workflow 文件、独立 run id，不挂在 `build.yml` / `test.yml` 里；

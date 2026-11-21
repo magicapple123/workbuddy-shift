@@ -257,13 +257,30 @@ NODEJS
 
 # npm pack 的包装：输出落到 --pack-destination 的 tarball 绝对路径。
 # 用 --json 取文件名，避免把 npm notice 输出误当成文件名。
+#
+# 重试：本脚本紧跟在 publish-main 之后跑，主包刚发到 npmjs 时 registry 还没传播完，
+# `npm pack workbuddy-shift@X` 会报 `ETARGET / notarget`（v0.2.6 首次踩到，整个
+# mirror job 变红）。这属于**时间差**而不是包缺失，所以对 ETARGET 做有界重试；
+# 其它错误（404 之外的鉴权/网络）仍立刻失败，不要用重试掩盖真实问题。
 pack() { # $1 = 包 spec 或本地目录, $2 = 目的目录
-  if ! npm pack "$1" --pack-destination "$2" --registry="$NPM_REGISTRY" \
-    --json >"$TMP/pack.json" 2>"$TMP/pack.log"; then
+  attempt=1
+  max_attempts=8
+  while :; do
+    if npm pack "$1" --pack-destination "$2" --registry="$NPM_REGISTRY" \
+      --json >"$TMP/pack.json" 2>"$TMP/pack.log"; then
+      break
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && grep -q "notarget" "$TMP/pack.log"; then
+      printf '[publish-github-packages] %s 尚未在 npmjs 可见（ETARGET），%ss 后重试（%s/%s）\n' \
+        "$1" 15 "$attempt" "$max_attempts" >&2
+      attempt=$((attempt + 1))
+      sleep 15
+      continue
+    fi
     err "npm pack 失败: $1"
     sed 's/^/    /' "$TMP/pack.log" >&2
     exit 1
-  fi
+  done
   filename=$(node -e '
     const fs = require("fs");
     const list = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
