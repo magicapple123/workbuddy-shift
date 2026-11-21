@@ -69,10 +69,18 @@ export SMOKE_RESULT_FILE
 . "${DRIVER_DIR}/../common.sh"
 
 WORK=$(smoke_workdir)
-EVID="${WORK}/evidence"
-mkdir -p "${EVID}"
+# 证据落在结果 JSON 旁边（`artifacts/release-smoke/evidence/docker/`）：workflow 上传的是
+# 仓库内的 `path: artifacts/`，放 RUNNER_TEMP 的 container.log / volume-write.log 不会被上传
+# （过去 detail 写着「见 volume-write.log」，artifact 里却只有 JSON）。
+EVID=$(smoke_evidence_dir docker)
 VOLUME_DIR="${WORK}/volume"
 mkdir -p "${VOLUME_DIR}"
+# 容器按设计以 uid 1000 运行（Dockerfile 的 `USER app`，uid/gid 都是 1000），而宿主目录由
+# runner 的用户创建、默认 0755 → 容器里的 1000 既不是 owner 也不在 group，写不进去
+# （run 44941972411 的 volume=I）。这是**驱动的准备步骤**缺失，不是产品缺陷：CI 的临时目录，
+# 直接把权限放开。
+chmod 0777 "${VOLUME_DIR}"
+ls -ld "${VOLUME_DIR}" >"${EVID}/volume-dir.txt" 2>&1 || true
 NAME="release-smoke-$$-$(date +%s)"
 CREATED=""
 
@@ -295,14 +303,29 @@ smoke_group "K6 数据卷"
 if [ -z "${CREATED}" ]; then
   smoke_skip volume "容器写 /data/vol 后宿主可读" "容器未运行"
 else
-  if docker exec "${NAME}" sh -c 'echo ok > /data/vol/probe.txt' >"${EVID}/volume-write.log" 2>&1; then
+  _wlog="${EVID}/volume-write.log"
+  if docker exec "${NAME}" sh -c 'echo ok > /data/vol/probe.txt' >"${_wlog}" 2>&1; then
     if [ -f "${VOLUME_DIR}/probe.txt" ] && [ "$(cat "${VOLUME_DIR}/probe.txt" 2>/dev/null | tr -d '\r\n')" = "ok" ]; then
       smoke_pass volume "容器写 /data/vol/probe.txt 且宿主可读（内容 ok）"
     else
-      smoke_fail volume I "容器写的数据宿主可读" "宿主 ${VOLUME_DIR}/probe.txt 不存在或内容不符"
+      smoke_fail volume I "容器写的数据宿主可读" "宿主 ${VOLUME_DIR}/probe.txt 不存在或内容不符，见 evidence/docker/volume-write.log"
     fi
   else
-    smoke_fail volume I "容器内写 /data/vol/probe.txt" "见 volume-write.log（卷权限/uid 对齐问题）"
+    # 失败必须能自证「是谁没权限」：容器内 uid/gid、挂载点权限、宿主目录权限、touch 的 stderr
+    # 一起落到同一份 evidence（过去 detail 只说「见 volume-write.log」，而那个文件没有上传）。
+    {
+      printf '\n--- 现场（写入失败时补采） ---\n'
+      printf '## docker exec id\n'
+      docker exec "${NAME}" id 2>&1 || true
+      printf '## docker exec ls -ld /data/vol\n'
+      docker exec "${NAME}" ls -ld /data/vol 2>&1 || true
+      printf '## 宿主卷目录\n'
+      ls -ld "${VOLUME_DIR}" 2>&1 || true
+    } >>"${_wlog}" 2>&1
+    _uid_line=$(docker exec "${NAME}" id 2>/dev/null | tr -d '\r\n' || true)
+    _ls_line=$(docker exec "${NAME}" ls -ld /data/vol 2>/dev/null | tr -d '\r\n' || true)
+    smoke_fail volume I "容器内写 /data/vol/probe.txt" \
+      "id=${_uid_line:-读不到} · /data/vol=${_ls_line:-读不到} · touch 的 stderr 与宿主权限见 evidence/docker/volume-write.log"
   fi
 fi
 smoke_endgroup

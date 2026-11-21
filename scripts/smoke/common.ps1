@@ -12,7 +12,7 @@ release-smoke 的 **PowerShell 侧薄封装**（被 `win/driver.ps1` dot-source�
 |---|---|
 | 结果契约 | `Add-Cell` / `Set-ResultField` / `Write-Evidence` / `Invoke-Guarded` |
 | 进程 | `Get-ProcessAlive` / `Wait-ProcessExit` / `Stop-AllAppProcesses` |
-| 版本 | `Read-InstalledVersion`（转发 `win/read-version.ps1` 的双读） |
+| 版本 | `Read-InstalledVersion`（转发 `win/read-version.ps1` 的双读）/ `Compare-VersionNumber`（按数字段的语义化比较） |
 | 环境判定 | `Test-SessionZero` / `Test-WebView2Installed` / `Get-SmokeEnvironment` |
 | 资产 | `Get-ReleaseDigest` / `Invoke-GhDownload` |
 | 启动四元证据 | `Invoke-StartupEvidence`（20s 存活 / 单实例退出 / 落盘 / error.log） |
@@ -151,6 +151,74 @@ function Stop-AllAppProcesses {
 }
 
 # --- 版本 -------------------------------------------------------------------
+
+function Compare-VersionNumber {
+    # 语义化版本比较：返回 -1（左小）/ 0（相等）/ 1（左大）。
+    #
+    # **必须按 `.` 拆成数字再比**：字符串口径下 `'0.2.10' -lt '0.2.6'` 成立（`'1' -lt '6'`），
+    # 会把 0.2.10 误判成「早于 0.2.6」。预发布后缀（`-rc.1`）不参与本判定：钩子类的
+    # 「从哪个版本起有某个能力」只看主版本号序列（`0.2.6-rc.1` 与 `0.2.6` 视为同号）。
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+    $leftParts = @(ConvertTo-VersionParts $Left)
+    $rightParts = @(ConvertTo-VersionParts $Right)
+    $length = [Math]::Max($leftParts.Count, $rightParts.Count)
+    for ($index = 0; $index -lt $length; $index++) {
+        $x = 0
+        if ($index -lt $leftParts.Count) { $x = $leftParts[$index] }
+        $y = 0
+        if ($index -lt $rightParts.Count) { $y = $rightParts[$index] }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    return 0
+}
+
+function ConvertTo-VersionParts {
+    # `v0.2.10-rc.1` → @(0, 2, 10)。非数字段归 0（不抛异常：CI driver 不能因为脏版本号崩掉）。
+    param([string]$Version)
+    $clean = ($Version.Trim() -replace '^[vV]', '').Trim()
+    $core = ($clean -split '-')[0]
+    $parts = @()
+    foreach ($segment in ($core -split '\.')) {
+        $digits = ($segment -replace '[^0-9]', '')
+        if ([string]::IsNullOrEmpty($digits)) {
+            $parts += 0
+        }
+        else {
+            $parts += [int]$digits
+        }
+    }
+    return $parts
+}
+
+function Get-UpgradeSkipReason {
+    # 「应用内升级能不能自验」的唯一判定点（纯函数：不碰文件、不起进程，因此可单测）。
+    #
+    # `--smoke-self-update` 钩子自 `-SmokeHookSince`（0.2.6）才有：上一版低于它时，旧二进制
+    # 收到这个参数只会当普通启动（不写日志、不升级），driver 只能干等安装超时——那是**时序
+    # 约束**，不是产品缺陷。返回空串 = 照常跑升级；返回非空 = 升级链路的三个格写这个理由。
+    param(
+        [string]$PrevVersion = '',
+        [string]$SmokeHookSince = '0.2.6'
+    )
+    if ([string]::IsNullOrWhiteSpace($PrevVersion)) {
+        return '没有上一版，升级格不适用'
+    }
+    if ((Compare-VersionNumber $PrevVersion $SmokeHookSince) -ge 0) {
+        return ''
+    }
+    # 「真正生效的版本」= 钩子版本的下一个补丁号：那一版的「上一版」才带钩子。
+    $parts = @(ConvertTo-VersionParts $SmokeHookSince)
+    $effective = $SmokeHookSince
+    if ($parts.Count -ge 3) {
+        $effective = "$($parts[0]).$($parts[1]).$($parts[2] + 1)"
+    }
+    return ("上一版 v$PrevVersion 不含 --smoke-self-update（钩子自 $SmokeHookSince 起才有），" +
+        "本版无法自验应用内升级；从 $effective 起生效（届时上一版 $SmokeHookSince 带钩子）")
+}
 
 function Read-InstalledVersion {
     param(

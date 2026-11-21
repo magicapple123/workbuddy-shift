@@ -25,6 +25,13 @@ driver 用「装完后的版本号」作证，并用 `assert-update-log.py` 断�
 3. `WB_SHIFT_SMOKE_LOG` 必须是**绝对路径**（相对路径会被 App 的工作目录解释成别处）；
 4. Windows 退出码不可依赖（见上）。
 
+一个时序约束（不是缺陷，勿「修」成 fail）
+------------------------------------------
+`--smoke-self-update` 钩子自 **0.2.6** 才有。上一版低于它时，旧二进制只会当普通启动
+（不写日志、不升级），driver 只能干等安装超时（实测 9 分钟）。此时升级 / 自更新日志 /
+升级后版本三格标 `skipped`、**不启动升级进程**；启动三格照常跑。**从 0.2.7 起**（上一版
+0.2.6 带钩子）才真正有效。
+
 .PARAMETER Version
 目标版本（0.2.5，可带 v 前缀）。
 
@@ -61,6 +68,11 @@ if (-not [string]::IsNullOrWhiteSpace($PrevVersion)) {
     $PrevNorm = ($PrevVersion.Trim() -replace '^[vV]', '').Trim()
 }
 
+# 首个包含 `--smoke-self-update` 钩子的版本（设计 §3.1 的 `update_service/smoke.rs` 随 0.2.6
+# 才进来）。上一版低于它 → 旧二进制不认这个参数，应用内升级**无法自验**（见 §3 的闸门）。
+# 语义化比较用 common.ps1 的 Compare-VersionNumber（按 `.` 拆数字，不能字符串比大小）。
+$SmokeHookSince = '0.2.6'
+
 $script:FailCount = 0
 $script:StepNo = 0
 # 跨步骤共享的状态先显式置空：PowerShell 不会因为「引用未定义变量」报错，
@@ -94,7 +106,10 @@ $WorkBase = $env:RUNNER_TEMP
 if ([string]::IsNullOrWhiteSpace($WorkBase)) { $WorkBase = [System.IO.Path]::GetTempPath() }
 $WorkDir = Join-Path $WorkBase ('release-smoke-win-' + ([guid]::NewGuid().ToString('N').Substring(0, 8)))
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
-$EvidenceDir = Join-Path $WorkDir 'evidence'
+# 证据落在**结果 JSON 旁边**（`artifacts/release-smoke/evidence/windows/`）：workflow 上传的是
+# 仓库内的 `path: artifacts/`，放 RUNNER_TEMP 的日志从来没进过 artifact——多个 detail 写着
+# 「见 xxx.log」，artifact 里却只有一份 JSON（run 44941972411 的现场）。
+$EvidenceDir = Join-Path (Split-Path -Parent $ResultPath) 'evidence\windows'
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($Repo)) {
@@ -269,6 +284,19 @@ $script:UpgradeSkip = ''
 if ($env:SMOKE_IS_LATEST -eq 'false') {
     $script:UpgradeSkip = "历史回填：更新器端点固定 releases/latest，无法定向升级到 v$VersionNorm"
 }
+elseif ($PrevNorm) {
+    # 第二个闸门是**时序约束**（run 44941972411 现场）：`--smoke-self-update` 钩子是随本版
+    # 才进来的，上一版二进制里没有它 → 收到这个参数只会当普通启动（隐藏窗口跑着，不写日志、
+    # 不升级），driver 只能干等安装超时（实测 9 分钟才强杀）。判定收在
+    # `Get-UpgradeSkipReason`（纯函数，可单测）：上一版 < $SmokeHookSince 时三个格标 skipped，
+    # 且**根本不启动升级进程**；启动三格照跑（它们不依赖钩子）。
+    # `$PrevNorm` 为空（首次发版）时故意不进这里：那条路径由升级格自己的「没有上一版」分支
+    # 处理，文案更贴合，也不必为它多打一行 notice。
+    $script:UpgradeSkip = Get-UpgradeSkipReason -PrevVersion $PrevNorm -SmokeHookSince $SmokeHookSince
+    if ($script:UpgradeSkip) {
+        Write-Output "::notice::升级链路的三个格标 skipped：$($script:UpgradeSkip)"
+    }
+}
 
 Invoke-Guarded -Action 'upgrade' -Assertion "从 $PrevNorm 走应用内更新升到 $VersionNorm" -Category 'E' -Body {
     if ($script:UpgradeSkip) {
@@ -342,6 +370,10 @@ Invoke-Guarded -Action 'upgrade' -Assertion '自更新日志阶段序列齐全�
             -Detail "日志不存在：$UpdateLog（闸门不满足或 WB_SHIFT_SMOKE_LOG 不可写）"
         return
     }
+    # 证据必须落在 artifact 里：日志与断言报告原本写在 RUNNER_TEMP（workflow 上传不到），
+    # 拷一份进 `evidence/windows/` 再引用——否则 detail 里写的「见 xxx」是查不到的。
+    $logEvidence = Write-Evidence -Name 'smoke-self-update.jsonl' `
+        -Text ((Get-Content -LiteralPath $UpdateLog -Raw -ErrorAction SilentlyContinue) + '')
     $reportPath = Join-Path $WorkDir 'update-log.json'
     $assertArgs = @($AssertLog, $UpdateLog, '--target', $VersionNorm, '--json', '--out', $reportPath)
     if ($PrevNorm) { $assertArgs += @('--expect-current', $PrevNorm) }
@@ -361,12 +393,14 @@ Invoke-Guarded -Action 'upgrade' -Assertion '自更新日志阶段序列齐全�
         return
     }
     $phases = ($report.phases -join '→')
+    $reportEvidence = Write-Evidence -Name 'update-log.json' `
+        -Text ((Get-Content -LiteralPath $reportPath -Raw -ErrorAction SilentlyContinue) + '')
     if ($report.ok) {
         $extra = ''
         if ($report.notes) { $extra = ' · note=' + ($report.notes -join '; ') }
         Add-Cell -Action 'upgrade' -Status 'pass' -Assertion '自更新日志含 start→check→check_ok→download_start→download_done→install_start 且无 error' `
             -Detail ("阶段序列=$phases · 进程数=$($report.processCount) · relaunch_observed=$($script:RelaunchObserved)$extra") `
-            -Evidence @($UpdateLog, $reportPath)
+            -Evidence @($logEvidence, $reportEvidence)
         return
     }
     $category = 'F'
@@ -374,7 +408,7 @@ Invoke-Guarded -Action 'upgrade' -Assertion '自更新日志阶段序列齐全�
     if ($script:InstallTimedOut -and $category -eq 'F') { $category = 'E' }
     Add-Cell -Action 'upgrade' -Status 'fail' -Assertion '自更新日志阶段序列齐全、无 error 事件' `
         -Category $category -Detail ("阶段序列=$phases · " + ($report.problems -join '; ')) `
-        -Evidence @($UpdateLog, $reportPath)
+        -Evidence @($logEvidence, $reportEvidence)
 }
 
 # ===========================================================================

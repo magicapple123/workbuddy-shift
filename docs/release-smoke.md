@@ -79,7 +79,7 @@
 | `pass` | ✅ | 全部必须证据成立 | 不用 |
 | `fail` | ❌ | 存在反证，格内跟类别字母（A–J） | 要（已开 issue / 已尝试处置） |
 | `blocked` | ⛔ | **取不到证据**（托管 runner 无桌面会话等环境限制） | 人工看一眼原因；**不算通过**，但也不判产品失败 |
-| `skipped` | ⏭ | 不适用（没有上一版时的升级格、macOS x86_64 这类非目标、历史回填的升级格） | 不用 |
+| `skipped` | ⏭ | 不适用（没有上一版时的升级格、macOS x86_64 这类非目标、历史回填的升级格、上一版不含 `--smoke-self-update` 时的 Windows 升级链） | 不用 |
 
 `⛔` 不是「烂尾」：桌面 App 是 Tauri 壳，托管 runner 没有真实桌面会话，`xvfb` 下
 WebKitGTK 偶发起不来属于环境限制。设计里给了 `blocked` 的**充分条件**（进程 20s 内退出
@@ -176,7 +176,12 @@ python3 scripts/smoke/split-note.py --selftest      # 区块剥离 / 幂等
 
 ## 结果在哪
 
-- 每个验收 job 上传 `smoke-<form>` artifact（`artifacts/release-smoke/<form>.json` + 日志），保留 30 天；
+- 每个验收 job 上传 `smoke-<form>` artifact（`artifacts/release-smoke/<form>.json` +
+  `artifacts/release-smoke/evidence/<form>/` 下的日志 / 版本读取原始输出 / 现场快照），保留 30 天；
+  **证据和结果是同源的**（`smoke_evidence_dir <form>` 由结果 JSON 所在目录推出）：格子的
+  detail 里写「见 `startup.log`」「见 `volume-write.log`」时，那个文件一定在这个 artifact 里。
+  过去证据写在 runner 的临时目录里，从来没被上传（`path: artifacts/` 覆盖不到），detail 里
+  的「见 xxx.log」是查不到的；
 - `preflight` 上传 `smoke-preflight`（`preflight.json`）；
 - `triage` 上传 `smoke-triage`（`triage-plan.json` / `dispose.json` / `conclusion.md`）；
 - 每份结果 JSON 的 `logUrl` 指回该 run 的 attempt 页面——结论区块里每格都能点回原始日志。
@@ -189,6 +194,14 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
 
 ## 已知限制
 
+- **Windows「应用内升级」只在上一版已带钩子时才可自验**：`--smoke-self-update` 是 **0.2.6**
+  才引入的参数（`src-tauri/src/update_service/smoke.rs`），所以：
+  **0.2.6 自验不了应用内升级**——上一版 0.2.5 的二进制收到这个参数只会当普通启动（隐藏窗口
+  跑着，不写日志、不升级），driver 只能干等安装超时；**从 0.2.7 起生效**（届时上一版 0.2.6
+  带钩子）。driver 用常量 `$SmokeHookSince = '0.2.6'` 做**语义化**版本比较（按 `.` 拆数字，
+  `0.2.10 < 0.2.6` 这种字符串坑已避开）：上一版低于它时，**升级 / 自更新日志 / 升级后版本
+  三格标 `skipped`**，detail 写明原因，且**不启动升级进程**（省掉 480s 安装超时）；启动三格
+  照跑（它们不依赖钩子）。这是**时序约束**，不是产品缺陷，不要改成 `fail`。
 - **历史回填**（对老 tag 重跑验收）：桌面更新器把检查端点写死在 `releases/latest`，
   `preflight` 的 `isLatest=false` 时 **Windows 升级格标 ⏭ skipped**（`SMOKE_IS_LATEST=false`），
   而不是判失败——它确实**无法定向升级到 vX**。`isLatest` 拿不到时（离线 / 无 `gh`）
@@ -203,6 +216,21 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
 - 不做 GUI 自动化（无截图 / 点击 / 托盘 / Dock 断言）、不做自动修复代码 / 回滚 / 改版本号；
 - `preflight` 自己红掉（版本漂移 / 资产缺失）时，`triage` 的业务步骤不执行（没有可比结果），
   **不会**自动去重跑 `build.yml`——这种情况按 `preflight` 的 summary 人工处理。
+
+两条「驱动口径」约定（看起来像失败，其实不是）：
+
+- **Linux 主程序怎么选**：deb 里除桌面壳 `/usr/bin/workbuddy-shift-desktop` 外还有
+  `/usr/bin/companion-runtime`（悬浮窗 sidecar），`dpkg -L` 按字典序把它排在前面。driver 的
+  选择顺序是「`/usr/share/applications/*.desktop` 的 `Exec=` → `/usr/bin` 下**排除**
+  `companion-*`、优先 `*-desktop` → 都没有就如实报 `ok=false`」，**绝不硬选**。若最终取到的
+  名字仍含 `companion`，记的是**驱动缺陷**（`install` 格 ❌ + 启动格 ⛔，detail 指明要改
+  `read-version.sh`），不是「启动即崩」，重跑不会修好。离线自测：
+  `bash scripts/smoke/linux/read-version.sh --selftest`；
+- **Docker 数据卷**：容器按设计以 uid 1000 运行，宿主卷目录由 runner 创建、默认 `0755`，
+  1000 写不进去。这是**准备步骤**的问题，不是产品缺陷：driver 在 `docker run` 之前对
+  CI 临时目录 `chmod 0777`，两个断言（容器内 `id -u == 1000`、容器写 `/data/vol/probe.txt`
+  且宿主可读）一个都不减。写入失败时 detail 带 `id` / `ls -ld /data/vol` / `touch` 的 stderr，
+  证据落在 `evidence/docker/volume-write.log`。
 
 ## 人工复核入口（按顺序看）
 

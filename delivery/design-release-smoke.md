@@ -360,6 +360,12 @@ jobs:
 ## 5. 每平台验收步骤（命令 / 期望 / 超时 / 失败归类）
 
 > 所有桌面用例统一 `WB_SHIFT_HOME=<runner 临时空目录>`，数据落 `<tmp>/.workbuddy-shift`，不碰真实数据。每个 driver 结束前都 `Upload artifacts`（`*.json` / `*.log` / `error.log` / 版本读取原始输出）。
+>
+> **证据必须和结果同源**：所有日志 / 原始输出 / 现场快照写进 `<结果 JSON 目录>/evidence/<form>/`
+> （即 `artifacts/release-smoke/evidence/<form>/`），而不是 runner 的临时目录。workflow 上传的是
+> 仓库内的 `path: artifacts/`，临时目录从来不在上传范围里——格子的 detail 写着「见 xxx.log」
+> 而 artifact 里只有 JSON 时，这条证据链是假的。shell 侧统一走 `common.sh` 的
+> `smoke_evidence_dir <form>`，Windows 侧按 `$ResultPath` 的同级目录推。
 
 ### 5.1 Windows（`scripts/smoke/win/driver.ps1`）
 
@@ -377,6 +383,19 @@ jobs:
 | W10 | 单实例证据 | 首实例运行中，以同参数启动第二个 | 第二实例 ≤15s 内退出且退出码 0 | 15s | F |
 | W11 | 落盘 + 负向断言 | `Test-Path "$sb2\.workbuddy-shift"`；若有 `error.log`，逐行 JSON 校验 `ts/kind/message/appVersion` 齐全且 `appVersion==0.2.5`，且无 `frontend_crash`/`frontend_unhandled`/`panic` | 目录存在、日志干净 | 30s | F |
 | W12 | 结束 | `Stop-Process -Force` | — | — | — |
+
+> **自验时序约束（事实，不是缺陷）**：`--smoke-self-update` 钩子自 **0.2.6** 才存在
+> （`src-tauri/src/update_service/smoke.rs`）。上一版低于它时，旧二进制收到这个参数只会当
+> 普通启动（不写日志、不升级），W5 只能干等 480s 超时并强杀。因此 driver 用常量
+> `$SmokeHookSince = '0.2.6'` + **语义化**版本比较（`Compare-VersionNumber`，按 `.` 拆数字；
+> 字符串口径下 `0.2.10 < 0.2.6` 会误判）做闸门：
+>
+> - `$PrevVersion < 0.2.6` → **W4 / W6 / W7 三格标 `skipped`**（detail 写明原因），且**根本不
+>   启动升级进程**（省下 480s）；W9–W11 照常跑（不依赖钩子）；
+> - 时间线：**0.2.6 自验不了应用内升级**（上一版 0.2.5 不带钩子）；**从 0.2.7 起生效**
+>   （上一版 0.2.6 带钩子）。
+>
+> 判定逻辑收在 `common.ps1` 的 `Get-UpgradeSkipReason`（纯函数，可单测），driver 只读返回值。
 
 ### 5.2 macOS（`scripts/smoke/mac/driver.sh`，`macos-latest` = arm64）
 
@@ -402,7 +421,7 @@ jobs:
 | L0 | 系统依赖 | `sudo apt-get install -y xvfb libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1` | 成功 | 300s | J |
 | L1 | 取资产 | `gh release download` deb×2 + AppImage | digest 一致 | 180s | D |
 | L2 | 装旧版 | `sudo dpkg -i workbuddy-shift-linux-x86_64.deb`(0.2.4) | 退出码 0 | 180s | E |
-| L3 | 读版本 | `dpkg-query -W -f='${Version}' workbuddy-shift`；`dpkg -L workbuddy-shift \| grep '/usr/bin/'` 发现主程序名 | 以 `0.2.4` 开头 | 10s | H |
+| L3 | 读版本 | `dpkg-query -W -f='${Version}' workbuddy-shift`；主程序：`/usr/share/applications/*.desktop` 的 `Exec=`（去 `%U/%F`，取第一个 token）→ 兜底 `dpkg -L` 的 `/usr/bin/`，**排除 `*companion*`**、优先 `*-desktop` | 以 `0.2.4` 开头，且主程序是桌面壳 | 10s | H |
 | L4 | 升级 | `sudo dpkg -i ...0.2.5.deb` | 退出码 0 | 180s | E |
 | L5 | 断言版本 | L3 再来一次 | 以 `0.2.5` 开头，`upgrade_mode=pkg-upgrade` | 10s | H |
 | L6 | 启动 | `xvfb-run -a --server-args='-screen 0 1280x1024x24' env WB_SHIFT_HOME=$sb <exe> --hidden &` | 20s 内存活 | 20s | F（可判 J） |
@@ -410,6 +429,17 @@ jobs:
 | L8 | 负向断言 + 清理 | `error.log` 干净；`pkill -f xvfb` / `pkill -f workbuddy` | 干净 | 20s | F |
 
 > 已知限制：`ubuntu-latest` 无桌面会话，`xvfb-run` 下 WebKitGTK 需要 dbus/GPU 兜底，偶发 `Failed to create WebKitWebProcess`。这类**只在 `<tmp>/.workbuddy-shift` 完全无写入**时判 J（BLOCKED），否则判 F（§6.2）。
+>
+> **主程序选择（L3 的隐含前提）**：deb 里有两个可执行文件——`/usr/bin/companion-runtime`
+> （悬浮窗 sidecar）与 `/usr/bin/workbuddy-shift-desktop`（Tauri 桌面壳），`dpkg -L` 按字典序
+> 把 companion 排在前。取错对象时启动必然 20s 内退出，看起来像 F 类「启动即崩」，实际上是
+> driver 选错了验证对象（同一台机器的 AppImage 启动格是为了绕开这类误判才存在的交叉证据）。
+> 因此 `read-version.sh` 的选择顺序是：**`.desktop` 的 `Exec=` → `/usr/bin` 下排除
+> `companion-*`、优先 `*-desktop` → 报 `ok=false` 不硬选**；driver 另有一道静态保护：取到的
+> `BIN_PATH` 若 basename 含 `companion`，记 `install` 格 `fail`(E) + detail 指明「driver 缺陷，
+> 重跑无用」，启动格记 `blocked`（不判产品失败）。选择规则可离线验证：
+> `read-version.sh --selftest`（固定清单 + 临时 `.desktop`）或 `--from-list <清单>`
+> （喂 `dpkg -L` / `ar p x.deb data.tar.gz | tar -tzf -` 的输出）。
 
 ### 5.4 npm（`scripts/smoke/npm/driver.sh`）
 
@@ -427,12 +457,18 @@ jobs:
 | # | 步骤 | 命令 | 期望 | 超时 | 类别 |
 |---|---|---|---|---|---|
 | K1 | 拉取 | `docker pull ghcr.io/magicapple123/workbuddy-shift:0.2.5` + `:latest` | 均成功，两个 digest 相同 | 600s | C/A |
-| K2 | 运行 | `docker run -d --name smoke -p 58912:57910 -v "$PWD/vol:/data/vol" ghcr.io/...:0.2.5` | 容器 Running | 60s | I |
+| K2 | 运行 | 宿主卷目录先 `chmod 0777`（容器以 uid 1000 运行，runner 建的目录默认 0755，1000 写不进去）→ `docker run -d --name smoke -p 58912:57910 -v "$PWD/vol:/data/vol" ghcr.io/...:0.2.5` | 容器 Running | 60s | I |
 | K3 | 健康 | 轮询 `docker inspect -f '{{.State.Health.Status}}' smoke` | 90s 内 `healthy` | 90s | I |
 | K4 | HTTP | `curl -sf http://127.0.0.1:58912/api/status` | 200 且 `version==0.2.5` | 30s | I/H |
 | K5 | 非 root | `docker exec smoke id -u` | `1000` | 30s | I |
 | K6 | 卷 | `docker exec smoke sh -c 'echo ok > /data/vol/probe.txt'` → 宿主 `cat vol/probe.txt` | 宿主可读且内容 `ok` | 30s | I |
 | K7 | 清理 | `docker rm -f smoke`；失败时 `docker logs smoke` 入 artifact | — | 30s | — |
+
+> **卷权限是驱动的准备步骤，不是产品断言**：K6 的两个格（容器内 `id -u == 1000`、
+> 容器能写 `/data/vol/probe.txt` 且宿主可读）**一个都不减**；但宿主卷目录必须在 `docker run`
+> 之前 `chmod 0777`——它由 runner 的用户创建、默认 `0755`，而容器按设计以 uid 1000 运行，
+> 不放开就必然写失败（`volume=I` 的假失败）。K6 失败时 detail 带容器内 `id`、
+> `ls -ld /data/vol` 与 `touch` 的 stderr，全部落进 `evidence/docker/volume-write.log`。
 
 ---
 
@@ -653,7 +689,7 @@ gh api "/repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[]|{name,conclusio
 | `scripts/smoke/mac/driver.sh` | M1–M10 | ≈220 |
 | `scripts/smoke/mac/read-version.sh` | PlistBuddy + 主程序发现 | ≈50 |
 | `scripts/smoke/linux/driver.sh` | L0–L8 | ≈240 |
-| `scripts/smoke/linux/read-version.sh` | `dpkg-query` + `dpkg -L` 发现主程序 | ≈50 |
+| `scripts/smoke/linux/read-version.sh` | `dpkg-query` + 主程序选择（`.desktop` 的 `Exec=` → `/usr/bin` 排除 `companion-*`，含 `--selftest` / `--from-list`） | ≈380 |
 | `scripts/smoke/npm/driver.sh` | N1–N6 | ≈150 |
 | `scripts/smoke/docker/driver.sh` | K1–K7 | ≈150 |
 | `scripts/smoke/assert-update-log.py` | 断言 `smoke-self-update.jsonl` 阶段序列 / 字段 / 版本 | ≈120 |

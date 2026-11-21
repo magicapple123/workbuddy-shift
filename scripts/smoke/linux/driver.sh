@@ -77,8 +77,10 @@ export SMOKE_RESULT_FILE
 smoke_emit linux "${VERSION}" "${PREV}" pkg-upgrade
 
 WORK=$(smoke_workdir)
-EVID="${WORK}/evidence"
-mkdir -p "${EVID}"
+# 证据落在**结果 JSON 旁边**（`artifacts/release-smoke/evidence/linux/`）：workflow 上传的是
+# 仓库内的 `path: artifacts/`，放 RUNNER_TEMP 的 startup.log 从来没进过 artifact——格子里写
+# 「见 startup.log」而 artifact 里只有 JSON（run 44941972411 的现场）。
+EVID=$(smoke_evidence_dir linux)
 APPIMAGE_URL_TRACE="${EVID}/appimage.txt"
 
 SMOKE_FINISHED=""
@@ -207,7 +209,9 @@ if gh_download "v${VERSION}" '*linux-x86_64.deb' "${WORK}/pkg/curr" >"${EVID}/gh
 fi
 if [ -n "${DEB_CURR}" ]; then
   smoke_pass install "取到当前版本 deb（$(basename "${DEB_CURR}")）"
-  cp "${DEB_CURR}" "${EVID}/" 2>/dev/null || true
+  # 不再把 deb 本体拷进 evidence：那是 ~16MB 的二进制，和「证据」无关，只会撑大 artifact。
+  printf 'file=%s\nsha256=%s\n' "$(basename "${DEB_CURR}")" "$(smoke_sha256 "${DEB_CURR}" 2>/dev/null || echo '读不到')" \
+    >"${EVID}/deb-curr.txt" 2>/dev/null || true
 else
   smoke_fail install D "取到当前版本 deb（v${VERSION}）" "gh release download 失败或产物为空，见 gh-curr-deb.log"
 fi
@@ -338,8 +342,25 @@ if [ -n "${PKG_NAME}" ] && [ -z "${BIN_PATH:-}" ]; then
   _json=$(read_installed_json "${PKG_NAME}")
   BIN_PATH=$(json_get "${_json}" binary)
 fi
+
+# 静态保护（run 44941972411 的教训）：deb 里有 `companion-runtime`（悬浮窗 sidecar）与
+# `workbuddy-shift-desktop`（桌面壳）两个可执行文件。若 read-version.sh 选中的名字里带
+# `companion`，说明**driver 选错了验证对象**——那不是「启动即崩」，把它记成 F 会让整条
+# 流水线去开一张假 issue。所以在这里判死，并让启动格一律 blocked（原因指回这一格）。
+#
+# 类别选 E 而不是 A：A 会触发 `gh run rerun --failed`，而选错主程序重跑一万次也一样错；
+# E 直接落到 issue，让人来看 driver。detail 里写清「driver 缺陷」，不许伪装成产品失败。
+DRIVER_BIN_BAD=""
+if [ -n "${BIN_PATH:-}" ] && printf '%s' "$(basename "${BIN_PATH}")" | grep -qi 'companion'; then
+  DRIVER_BIN_BAD="yes"
+  smoke_fail install E "装后主程序应为桌面壳（basename 不含 companion）" \
+    "driver 缺陷（不是产品缺陷）：read-version.sh 选中了 ${BIN_PATH}——它是悬浮窗 sidecar，不是 Tauri 桌面壳。重跑不会修好，请修 scripts/smoke/linux/read-version.sh 的选择规则（.desktop 的 Exec → /usr/bin 下排除 companion-*）。启动格因此记 blocked，不判产品失败。"
+  BIN_PATH=""
+fi
+
 if [ -n "${BIN_PATH:-}" ]; then
   smoke_log "主程序：${BIN_PATH}"
+  printf 'binary=%s\n' "${BIN_PATH}" >"${EVID}/binary.txt" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -349,7 +370,12 @@ SANDBOX_STARTUP=""
 
 smoke_group "L6 启动（xvfb）"
 if [ -z "${BIN_PATH:-}" ] || [ ! -x "${BIN_PATH}" ]; then
-  smoke_blocked startup "xvfb 下启动后 20s 内存活" "没有可执行的主程序（安装格已失败）：${BIN_PATH:-未发现}"
+  if [ -n "${DRIVER_BIN_BAD}" ]; then
+    smoke_blocked startup "xvfb 下启动后 20s 内存活" \
+      "driver 缺陷：主程序被识别成 companion-runtime（见 install 格的 ❌），本格不判产品失败；修 read-version.sh 后再验"
+  else
+    smoke_blocked startup "xvfb 下启动后 20s 内存活" "没有可执行的主程序（安装格已失败）：${BIN_PATH:-未发现}"
+  fi
 else
   kill_app "$(basename "${BIN_PATH}")"
   SANDBOX_STARTUP=$(smoke_sandbox)

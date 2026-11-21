@@ -124,6 +124,29 @@ smoke_workdir() {
   printf '%s\n' "${_sw_dir}"
 }
 
+# 证据落点：`<结果 JSON 所在目录>/evidence/<form>`。
+#
+# 为什么不再放 `RUNNER_TEMP`：workflow 上传的是仓库内的 `path: artifacts/`，临时目录里的
+# `startup.log` / `volume-write.log` 从来没被上传过——格子的 detail 写着「见 xxx.log」，
+# 而 artifact 里只有一份 JSON（run 44941972411 的现场）。证据必须和结果**同源**，否则
+# 「有证据」这句话在结论里就是假的。
+smoke_evidence_dir() {
+  # $1 = 形态（windows / macos / linux / npm / docker）
+  _sed_form=${1:-}
+  if [ -z "${_sed_form}" ]; then
+    smoke_error "smoke_evidence_dir 需要形态名（如 linux）"
+    return 1
+  fi
+  if [ -n "${SMOKE_RESULT_FILE:-}" ]; then
+    _sed_base=$(dirname -- "${SMOKE_RESULT_FILE}")
+  else
+    _sed_base=${SMOKE_RESULT_DIR}
+  fi
+  _sed_dir="${_sed_base}/evidence/${_sed_form}"
+  mkdir -p "${_sed_dir}"
+  printf '%s\n' "${_sed_dir}"
+}
+
 # 桌面三端统一用 WB_SHIFT_HOME 指向这个空目录：账号库 / 配置 / 日志全落进来，
 # 不碰真实用户数据（PRD §3 的口径，产品既有能力）。
 smoke_sandbox() {

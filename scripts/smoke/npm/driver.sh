@@ -72,8 +72,9 @@ export SMOKE_RESULT_FILE
 . "${DRIVER_DIR}/../common.sh"
 
 WORK=$(smoke_workdir)
-EVID="${WORK}/evidence"
-mkdir -p "${EVID}"
+# 证据落在结果 JSON 旁边（`artifacts/release-smoke/evidence/npm/`）：workflow 上传的是
+# 仓库内的 `path: artifacts/`，放 RUNNER_TEMP 的日志不会被上传。
+EVID=$(smoke_evidence_dir npm)
 PREFIX="${WORK}/npm-prefix"
 BIN=""
 SERVE_PID=""

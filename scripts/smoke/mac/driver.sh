@@ -74,8 +74,10 @@ export SMOKE_RESULT_FILE
 . "${DRIVER_DIR}/../common.sh"
 
 WORK=$(smoke_workdir)
-EVID="${WORK}/evidence"
-mkdir -p "${EVID}"
+# 证据落在结果 JSON 旁边（`artifacts/release-smoke/evidence/macos/`）：workflow 上传的是
+# 仓库内的 `path: artifacts/`，放 RUNNER_TEMP 的日志不会被上传（格子里写「见 xxx.log」，
+# artifact 里却只有 JSON）。
+EVID=$(smoke_evidence_dir macos)
 APP_NAME="WorkBuddy Shift.app"
 APP_PATH=""
 BINARY=""

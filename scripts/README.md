@@ -141,7 +141,7 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | 脚本 | 用途 |
 |---|---|
 | `smoke/common.py` | 结果契约唯一真源：字段 / 白名单 / `validate` / 读写 + CLI（`emit` / `cell` / `set` / `finish` / `validate` / `probe` / `sha256` / `selftest`）。离线自测 `python3 scripts/smoke/common.py selftest` |
-| `smoke/common.sh` | bash 侧薄封装：日志分组、超时包装（macOS 无 `timeout` 时内置兜底）、`WB_SHIFT_HOME` 沙箱、「记一格不中断」的 `smoke_pass/fail/skip/blocked` |
+| `smoke/common.sh` | bash 侧薄封装：日志分组、超时包装（macOS 无 `timeout` 时内置兜底）、`WB_SHIFT_HOME` 沙箱、「记一格不中断」的 `smoke_pass/fail/skip/blocked`、证据落点 `smoke_evidence_dir <form>`（`<结果目录>/evidence/<form>`，随 `artifacts/` 一起上传） |
 | `smoke/preflight.py` | 预检：tag↔版本一致性（Cargo / package.json / npm 平台包 / tauri.conf）、Release 是正式版、必需资产齐全（复用 `check-release-assets.py` 的清单常量）、上一版 tag、`isLatest`（历史回填时决定 Windows 升级格是否 `skipped`）、GHCR manifests；写 `preflight.json` + `$GITHUB_OUTPUT` |
 | `smoke/render-conclusion.py` | 两用：① `--gate`（单个 job 的 Gate）校验结果 JSON、渲染格子表进 job summary，有 `fail` 才 exit 1、`blocked` 只告警；② `--matrix`（triage）渲染 6 形态 × 10 动作的结论矩阵，首行恒为 `**结论：PASS\|FAIL\|BLOCKED**`，并做跨文件版本一致性断言（`form=consistency` + `H`） |
 | `smoke/classify.py` | 归类：读全部 `<form>.json` → `triage-plan.json`（每项含 `form` / `cell` / `category` / `severity` / `action` / `reason` / `issueTitle`）。驱动已写的 `category` 优先，其次关键词兜底，**兜不出来 fail-closed 走 issue**；缺形态 / 零格归 A（重跑），而「文件在但契约非法」（缺 `category` / 类型错 / JSON 坏）归 `category=null` + `issue` + `severity=high`（流水线缺陷，重跑无用） |
@@ -149,14 +149,14 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | `smoke/split-note.py` | 剥 / 取 Release 正文里的 `<!-- release-smoke:begin -->…<!-- release-smoke:end -->` 区块；无区块逐字原样返回，多区块全剥，幂等 |
 | `smoke/update-release-note.sh` | 幂等写回结论区块：`gh release view` → `split-note.py --strip` → 拼新区块（含「本次处置」行）→ `gh release edit --notes-file`，每次重试都重读正文（3 次） |
 | `smoke/issue.sh` | 开 issue（E–I 类 + 无法归类 + 处置未完成）：label `release-smoke`，标题 `[release-smoke] <tag> 验收失败：<形态> / <动作>`，**同标题已有 open 则只追加评论**；正文含断言原文 / 详情 / 日志 / 最小复现命令 |
-| `smoke/win/driver.ps1` | Windows 验收 W1–W12：装 0.2.4 → `--hidden --smoke-self-update` 真跑应用内升级 → 装完读版本 → 升级后启动四元证据（20s 存活 / 单实例退出 / 沙箱落盘 / error.log 无 crash）；`SMOKE_IS_LATEST=false` 时升级链三格标 `skipped` |
+| `smoke/win/driver.ps1` | Windows 验收 W1–W12：装 0.2.4 → `--hidden --smoke-self-update` 真跑应用内升级 → 装完读版本 → 升级后启动四元证据（20s 存活 / 单实例退出 / 沙箱落盘 / error.log 无 crash）；`SMOKE_IS_LATEST=false` 时升级链三格标 `skipped`；上一版 < 0.2.6（钩子首个版本）时同样三格 `skipped` 且**不启动**升级进程 |
 | `smoke/win/read-version.ps1` | 卸载注册表 `DisplayVersion` + 安装目录 exe `ProductVersion` **双读**，输出 JSON（含 `match`：两者是否一致） |
 | `smoke/mac/driver.sh` | macOS 验收 M1–M10：dmg → `/Applications` 覆盖升级（`pkg-upgrade`），版本号变化作证；启动四元证据（含 `instance.lock`）；x86_64 dmg 记 `skipped` |
 | `smoke/mac/read-version.sh` | `PlistBuddy` 读 `CFBundleShortVersionString` / `CFBundleExecutable`，输出主程序绝对路径的 JSON |
-| `smoke/linux/driver.sh` | Linux 验收 L0–L8：`apt` 装依赖 → deb `dpkg -i` 升级（`pkg-upgrade`）→ `xvfb-run` 启动 → AppImage 同路径替换（`appimage-replace`，格子级 `upgradeMode`）+ sha256 比对 + `--appimage-extract-and-run` 启动 |
-| `smoke/linux/read-version.sh` | 从 deb 元数据（`dpkg-deb`）或已安装包（`dpkg-query` + `dpkg -L`）读包名 / 版本 / 主程序，输出 JSON（包名不写死） |
+| `smoke/linux/driver.sh` | Linux 验收 L0–L8：`apt` 装依赖 → deb `dpkg -i` 升级（`pkg-upgrade`）→ `xvfb-run` 启动 → AppImage 同路径替换（`appimage-replace`，格子级 `upgradeMode`）+ sha256 比对 + `--appimage-extract-and-run` 启动；主程序带 `companion` 时判**驱动缺陷**（`install` ❌ + 启动 ⛔）而不是启动失败 |
+| `smoke/linux/read-version.sh` | 从 deb 元数据（`dpkg-deb`）或已安装包（`dpkg-query` + `dpkg -L`）读包名 / 版本 / 主程序，输出 JSON（包名不写死）。**主程序选择**：`.desktop` 的 `Exec=` → `/usr/bin` 下排除 `companion-*`、优先 `*-desktop` → 都没有就 `ok=false` 不硬选；`--selftest` / `--from-list` 可离线验证规则 |
 | `smoke/npm/driver.sh` | npm 验收 N1–N6：官方源装 0.2.4 → 升 0.2.5（`npm-upgrade`）→ `serve --no-open` 后 `/api/status` 与 `/` 断言 |
-| `smoke/docker/driver.sh` | 容器验收 K1–K7：`:<ver>` 与 `:latest` digest 相同 → 90s 内 healthy → `/api/status` → `id -u == 1000` → 卷写读 |
+| `smoke/docker/driver.sh` | 容器验收 K1–K7：`:<ver>` 与 `:latest` digest 相同 → 90s 内 healthy → `/api/status` → `id -u == 1000` → 卷写读（宿主卷目录先 `chmod 0777`，否则 uid 1000 写不进去；失败时落 `id` / `ls -ld` / stderr 到 evidence） |
 | `smoke/assert-update-log.py` | 断言 `--smoke-self-update` 的 JSONL：按 `pid` 分组取第一个进程、阶段序列齐全且有序、`version` 与目标一致、无 `error`；`--selftest` 用 3 份构造日志自测 |
 
 桌面三端共用的判定口径（写进单元格子的 `category`）：`blocked`(J) 只出现在「进程 20s 内退出 +
