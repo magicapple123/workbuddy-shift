@@ -463,6 +463,24 @@ def render_matrix(
     if notes:
         lines += ["", "**不一致 / 无法判定**：", ""] + notes
 
+    # 「未判定」必须可见：PASS 里混着 skipped 时，读者要能一眼看到有几项没验
+    # （与 P0-9「失败必须首行可见」同一条纪律：不能靠读者逐行数 ⏭）。
+    skipped_by_form = {
+        str(result.get("form") or "?"): sum(
+            1 for cell in (result.get("cells") or []) if cell.get("status") == "skipped"
+        )
+        for result in results
+    }
+    skipped_by_form = {form: count for form, count in skipped_by_form.items() if count}
+    skipped_total = sum(skipped_by_form.values())
+    if skipped_total:
+        detail = " · ".join(f"{form} {count} 项" for form, count in skipped_by_form.items())
+        lines += [
+            "",
+            f"**未判定（⏭，不计入结论）**：{skipped_total} 项 — {detail}"
+            "（原因见各行内说明与结果 JSON）",
+        ]
+
     # 版本一致性交叉断言（设计 §7.1 的最后一行）。
     if consistency:
         cell = consistency[0]
