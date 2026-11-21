@@ -1,0 +1,77 @@
+# WorkBuddy Shift 的 Docker 形态：headless webui（无桌面壳、无悬浮窗、无自动更新）。
+#
+# 用法：
+#   docker compose up -d          # 首次会拉 ghcr 镜像；本地改动用 up -d --build
+#   docker compose logs -f
+#   docker compose down
+#
+# 完整说明（数据卷、UID/GID、局域网与反代、已知限制）见 docs/docker.md。
+
+services:
+  workbuddy-shift:
+    image: ghcr.io/magicapple123/workbuddy-shift:latest
+    # 本地构建同一份 Dockerfile；只用官方镜像时删掉这两行即可。
+    build: .
+    container_name: workbuddy-shift
+
+    ports:
+      # 默认只发布到宿主机回环：容器内绑 0.0.0.0（Dockerfile 的 WB_SHIFT_LISTEN），
+      # 但对外只有本机能访问。要让局域网访问，把这里改成 "57910:57910"（等价 0.0.0.0），
+      # 并且**必须**同时设置下面的 WB_SHIFT_ALLOWED_HOSTS，否则用域名/内网 IP 访问会 403。
+      # 服务没有登录鉴权，暴露到局域网前请先读 docs/docker.md 的安全须知。
+      - "127.0.0.1:57910:57910"
+
+    volumes:
+      # 工具数据：账号库、签到/轮换配置、限额台账、日志、备份全在 /data 下。
+      # 这里用相对目录，等价于 compose 文件旁的 ./data。
+      - ./data:/data
+      # 客户端数据（可选）：容器看不到宿主机进程与家目录，只有把客户端目录挂进来，
+      # 会话复制 / 设置同步这类功能才有数据可读。按需启用，不要把整个家目录挂进来。
+      # - ${HOME}/.workbuddy:/data/.workbuddy
+      # - ${HOME}/.codebuddy:/data/.codebuddy
+      # - ${HOME}/.config/Code:/data/.config/Code
+
+    environment:
+      TZ: Asia/Shanghai
+      # 监听的地址/端口；默认值已写在镜像里（0.0.0.0:57910），改端口要同时改 ports。
+      # WB_SHIFT_LISTEN: 0.0.0.0:57910
+      # 额外放行的 Host 白名单（逗号分隔，只写主机名）。只有通过域名访问时才需要，
+      # 例如反代 nas.local -> 127.0.0.1:57910，就要写 nas.local。
+      # WB_SHIFT_ALLOWED_HOSTS: nas.local,workbuddy.example.com
+
+    # 与镜像里的 app 用户（uid/gid 1000）对齐；宿主机用户是别的 uid 时用
+    # PUID=1001 PGID=1001 docker compose up -d 覆盖，比事后 chown 安全。
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      # 与镜像内 HEALTHCHECK 同口径：端口从 WB_SHIFT_LISTEN 推，不写死（改了监听端口却仍探
+      # 旧端口会让容器一直 unhealthy）。只认环境变量——用命令行 --port 覆盖时两者要一起改。
+      # 这里的 `$$` 是 compose 的转义：不转义会被 compose 自己在宿主机上替换掉。
+      #
+      # 端口推导按分支判断：裸 IPv6（如 ::1、fe80::1）没有端口概念，取默认 57910；
+      # 探测先试 127.0.0.1，失败再试 [::1]，兼容 `[::]` 与 IPv6-only 绑定。
+      #
+      # 注意：compose 的 healthcheck 是**整体覆盖**镜像里的 HEALTHCHECK，不是逐字段合并，
+      # 所以镜像的 --start-period=20s 在这里会失效（默认 0s），必须在 compose 里重写一次。
+      # 这里取 40s 而不是 20s：首次启动要跑一次签到核验与日志整理，NAS / 机械盘 / 网络卷上
+      # 预热明显更慢，宽一点才不会在预热期就被 retries 判成 unhealthy。
+      test:
+        - CMD-SHELL
+        - >-
+          case "$${WB_SHIFT_LISTEN}" in
+          *"]:"*) port="$${WB_SHIFT_LISTEN##*]:}" ;;
+          *:*:*) port=57910 ;;
+          *:*) port="$${WB_SHIFT_LISTEN##*:}" ;;
+          *) port=57910 ;;
+          esac;
+          case "$$port" in ''|*[!0-9]*) port=57910 ;; esac;
+          curl -fsS "http://127.0.0.1:$$port/api/status" >/dev/null 2>&1 || curl -fsS "http://[::1]:$$port/api/status" >/dev/null 2>&1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 覆盖镜像的 20s，见上面的说明。
+      start_period: 40s

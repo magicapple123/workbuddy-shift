@@ -332,7 +332,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/variant.rs` | 650 | 单一来源 | 档位（国内/国际）规则与路径的单一来源，刻意集中；拆开会让同一规则出现多个入口。 | 保持单文件；新增档位时只在这里扩展。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/sync_decision.rs` | 578 | 测试 | 同步判定测试分组。 | 保留。 |
 | `crates/companion-core/tests/custom.rs` | 541 | 测试 | 自定义集成集成测试，整体随上游迁移。 | 保留。 |
-| `crates/wb-shift-server/src/api/tests.rs` | 552 | 测试 | api 层边界测试集中在一个文件（SPA 回退 / Host 边界 / 请求体 DTO 契约 / 切换运行标记 / 清理接口的破坏性默认），共享 `router_request`、`post_json`、`router_status` 三个 helper，按域拆文件会把它们复制到每个子文件。 | 保留；边界层测试再显著膨胀时，先把三个 helper 抽到 `api/tests/support.rs` 再按域拆。 |
+| `crates/wb-shift-server/src/api/tests.rs` | 677 | 测试 | api 层边界测试集中在一个文件（SPA 回退 / Host 边界与 `WB_SHIFT_ALLOWED_HOSTS` 白名单 / Origin 口径选择 `origin_policy` / 请求体 DTO 契约 / 切换运行标记 / 清理接口的破坏性默认），共享 `router_request`、`post_json`、`router_status` 三个 helper，按域拆文件会把它们复制到每个子文件。 | 保留；边界层测试再显著膨胀时，先把三个 helper 抽到 `api/tests/support.rs` 再按域拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/plugin_liveness.rs` | 823 | 测试 | 插件 / IDE 的存活判定主题测试组（会话目录证据、空工作区分母、`Partial` 判不了时清理入口的 `pruneBlocked`、隐藏集合 ≡ 清理集合、客户端与档位隔离），共用 `tests/editor.rs` 的 `TempStore` 造数夹具；按主题分组而非按行数拆分。 | 继续膨胀时把 `pruneBlocked` 相关用例拆到 `tests/prune_blocked.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/view.rs` | 664 | 视图装配 | 列表/详情/卡片载荷共用一份成员快照与判定矩阵；拆开会让「同一份摘要口径」跨文件传递，先保持单文件。列表的存活过滤按客户端分派（WorkBuddy 读库、插件/IDE 走 `liveness`），与清理共用同一份组级汇总。 | 继续增长时把卡片载荷装配（`group_payload`）与共用口径（`member_snapshot`/`summary_text`）按职责再拆。 |
 | `crates/wb-shift-core/src/modules/vscode_session_sync/tests/sync.rs` | 523 | 测试 | 插件侧同步/预览主题测试分组（含代表成员与存活过滤用例）。 | 保留；测试继续膨胀时按「复制登记」「预览」「同步执行」再拆。 |

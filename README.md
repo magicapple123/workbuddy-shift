@@ -32,7 +32,7 @@ xattr -rd com.apple.quarantine "/Applications/WorkBuddy Shift.app"
 
 应用能启动但切换账号时提示无权限，请参阅下方 [macOS 权限说明](#macos-权限说明)。
 
-另有 npm / webui 版本可在浏览器中使用，见文末 [npm / webui 版本](#npm--webui-版本)。
+另有 npm / webui 与 Docker 两种形态可在浏览器中使用，见文末 [npm / webui 版本](#npm--webui-版本) 与 [Docker 版本](#docker-版本)。
 
 ## 功能
 
@@ -172,6 +172,22 @@ workbuddy-shift status       # 终端查看当前账号
 界面与桌面 App 一致，功能覆盖上方全部模块，但不提供会话悬浮窗与开机自启（桌面版专属）。webui 模式下的 macOS 权限由启动服务的终端进程决定；若终端已授权完全磁盘访问则无需额外操作。
 
 npm 版支持 macOS（Apple Silicon / Intel）、Windows x64、Linux x64 与 Linux ARM64；Linux ARM64 只提供 npm / webui 形态，桌面安装包仍只有 x64。
+
+## Docker 版本
+
+```bash
+docker run -d --name workbuddy-shift --restart unless-stopped \
+  -p 127.0.0.1:57910:57910 -v "$PWD/data:/data" \
+  -e TZ=Asia/Shanghai ghcr.io/magicapple123/workbuddy-shift:latest
+```
+
+仓库根也带 `docker-compose.yml`：`docker compose up -d` 即可。默认只发布到宿主机 `127.0.0.1`，
+适合 NAS / 家庭服务器长期在线跑自动签到与统计；容器看不到宿主机进程，客户端相关功能需要
+额外挂载客户端目录。数据卷、局域网与反向代理、UID/GID、已知限制与安全须知见
+[Docker 部署](docs/docker.md)。
+
+> 镜像随 `v*` 发版推送到 GHCR；尚未发布、或想跑当前仓库的改动时，用
+> `docker compose up -d --build`（或按 [docs/docker.md](docs/docker.md) 的「本地构建与多架构」自行构建）。
 
 ## 开发
 

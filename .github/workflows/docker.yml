@@ -1,0 +1,77 @@
+name: docker
+
+# 只在发版（v* tag）或手动触发时构建镜像；日常 PR 走 test.yml，不额外消耗 runner 时间。
+# 与 build.yml 互不影响：build.yml 发桌面安装包，这里只发容器镜像。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: "Push the image to GHCR. Uncheck to only build/validate."
+        type: boolean
+        default: true
+
+# 最小权限：读仓库内容 + 推送镜像到 ghcr（GITHUB_TOKEN 自带的 packages 权限足够）。
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: Build and push image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tag 版本必须等于仓库的单一版本来源，避免推出 0.2.4 的镜像却挂着 v0.2.5 的 tag。
+      - name: Validate tag version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(grep -A6 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' | tr -d '\r')
+          echo "tag=$TAG_VER cargo=$CARGO_VER"
+          if [ -z "$CARGO_VER" ] || [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "error: tag 版本必须等于 Cargo.toml [workspace.package] version" >&2
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.push_image
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 镜像名用仓库名（owner/repo）而不是硬编码，fork 出来的仓库推到自己的命名空间。
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.push_image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA 缓存跨流水线复用 target/ 与 pnpm store，重复构建从 ~20 分钟降到几分钟。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true

@@ -135,8 +135,11 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 - 工具数据在 `~/.workbuddy-shift`，开发构建默认沙箱 `~/.wb-shift-dev`（`WB_SHIFT_HOME` 覆盖）。
   测试/冒烟必须用 `WB_SHIFT_HOME=<TEMP 沙箱>`，不读写真实账号、客户端数据、日志、备份。
 - 不提交/读取账号、token、密钥、证书、本地日志、私有目录；发布前用 `git grep` 扫 token 模式。
-- WebUI 仅监听 127.0.0.1，保留 Host/Origin 防护、请求体上限与静态资源 nosniff；不要为了“方便”
-  放开监听地址或 CORS。
+- WebUI **默认**仅监听 `127.0.0.1`，保留 Host/Origin 防护、请求体上限与静态资源 nosniff；
+  不要为了“方便”放开监听地址或 CORS。Docker 形态只能通过 `WB_SHIFT_LISTEN`（地址）与
+  `WB_SHIFT_ALLOWED_HOSTS`（Host 白名单）**显式**放开，且必须同步更新 `docs/docker.md` 的
+  安全说明与 `docker-compose.yml` 注释；**禁止把放开做成默认值**（代码默认值、镜像默认值、
+  compose 默认端口，三者都必须是最严的那一档）。Host / Origin 校验本身没有关闭开关。
 - 不要在测试、脚本或文档里写真实账号、路径、token 示例；用 `example.com` 与临时目录。
 
 ## 9. 例外与豁免（新增必须登记）
@@ -151,6 +154,23 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 
 不允许用“宽泛 allow + 不写理由”让 CI 变绿；CI 失败先修真实问题，不得关闭检查、扩大 allowlist、
 忽略错误或跳过测试。确需临时豁免时优先缩小到单行、单函数，并留下上述四项。
+
+### 已登记例外：Docker 形态放开监听与 Host 白名单
+
+1. **理由**：容器里的进程必须绑 `0.0.0.0` 才能被端口映射进来，从容器外访问时浏览器带的
+   `Host` 也不是回环地址。原本“只绑 127.0.0.1”的硬规则在这一个部署形态里物理上不成立。
+   命令行仍不提供改地址的开关，放开只能来自显式环境变量（`WB_SHIFT_LISTEN` /
+   `WB_SHIFT_ALLOWED_HOSTS`），实现见 `crates/wb-shift-server/src/listen.rs` 与
+   `crates/wb-shift-server/src/api/host_guard.rs`。
+2. **影响**：填错 `WB_SHIFT_ALLOWED_HOSTS` 会让更多 `Host` 通过校验；配置了该变量时，
+   额外接受 `https://<同一个 Host>` 的 Origin（反代终止 TLS 的场景）。**Host / Origin 校验
+   没有关闭开关**，跨站 Origin 仍被拒绝，所以最坏情况是“同一个域名下的页面都能访问”
+   （本服务没有登录鉴权，等于把账号库交给该域名）。默认值（代码 / 镜像 / compose 三层）
+   全部保持最严：回环监听 + 仅回环 Host。
+3. **后续计划**：不计划移除（Docker 是长期形态）。引入登录鉴权后，可评估把白名单收敛为
+   “必须同时配置共享密钥”。新增任何“默认放开”的改动必须先改本节。
+4. **登记位置**：`crates/wb-shift-server/src/listen.rs`、`crates/wb-shift-server/src/api/host_guard.rs`
+   的文件头与本节；用户侧说明在 [`docs/docker.md`](docs/docker.md) 的「安全须知」。
 
 ## 10. 规则 → 门禁对照（CI 实际执行的）
 
@@ -200,6 +220,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 | --- | --- |
 | `docs/ARCHITECTURE.md` | 分层/模块职责、依赖方向、API 双通道、数据存储、权限边界、长文件豁免表 |
 | `docs/DEVELOPMENT.md` | 环境、开发命令、验证矩阵、CI 门禁、发版与 npm 流程 |
+| `docs/docker.md` | Docker 形态：镜像构建、数据卷、局域网/反代访问、UID/GID、已知限制与安全须知 |
 | `docs/companion.md` | 内置悬浮窗的模块、构建、运行时标识、用户目录、演示桥 |
 | `scripts/README.md` | 一键启动/停止、构建/打包/图标/诊断脚本索引 |
 | `scripts/api-contract-baseline.json` | 未迁移 `Json<Value>` handler 的登记与理由 |

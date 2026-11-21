@@ -3,8 +3,8 @@
 use super::router::router as app_router;
 use super::shared_state;
 use super::{
-    checkin_status_item, host_allowed, origin_allowed, query_param, query_variant, static_handler,
-    submitted_config,
+    checkin_status_item, host_allowed, origin_allowed, origin_matches, origin_policy,
+    parse_allowed_hosts, query_param, query_variant, static_handler, submitted_config,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode, Uri};
@@ -110,7 +110,7 @@ fn web_checkin_status_row_carries_variant() {
 
 /// Host 校验：只放行本机回环地址（含端口），其它域名一律拒绝。
 ///
-/// 服务只监听 127.0.0.1，但浏览器里被 DNS 重绑定到 127.0.0.1 的恶意页面仍会
+/// 服务默认只监听 127.0.0.1，但浏览器里被 DNS 重绑定到 127.0.0.1 的恶意页面仍会
 /// 发出同源请求；Host 头校验把它们挡在路由之前，正常 webui 不受影响。
 #[test]
 fn host_guard_accepts_only_loopback_hosts() {
@@ -122,7 +122,7 @@ fn host_guard_accepts_only_loopback_hosts() {
         "[::1]:57910",
         "[::1]",
     ] {
-        assert!(host_allowed(Some(allowed)), "{allowed} 应被放行");
+        assert!(host_allowed(Some(allowed), &[]), "{allowed} 应被放行");
     }
     for rejected in [
         "",
@@ -133,9 +133,70 @@ fn host_guard_accepts_only_loopback_hosts() {
         "[::1]evil",
         "::1",
     ] {
-        assert!(!host_allowed(Some(rejected)), "{rejected} 应被拒绝");
+        assert!(!host_allowed(Some(rejected), &[]), "{rejected} 应被拒绝");
     }
-    assert!(!host_allowed(None), "缺失 Host 头应被拒绝");
+    assert!(!host_allowed(None, &[]), "缺失 Host 头应被拒绝");
+}
+
+/// 额外白名单（`WB_SHIFT_ALLOWED_HOSTS`）解析：大小写/端口/空白/重复都归一，
+/// 通配与非法项被忽略并汇总成一条告警。
+#[test]
+fn allowed_hosts_parsing_normalizes_entries() {
+    let (hosts, warning) = parse_allowed_hosts(Some(
+        " NAS.local:57910 , ,nas.local, nas.local,,evil.example:abc ",
+    ));
+    assert_eq!(hosts, vec!["nas.local".to_string()]);
+    let warning = warning.expect("含非法条目时应给出告警");
+    assert!(warning.contains("WB_SHIFT_ALLOWED_HOSTS"), "{warning}");
+
+    // 无通配、无非法项：不应有噪音告警。
+    let (hosts, warning) = parse_allowed_hosts(Some("nas.local,workbuddy.example.com"));
+    assert_eq!(hosts, vec!["nas.local", "workbuddy.example.com"]);
+    assert!(warning.is_none(), "{warning:?}");
+}
+
+/// 缺省 / 空值 = 现状（默认部署不得因为解析器而多出任何放行项）。
+#[test]
+fn allowed_hosts_default_to_empty() {
+    for raw in [None, Some(""), Some("   "), Some(" , , ")] {
+        let (hosts, warning) = parse_allowed_hosts(raw);
+        assert!(hosts.is_empty(), "{raw:?}");
+        assert!(warning.is_none(), "{raw:?}");
+    }
+}
+
+/// 通配符不支持：`*` 的条目被忽略并告知原因（域名是安全边界，不能靠通配放开）。
+#[test]
+fn allowed_hosts_ignore_wildcards() {
+    let (hosts, warning) = parse_allowed_hosts(Some("*.example.com,*"));
+    assert!(hosts.is_empty(), "{hosts:?}");
+    let warning = warning.expect("应提示通配被忽略");
+    assert!(warning.contains('*'), "{warning}");
+}
+
+/// 白名单是回环白名单的**并集**：命中额外域名放行，其它 Host 仍拒绝，回环照旧可用。
+#[test]
+fn host_guard_accepts_extra_hosts_without_losing_loopback() {
+    let (extra, _) = parse_allowed_hosts(Some("nas.local:57910,workbuddy.example.com"));
+    for allowed in [
+        "nas.local",
+        "nas.local:57910",
+        "NAS.LOCAL",
+        "workbuddy.example.com",
+    ] {
+        assert!(host_allowed(Some(allowed), &extra), "{allowed} 应被放行");
+    }
+    assert!(
+        host_allowed(Some("127.0.0.1:57910"), &extra),
+        "回环必须仍然放行"
+    );
+    assert!(
+        host_allowed(Some("localhost:57910"), &extra),
+        "回环必须仍然放行"
+    );
+    for rejected in ["other.local", "evil.example", "nas.local.evil.example"] {
+        assert!(!host_allowed(Some(rejected), &extra), "{rejected} 应被拒绝");
+    }
 }
 
 /// 前端资源来自 rust-embed 的编译期资源表：路径穿越串在表里查不到，回退
@@ -207,7 +268,71 @@ fn origin_guard_rejects_cross_site_browser_requests() {
     }
 }
 
+/// 反代终止 TLS 时的 Origin：默认部署（allow_https=false）口径完全不变，
+/// 只有显式放开额外白名单后才接受 `https://<Host>`，且主机必须仍然一致。
+#[test]
+fn origin_guard_accepts_https_only_when_opted_in() {
+    // 默认形态：https Origin 一律拒绝（改造前行为）。
+    assert!(!origin_allowed(
+        Some("https://nas.example.com"),
+        Some("nas.example.com")
+    ));
+    assert!(!origin_matches(
+        Some("https://nas.example.com"),
+        Some("nas.example.com"),
+        false
+    ));
+    // 放开口径：同主机的 http / https 都放行（反代可能保留或终止 TLS）。
+    for origin in ["http://nas.example.com", "https://nas.example.com"] {
+        assert!(
+            origin_matches(Some(origin), Some("nas.example.com"), true),
+            "{origin} 应被放行"
+        );
+    }
+    // 跨站主机即便走 https 也必须拒绝；缺 Host 同样拒绝。
+    assert!(!origin_matches(
+        Some("https://evil.example"),
+        Some("nas.example.com"),
+        true
+    ));
+    assert!(!origin_matches(Some("https://nas.example.com"), None, true));
+    assert!(origin_matches(None, Some("nas.example.com"), true));
+}
+
+/// 中间件实际调用的 `origin_policy`：白名单为空时退回改造前的口径（只认 http），
+/// 非空时才对同主机的 https Origin 放行。这条用例锁住「哪一支生效」，防止分支写反后
+/// 静默退回「只认 http」（HTTPS 反代下所有写操作 403，页面能开、按钮全废）。
+#[test]
+fn origin_policy_switches_on_extra_hosts() {
+    let none: Vec<String> = Vec::new();
+    // 没配置白名单：https 必须被拒绝，http 放行（改造前行为）。
+    assert!(!origin_policy(
+        Some("https://nas.example.com"),
+        Some("nas.example.com"),
+        &none
+    ));
+    assert!(origin_policy(
+        Some("http://nas.example.com"),
+        Some("nas.example.com"),
+        &none
+    ));
+
+    let (extra, _) = parse_allowed_hosts(Some("nas.example.com"));
+    // 配置了白名单：同主机 https 放行，但跨站主机仍然拒绝。
+    assert!(origin_policy(
+        Some("https://nas.example.com"),
+        Some("nas.example.com"),
+        &extra
+    ));
+    assert!(!origin_policy(
+        Some("https://evil.example"),
+        Some("nas.example.com"),
+        &extra
+    ));
+}
+
 /// save_* handler 的 {config} 信封拆包：桌面端与 WebUI 的参数形状不同，但落盘对象必须相同。
+
 #[test]
 fn submitted_config_unwraps_webui_envelope() {
     let inside = json!({"enabled": true, "intervalMinutes": 30});

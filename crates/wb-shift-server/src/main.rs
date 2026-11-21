@@ -22,17 +22,20 @@
 
 mod api;
 mod cli;
+mod listen;
 
 use serde_json::json;
 
+use listen::{is_loopback, open_target, resolve_listen, LISTEN_ENV_VAR};
 use wb_shift_core::modules::{
     account, auth_file, checkin, config, process, rotate, travel, update, variant::WbVariant,
 };
 
 /// CLI 用法说明（`help` / `--help` / `-h`）。
 ///
-/// 默认端口固定监听 127.0.0.1：服务会读写本机账号与客户端配置，不提供改监听地址的
-/// 开关，避免被参数误改成对外暴露。
+/// 默认监听 127.0.0.1：服务会读写本机账号与客户端配置，所以**命令行故意不提供改监听地址
+/// 的开关**，避免被参数误改成对外暴露。只有部署形态（Docker）才用环境变量显式放开，
+/// 解析规则见 `listen.rs`，部署与安全说明见 `docs/docker.md`。
 const USAGE: &str = "\
 workbuddy-shift — WorkBuddy 账号切换工具（本地 webui）
 
@@ -49,9 +52,15 @@ workbuddy-shift — WorkBuddy 账号切换工具（本地 webui）
   workbuddy-shift help            显示本帮助
 
 选项:
-  --port <端口>      监听端口（默认 57910；也可写 --port=<端口>；始终只绑定 127.0.0.1）
+  --port <端口>      监听端口（默认 57910；也可写 --port=<端口>；地址默认 127.0.0.1）
   --no-open          启动服务后不自动打开浏览器
   --variant <档位>   cn（默认）或 ai；仅影响 status 的档位选择
+
+环境变量:
+  WB_SHIFT_LISTEN         覆盖监听地址（默认 127.0.0.1）。可写 0.0.0.0、0.0.0.0:57910、
+                          [::]:57910；--port 的优先级高于其中的端口，非法值回落 127.0.0.1
+  WB_SHIFT_ALLOWED_HOSTS  额外放行的 Host 白名单（逗号分隔域名，默认空 = 仅本机回环）
+  WB_SHIFT_HOME           覆盖家目录（数据落在其下的 .workbuddy-shift）
 
 AI 友好子命令的选项:
   --json             stdout 只输出 JSON（accounts/limits/credits/inspect 始终输出 JSON）
@@ -67,10 +76,6 @@ AI 友好子命令的选项:
 
 fn print_usage() {
     print!("{USAGE}");
-}
-
-fn default_port() -> u16 {
-    57910
 }
 
 /// 后台任务：自动签到启动即核验，之后按 core 计算的下一轮延迟睡眠（未设置
@@ -246,39 +251,73 @@ async fn main() {
     }
 }
 
-async fn serve(args: &[String]) {
-    let mut port = default_port();
-    // 支持 `--port 8080` 与 `--port=8080` 两种写法（与 `subcommand_of` 的跳过规则一致，
-    // 否则被当作全局选项跳过的 `--port=…` 会被静默忽略、落到默认端口）。
-    if let Some(raw) = args.iter().enumerate().find_map(|(index, arg)| {
+/// `--port` 的取值（`--port 8080` 与 `--port=8080` 两种写法）。
+///
+/// 解析失败返回 `None`，交给默认值——与改造前一致（写错的 `--port` 不会让服务起不来，
+/// 也不会连带丢掉 `WB_SHIFT_LISTEN` 里配置的地址）。
+fn cli_port(args: &[String]) -> Option<u16> {
+    args.iter().enumerate().find_map(|(index, arg)| {
         if let Some(value) = arg.strip_prefix("--port=") {
-            return Some(value);
+            return value.parse::<u16>().ok();
         }
-        arg.eq("--port")
-            .then(|| args.get(index + 1).map(String::as_str).unwrap_or(""))
-    }) {
-        if let Ok(parsed) = raw.parse::<u16>() {
-            port = parsed;
+        if arg == "--port" {
+            return args
+                .get(index + 1)
+                .and_then(|value| value.parse::<u16>().ok());
         }
+        None
+    })
+}
+
+async fn serve(args: &[String]) {
+    // 地址只来自 WB_SHIFT_LISTEN（默认 127.0.0.1），端口优先级 --port > 环境变量里的端口 >
+    // 默认 57910；解析细节与非法值回落见 listen.rs。
+    let raw_listen = std::env::var(LISTEN_ENV_VAR).ok();
+    let (addr, listen_warning) = resolve_listen(raw_listen.as_deref(), cli_port(args));
+    if let Some(warning) = listen_warning {
+        eprintln!("{warning}");
+    }
+    // 白名单解析告警只打一次（缓存读环境变量，见 host_guard.rs）。
+    if let Some(warning) = api::allowed_hosts_warning() {
+        eprintln!("{warning}");
     }
 
     let app = api::router(api::shared_state());
-    let addr = format!("127.0.0.1:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("启动失败: 端口 {port} 被占用或不可用（{e}）。可用 --port 指定其他端口。");
+            eprintln!(
+                "启动失败: 无法监听 {addr}（{e}）。可用 --port 指定其他端口，或检查 {LISTEN_ENV_VAR}。"
+            );
             std::process::exit(1);
         }
     };
 
+    // 横幅必须打印**真实绑定地址**：容器里绑 0.0.0.0 时用户需要看到这一点，
+    // 而不是看到一个打不开的 http://0.0.0.0。浏览器打开的目标与横幅一致。
+    let target = open_target(&addr);
     println!("workbuddy-shift v{}", update::APP_VERSION);
-    println!("webui: http://{addr}");
+    if is_loopback(&addr) {
+        println!("webui: http://{target}");
+    } else {
+        println!("监听地址: {addr}");
+        println!("webui: http://{target}");
+        println!(
+            "安全提示: 已监听非回环地址，服务没有登录鉴权——请确保只在可信网络、\
+             或带认证的反向代理之后暴露（说明见 docs/docker.md）。"
+        );
+        if api::allowed_hosts().is_empty() {
+            println!(
+                "提示: 未设置 WB_SHIFT_ALLOWED_HOSTS，用非回环域名访问会因 Host 校验返回 403\
+                 （127.0.0.1 / localhost 不受影响）。"
+            );
+        }
+    }
     println!("按 Ctrl+C 停止服务。");
 
     let no_open = args.iter().any(|a| a == "--no-open");
     if !no_open {
-        open_browser(&addr);
+        open_browser(&target);
     }
 
     spawn_background_loops();

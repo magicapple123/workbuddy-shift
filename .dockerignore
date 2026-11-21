@@ -1,0 +1,59 @@
+# Docker 构建上下文过滤：只影响 `docker build`，不影响 git。
+#
+# 目标是把上下文压到「源码 + 依赖清单」，避免把本机 target/（几个 GB）与 node_modules
+# 送给 daemon；同时**不能**误伤构建真正需要的东西：crates/、src/、src-tauri/Cargo.toml、
+# scripts/codebuddy-cli-helper.cjs（被 include_str! 编进二进制）、companion-ui/package.json、
+# package.json / pnpm-workspace.yaml / pnpm-lock.yaml。
+
+# 依赖与构建产物
+node_modules
+**/node_modules
+target
+**/target
+dist
+dist-embed
+dist-demo
+companion-ui/dist
+companion-ui/dist-embed
+companion-ui/dist-demo
+src-tauri/binaries
+src-tauri/target
+npm/platform/*/bin
+npm/bin/workbuddy-shift-*
+*.tsbuildinfo
+
+# 版本库、CI 与编辑器元数据（构建不需要，进上下文只会拖慢速度）
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+*.suo
+*.sw?
+.trellis
+.agents
+.codex
+.cursor
+
+# 本地运行数据与日志：宿主机的真实账号数据绝不能被送进构建上下文
+data
+.docker-smoke
+logs
+*.log
+accounts.json
+backups
+
+# 演示产物与本地素材
+public/companion
+public/companion-demo
+video
+.playwright-cli
+.playwright-mcp
+.pnpm-store
+
+# 文档与截图不影响二进制（rust-embed 只嵌 dist/）。注意 `assets/` **不能**排除：
+# 前端直接 import 了 `assets/mascot/*.png` 与客户端图标，少一个 vite 就构建失败；
+# `public/` 里的图标同样保留（vite 会原样拷进 dist/，缺了会丢 favicon）。
+docs
+*.md

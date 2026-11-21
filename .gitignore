@@ -29,6 +29,10 @@ npm/bin/workbuddy-shift-*
 # 本地运行时数据
 accounts.json
 backups/
+# Docker 形态的默认数据卷（docker-compose.yml 的 ./data:/data）与冒烟测试临时目录：
+# 里面是真实账号库，绝不能进版本库。
+/data/
+.docker-smoke/
 
 # 本地素材与浏览器调试残留
 video/

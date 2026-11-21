@@ -223,8 +223,8 @@ pub fn router(state: SharedState) -> Router {
         // 请求体上限显式化：与 axum 默认值一致（2 MiB），避免上游默认值变化时
         // 不知不觉放宽；导入/导出走 `fileText` JSON，正常体量远低于此。
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        // DNS rebinding 防护：只接受本机 Host。服务本身仍只监听 127.0.0.1（见 main.rs），
-        // 这层挡的是「恶意网页把域名解析到 127.0.0.1 后发起的同源请求」。
+        // DNS rebinding 防护：只接受本机 Host（Docker 形态可额外配置 WB_SHIFT_ALLOWED_HOSTS，
+        // 见 host_guard.rs）。这层挡的是「恶意网页把域名解析到 127.0.0.1 后发起的同源请求」。
         .layer(middleware::from_fn(local_host_only))
         // CSRF：浏览器跨源请求一定带 Origin；只接受与 Host 同源的页面发起的请求。
         .layer(middleware::from_fn(local_origin_only))
