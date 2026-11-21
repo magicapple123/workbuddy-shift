@@ -1,2 +1,10 @@
 # 本仓库当前没有需要特殊合并策略的文件。
 # 历史上的 .trellis/* 规则已随该目录一起移除；新增 merge 策略前先写明用途。
+
+# Dockerfile 的续行是「反斜杠 + 换行」：一旦被检出成 CRLF，反斜杠后面跟的是 \r，
+# Docker 不再认作续行，下一行会变成独立指令，报 "unknown instruction"（已实测）。
+# Windows 上 core.autocrlf=true 的默认检出会做这个转换，因此这里强制 LF。
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+# compose 的折叠标量（healthcheck 的 CMD-SHELL）同样按行解析，一并钉死，避免跨平台差异。
+docker-compose.yml text eol=lf
