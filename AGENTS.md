@@ -61,7 +61,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 | 错误信封 | `{ ok: false, error }`（400/409/500） | 前端 `call()` 依赖 `error` 字段展示 |
 | 持久化文件名/JSON 键 | `docs/ARCHITECTURE.md` 的“数据存储” | 改文件名 = 用户数据迁移问题 |
 | Tauri 运行时标识 | `docs/companion.md` 的“运行时标识”表 | 成组修改，改一处 = 同步全部 |
-| npm 平台包映射 | `npm/package.json`、`npm/platform/<tag>/package.json`、`npm/scripts/install.js`、`npm/bin/workbuddy-shift.js` | 当前 5 个平台；新增/下线要四处同步 + 发版 job（`linux-arm64` 只有 CLI/WebUI，不产出桌面安装包） |
+| npm 平台包映射 | `npm/package.json`、`npm/platform/<tag>/package.json`、`npm/scripts/install.js`、`npm/bin/workbuddy-shift.js` | 当前 5 个平台；新增/下线要四处同步 + 发版 job（`linux-arm64` 只有 CLI/WebUI，不产出桌面安装包）。另有 GitHub Packages scoped 镜像（`@<owner>/workbuddy-shift*`，备用渠道），由 `scripts/publish-github-packages.sh` 从 npmjs 的 tarball 重打包生成：改包名或平台时，`install.js` 的候选包列表、脚本里的平台清单与 scope 两处都要同步 |
 | Tauri JS ↔ Rust 版本 | 根 `package.json` 的 `@tauri-apps/*` 与 `Cargo.lock` | 必须同 major/minor，且写成完整版本（不用 `^`）；`tauri build` 会硬校验，升级时两侧一起改 |
 | 包管理器 | `pnpm-workspace.yaml` + 根 `pnpm-lock.yaml` + `companion-ui/package.json` | 只用 **pnpm**（版本由 `packageManager` 固定）。安装只在仓库根执行；参数不带 `--`（pnpm 会原样传给脚本）。规则见 `docs/DEVELOPMENT.md` 的「包管理器」节 |
 

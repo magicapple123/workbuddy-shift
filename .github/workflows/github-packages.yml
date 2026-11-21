@@ -1,0 +1,66 @@
+name: github-packages
+
+# 回填用：把 npmjs 上**已经发布过**的版本镜像到 GitHub Packages（scoped 名）。
+#
+# 正常发版由 build.yml 的 publish-github-packages job 自动完成；这个工作流只处理
+# 「workflow 加进来之前就发出去的版本」，例如 0.2.5。脚本幂等：目标版本已存在则 skip，
+# 所以重跑、并发跑都安全。
+#
+# 注意：镜像版本号与 npmjs 完全同号（不产生新版本），它只是备用渠道——
+# GitHub Packages 安装即使公开包也需要 token。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "npmjs 上已发布的版本号（不带 v），例如 0.2.5"
+        required: true
+        type: string
+
+# 读取仓库即可；发布包需要的 packages: write 在 job 级授予。
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: Mirror npm packages to GitHub Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 版本号必须先是 semver 形状（x.y.z / x.y.z-rc.N / +build）再发布：脚本直接拿它
+      # 拼 npm pack 的 spec，形状或字符不对要在这里就失败，别等 npm 报晦涩错误。
+      - name: Validate version input
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "error: 版本号看起来不对: $VERSION（期望 x.y.z 或 x.y.z-rc.N）" >&2
+              exit 1
+              ;;
+          esac
+          # 只允许 semver 的 [0-9A-Za-z.-+]，挡住 ; & 空格 这类输入。
+          case "$VERSION" in
+            *[!0-9A-Za-z.+-]*)
+              echo "error: 版本号只能包含字母/数字/./-/+: $VERSION" >&2
+              exit 1
+              ;;
+          esac
+          echo "回填版本: $VERSION"
+
+      # 与 build.yml 的 publish-github-packages job 同一套参数：version / scope=owner / owner/repo。
+      - name: Publish scoped mirror packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sh scripts/publish-github-packages.sh \
+            "${{ inputs.version }}" "${{ github.repository_owner }}" "${{ github.repository }}"

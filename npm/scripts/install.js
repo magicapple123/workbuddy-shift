@@ -4,10 +4,20 @@
 // 主包声明为 optionalDependencies，安装时 npm 自动装好平台包，postinstall 只需复制——
 // 不依赖 GitHub，国内镜像（npmmirror）也能稳定安装。
 //
+// 两个渠道，按顺序尝试，第一个「能 resolve 且 bin/<file> 存在」的胜出：
+//   1. workbuddy-shift-<platform>-<arch>                  npmjs（主渠道，先试原名）
+//   2. @magicapple123/workbuddy-shift-<platform>-<arch>    GitHub Packages（scoped 镜像）
+// 镜像只是备用渠道：GitHub Packages 安装即使公开包也要 token，主渠道仍是 npmjs。
+//
 // 环境变量覆盖：
 //   WB_SHIFT_BINARY=<本地二进制路径>  本地开发/离线安装（直接复制，不联网）
 const fs = require("fs");
 const path = require("path");
+
+// 为什么把 scope 硬编码：镜像固定由官方账号 @magicapple123 发布（GitHub Packages 只接受
+// scoped 包名，scope 只能是仓库 owner）。fork 后要改这一处，并同步
+// scripts/publish-github-packages.sh 的 <scope> 参数。
+const MIRROR_SCOPE = "@magicapple123";
 
 const FILE = {
   "darwin-arm64": "workbuddy-shift-darwin-arm64",
@@ -18,6 +28,9 @@ const FILE = {
 }[`${process.platform}-${process.arch}`];
 
 const PLATFORM_PKG = `workbuddy-shift-${process.platform}-${process.arch}`;
+
+// 顺序即优先级：npmjs 主渠道在前，GitHub Packages 镜像兜底在后。
+const PLATFORM_PKGS = [PLATFORM_PKG, `${MIRROR_SCOPE}/${PLATFORM_PKG}`];
 
 if (!FILE) {
   console.warn(
@@ -33,7 +46,8 @@ const target = path.join(binDir, FILE);
 function fail(msg) {
   console.error(`workbuddy-shift install: ${msg}`);
   console.error(
-    "安装失败。请确认安装了对应平台包（npm 会自动装），或设置 WB_SHIFT_BINARY 指向本地二进制。",
+    `请确认已安装对应平台包（${PLATFORM_PKGS.join(" 或 ")}，npm 安装主包时会自动装上），` +
+      `或用 WB_SHIFT_BINARY 指向本地二进制。`,
   );
   process.exit(1);
 }
@@ -52,6 +66,29 @@ function copyFrom(src) {
   );
 }
 
+/**
+ * 按 PLATFORM_PKGS 顺序寻找平台二进制。
+ * @returns {{src: string, pkg: string, notes: string[]}} src 为空表示全部渠道都失败，
+ *   notes 记录每个渠道失败的原因（用于报错文案）。
+ */
+function findPlatformBinary() {
+  const notes = [];
+  for (const pkg of PLATFORM_PKGS) {
+    let pkgRoot;
+    try {
+      // 只解析 package.json：包存在即可定位根目录，不需要入口文件可执行。
+      pkgRoot = path.dirname(require.resolve(`${pkg}/package.json`));
+    } catch (e) {
+      notes.push(`${pkg} 未安装`);
+      continue;
+    }
+    const src = path.join(pkgRoot, "bin", FILE);
+    if (fs.existsSync(src)) return { src, pkg, notes };
+    notes.push(`${pkg} 中未找到 bin/${FILE}`);
+  }
+  return { src: "", pkg: "", notes };
+}
+
 async function main() {
   // 1) 本地二进制覆盖（开发/离线）
   if (process.env.WB_SHIFT_BINARY) {
@@ -60,22 +97,17 @@ async function main() {
     return fail(`WB_SHIFT_BINARY 指向的文件不存在: ${local}`);
   }
 
-  // 2) 从平台包复制（node_modules/workbuddy-shift-<platform>-<arch>/bin/<file>）
-  try {
-    const pkgRoot = path.dirname(require.resolve(`${PLATFORM_PKG}/package.json`));
-    const src = path.join(pkgRoot, "bin", FILE);
-    if (fs.existsSync(src)) return copyFrom(src);
-    return fail(`平台包 ${PLATFORM_PKG} 中未找到 ${FILE}`);
-  } catch (e) {
-    // 平台包缺失：可能是 optionalDependencies 没装上（如手动安装/旧版 npm）
-    if (fs.existsSync(target)) {
-      console.log("workbuddy-shift: 二进制已存在，跳过");
-      return;
-    }
-    return fail(
-      `平台包 ${PLATFORM_PKG} 未安装（${e.message}）。请重新执行 npm install。`,
-    );
+  // 2) 从平台包复制（npmjs 主渠道 → GitHub Packages 镜像）
+  const found = findPlatformBinary();
+  if (found.src) return copyFrom(found.src);
+
+  // 3) 渠道都不可用：可能是 optionalDependencies 没装上（如手动安装/旧版 npm），
+  //    但二进制此前已经复制过——此时不当作失败。
+  if (fs.existsSync(target)) {
+    console.log("workbuddy-shift: 二进制已存在，跳过");
+    return;
   }
+  return fail(`平台包未安装（${found.notes.join("；")}）。请重新执行 npm install。`);
 }
 
 main();

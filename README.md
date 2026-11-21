@@ -169,6 +169,22 @@ workbuddy-shift status       # 终端查看当前账号
 > 国内镜像（npmmirror）同步可能延迟；若安装时提示找不到最新版本，可加
 > `--registry=https://registry.npmjs.org`，或等镜像同步。
 
+**备用渠道：GitHub Packages**（内容与 npmjs 同号，可在仓库的「Packages」页看到）：
+
+```bash
+npm login --registry=https://npm.pkg.github.com   # 需要 GitHub token（至少 read:packages）
+npm i -g @magicapple123/workbuddy-shift --registry=https://npm.pkg.github.com
+```
+
+> `npm login` 只写入 token，不建立 `@magicapple123` 的 registry 映射，所以安装时要带
+> `--registry`（否则 scoped 包会去 npmjs 找、必然 404）。长期使用可把 scope 映射写进
+> `~/.npmrc`（`npm config set @magicapple123:registry https://npm.pkg.github.com`），之后不必每次带。
+
+GitHub Packages 对公开包也要求登录 token，所以**主渠道仍是 npmjs**，这条只是 npmjs 不可用时的兜底。
+
+> 维护提示：镜像包首次发布后要确认包可见性（仓库 →「Packages」→ 包 → *Package settings*）；
+> 若显示 Private 需改成 Public，否则未登录的安装方即使带上 token 也拿不到包。
+
 界面与桌面 App 一致，功能覆盖上方全部模块，但不提供会话悬浮窗与开机自启（桌面版专属）。webui 模式下的 macOS 权限由启动服务的终端进程决定；若终端已授权完全磁盘访问则无需额外操作。
 
 npm 版支持 macOS（Apple Silicon / Intel）、Windows x64、Linux x64 与 Linux ARM64；Linux ARM64 只提供 npm / webui 形态，桌面安装包仍只有 x64。

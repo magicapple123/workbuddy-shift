@@ -486,6 +486,41 @@ jobs:
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
           npm publish --access public --registry=https://registry.npmjs.org
 
+  # GitHub Packages 的 npm scoped 镜像（备用渠道）。
+  #
+  # 与 npmjs 主渠道并行：主渠道还是上面两个 job 发的 workbuddy-shift + 5 个平台包；
+  # 这里额外把同一版本重打包成 @<owner>/workbuddy-shift* 发到 npm.pkg.github.com，
+  # 让包出现在仓库的「Packages」页。GitHub Packages 只接受 scoped 包名，且安装即使
+  # 公开包也要 token，所以它只是兜底渠道。
+  #
+  # needs 必须带上 publish-main：脚本第一步就是 `npm pack workbuddy-shift@<ver>`
+  # 从 npmjs 拉主包 tarball。publish-main 的 needs 与本 job 相同（会和本 job 并行），
+  # 不显式依赖的话主包可能还没发出来 → E404 → 整个 build workflow 变红
+  # （release 只 needs build，资产照样发出去，红了反而掩盖真实状态）。
+  # 两个 job 的 if 完全一致（tag + PUBLISH_NPM != 'false'），PUBLISH_NPM=false 时一起跳过。
+  #
+  # permissions 是 job 级覆盖（workflow 级的 contents: write 不受影响）：
+  # GITHUB_TOKEN 的 packages: write 足够把包写进本仓库。
+  publish-github-packages:
+    name: Mirror npm packages to GitHub Packages
+    needs: [build, npm-linux-arm64, publish-main]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM != 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Publish scoped mirror packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sh scripts/publish-github-packages.sh \
+            "${GITHUB_REF_NAME#v}" "${{ github.repository_owner }}" "${{ github.repository }}"
+
   release:
     name: Publish release assets
     needs: build

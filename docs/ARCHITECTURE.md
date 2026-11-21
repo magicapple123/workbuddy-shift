@@ -427,7 +427,8 @@ Tauri 配置在 [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)：`f
 | workflow | 触发 | 内容 |
 | --- | --- | --- |
 | `.github/workflows/test.yml` | push / PR / 手动 | 三平台 `cargo test -p wb-shift-core` + `companion-core/runtime` 测试 + Linux/Windows clippy（Linux 含 companion-core/runtime）；macOS lint job（`pnpm install --frozen-lockfile` + `pnpm run build`、`cargo fmt --all`、clippy 含 companion 三 crate、server / desktop / companion-desktop 测试、companion-ui typecheck + build:embed、6 个仓库检查脚本 versions / command-routes / api-contract / rust-locks / structure / companion-contract）；前端 `pnpm run lint` + `pnpm run typecheck` + `pnpm test`；msrv job（`cargo +1.95 check` 四个非 Tauri crate） |
-| `.github/workflows/build.yml` | `v*` tag / 手动 | 四平台桌面矩阵 + `npm-linux-arm64` job（arm64 runner 原生编译 CLI，不参与桌面发布）：前端构建、server 二进制、npm 平台分包与主包发布、桌面安装包、更新清单、GitHub Release |
+| `.github/workflows/build.yml` | `v*` tag / 手动 | 四平台桌面矩阵 + `npm-linux-arm64` job（arm64 runner 原生编译 CLI，不参与桌面发布）：前端构建、server 二进制、npm 平台分包与主包发布、GitHub Packages scoped 镜像（`publish-github-packages` job，备用渠道）、桌面安装包、更新清单、GitHub Release |
+| `.github/workflows/github-packages.yml` | 手动（输入 `version`） | 回填：把 npmjs 上已发布的版本镜像到 GitHub Packages（脚本幂等，已存在则跳过） |
 | `.github/workflows/pages.yml` | push `main` / 手动 | `pnpm run build:demo` → GitHub Pages |
 
 发版细节与签名密钥位置见 [DEVELOPMENT.md](DEVELOPMENT.md)。

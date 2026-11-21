@@ -124,6 +124,7 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | `check-structure.mjs` | 结构约束：>500 行文件必须与 ARCHITECTURE 豁免表一致、core 不得依赖 tauri/axum、旧产品名不得回流、capability 不含 fs/shell/process、`allow(unused_imports)` 不超过基线 |
 | `check-companion-contract.mjs` | 悬浮窗公开演示 postMessage channel 两端一致检查 |
 | `bump-version.sh` | 统一 bump 版本（单一版本源；同步 6 crate、前端/npm/tauri 清单与 Cargo.lock） |
+| `publish-github-packages.sh` | 把 npmjs 上已发布的主包 + 5 个平台包重打包成 scoped 名（`@<scope>/…`）发到 GitHub Packages（备用渠道；`--dry-run` 只看差异。CI 由 `build.yml` 的发版 job 调用，历史版本用 `github-packages.yml` 回填） |
 | `build-companion.mjs` | 内置悬浮窗嵌入包 / 运行时 / 演示包构建（见 docs/companion.md） |
 | `gen-update-json.sh` / `merge-update-manifests.py` | 生成 / 合并 Tauri updater 清单（CI 发版流程使用；`notes` 口径见下节） |
 | `make-dmg.sh` / `dmgbuild-settings.py` | macOS DMG 打包（CI 无 Finder 环境使用 dmgbuild） |

@@ -19,6 +19,23 @@ workbuddy-shift status       # 终端查看当前账号
 支持 macOS（Apple Silicon / Intel）、Windows x64、Linux x64 与 Linux ARM64；Linux ARM64
 只提供 npm / webui 形态（桌面安装包仍只有 x64）。
 
+#### 备用渠道：GitHub Packages
+
+同一版本也镜像在 GitHub Packages（scoped 包名，版本号与 npmjs 完全相同）：
+
+```bash
+npm login --registry=https://npm.pkg.github.com   # 需要 GitHub token，至少 read:packages
+npm i -g @magicapple123/workbuddy-shift --registry=https://npm.pkg.github.com
+```
+
+`npm login` 只写入 token，不会建立 `@magicapple123` 的 registry 映射，所以安装时必须带
+`--registry`（否则 scoped 包仍去 npmjs 找、必然 404）。长期使用可把 scope 映射写进
+`~/.npmrc`（`npm config set @magicapple123:registry https://npm.pkg.github.com`），之后不必每次带。
+
+为什么需要先登录：GitHub Packages 的 npm registry 即使对公开包也要求携带 token。
+因此**主渠道仍是 npmjs 的 `workbuddy-shift`**，这条只在 npmjs 不可用时兜底；
+`postinstall` 会依次尝试 npmjs 的平台包与 scoped 平台包，因此无论从哪个渠道安装都能拿到对应二进制。
+
 webui 界面与桌面 App 一致，功能覆盖下方全部模块（会话悬浮窗与开机自启为桌面版专属）。
 
 ### 桌面 App

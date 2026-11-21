@@ -146,6 +146,16 @@ cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p compa
    区块，没有标记时按行清洗整份正文（丢表格 / 标题 / 引用 / 强调标记）。完整说明仍由
    Release 页承载。规则细节见 `scripts/README.md` 的「更新清单的 `notes` 口径」。
    写下一版发布说明时记得补这段摘要区块。
+7. tag 发版会额外把 npm 包镜像一份到 GitHub Packages（scoped 名
+   `@<owner>/workbuddy-shift*`，由 `scripts/publish-github-packages.sh` 从 npmjs 的
+   tarball 重打包后发布，备用渠道、版本号与 npmjs 同号）；workflow 加入之前的历史版本用
+   `.github/workflows/github-packages.yml` 手动回填（输入 version，例如 `0.2.5`）。
+   - 发布命令不带 `--access`：GitHub Packages 的 npm registry 不认 npmjs 那套
+     `--access` 语义，可见性由包设置 / 与仓库的关联决定，带上去可能直接报参数错误。
+   - **首次发布后必须确认可见性**：仓库 →「Packages」→ 对应包 → *Package settings*
+     检查 Visibility。`package.json` 的 `repository` 字段把包关联到公开仓库后**通常**会
+     继承仓库的可见性，但不保证——若显示 Private，手动改成 Public（或确认已继承公开仓库）。
+     否则未登录的安装方即使自带 token 也可能拿不到包（表现为 404 / 无权限）。
 
 > 注意：`createUpdaterArtifacts` 只会为当前版本生成签名安装包；CI 每次构建前会清掉
 > `target/**/release/bundle`，避免 cargo cache 把旧安装包带进 Release。
