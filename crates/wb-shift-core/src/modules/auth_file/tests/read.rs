@@ -244,3 +244,163 @@
             "导入账号自带档位，无需依赖域名兜底"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // 导出 `lastRefreshTime`：写真实刷新时刻，不得用导出时刻兜底
+    // -----------------------------------------------------------------------
+
+    /// 只在临时目录内构造假凭据，导出的所有用例都零网络请求。
+    fn export_fixture(auth_raw: Value, refreshed_at: Option<i64>) -> Value {
+        let mut acc = json!({
+            "uid": "u-export",
+            "access_token": "test-access-token",
+            "refresh_token": "test-refresh-token",
+            "auth_raw": auth_raw,
+        });
+        if let Some(ts) = refreshed_at {
+            acc["refreshedAt"] = json!(ts);
+        }
+        acc
+    }
+
+    /// 已记录的刷新时刻必须原样保留（两种历史结构都要认），无记录时写 0。
+    #[test]
+    fn export_keeps_recorded_last_refresh_time_instead_of_export_clock() {
+        let recorded = 1_789_603_905_533_i64;
+        for auth_raw in [
+            json!({"lastRefreshTime": recorded}),
+            json!({"auth": {"lastRefreshTime": recorded}}),
+        ] {
+            let auth = build_auth_obj(&export_fixture(auth_raw.clone(), None));
+            assert_eq!(
+                auth["lastRefreshTime"],
+                json!(recorded),
+                "已记录的刷新时刻必须保留: {auth_raw}"
+            );
+            assert_ne!(
+                auth["lastRefreshTime"],
+                json!(now_ms()),
+                "导出时刻不得冒充刷新时刻"
+            );
+        }
+
+        let auth = build_auth_obj(&export_fixture(json!({}), None));
+        assert_eq!(auth["lastRefreshTime"], json!(0));
+    }
+
+    /// 账号库 `refreshedAt` 与已记录值取最大：谁更新用谁。
+    #[test]
+    fn export_uses_max_of_library_and_recorded_refresh_time() {
+        let newer = 1_789_700_000_000_i64;
+        let older = 1_789_600_000_000_i64;
+
+        let auth = build_auth_obj(&export_fixture(
+            json!({"auth": {"lastRefreshTime": older}}),
+            Some(newer),
+        ));
+        assert_eq!(auth["lastRefreshTime"], json!(newer));
+
+        // 官方客户端可能在本工具之外刷新过，此时认证文件的记录更新。
+        let auth = build_auth_obj(&export_fixture(
+            json!({"auth": {"lastRefreshTime": newer}}),
+            Some(older),
+        ));
+        assert_eq!(auth["lastRefreshTime"], json!(newer));
+    }
+
+    /// 重复导出不得推进时钟：两次写出的 `lastRefreshTime` 必须一致。
+    #[test]
+    fn repeated_export_does_not_advance_last_refresh_time() {
+        let dir = TempAuthDir::new();
+        let path = dir.auth_path(WbVariant::Cn);
+        let recorded = 1_789_600_000_000_i64;
+        let account = export_fixture(json!({"auth": {"lastRefreshTime": recorded}}), None);
+
+        write_account_to_auth_file_at(&account, &path).unwrap();
+        let first = read_auth_file_at(&path).unwrap();
+        assert_eq!(first["auth"]["lastRefreshTime"], json!(recorded));
+
+        write_account_to_auth_file_at(&account, &path).unwrap();
+        let second = read_auth_file_at(&path).unwrap();
+        assert_eq!(second["auth"]["lastRefreshTime"], json!(recorded));
+        assert_eq!(second["auth"]["accessToken"], "test-access-token");
+    }
+
+    /// 整数字符串与秒级（10 位）时间戳都要归一成毫秒。
+    #[test]
+    fn export_accepts_string_and_second_precision_timestamps() {
+        let expected_ms = 1_789_603_905_533_i64;
+        let expected_s = 1_789_603_905_000_i64;
+        for (recorded, expected) in [
+            (json!("1789603905"), expected_s),
+            (json!("1789603905533"), expected_ms),
+            (json!(1789603905), expected_s),
+            (json!(1789603905533_i64), expected_ms),
+        ] {
+            for raw in [
+                json!({"lastRefreshTime": recorded.clone()}),
+                json!({"auth": {"lastRefreshTime": recorded.clone()}}),
+            ] {
+                let auth = build_auth_obj(&export_fixture(raw, None));
+                assert_eq!(
+                    auth["lastRefreshTime"],
+                    json!(expected),
+                    "记录值 {recorded} 归一错误"
+                );
+            }
+        }
+
+        // 账号库的 `refreshedAt` 同样接受字符串秒级。
+        let mut acc = export_fixture(json!({}), None);
+        acc["refreshedAt"] = json!("1789603905");
+        assert_eq!(build_auth_obj(&acc)["lastRefreshTime"], json!(expected_s));
+    }
+
+    /// 非法 / 非正数 / 未来时间一律按未知写 0（不能用导出时刻兜底）。
+    #[test]
+    fn export_writes_zero_for_unknown_invalid_or_future_refresh_time() {
+        let now = now_ms();
+        for auth_raw in [
+            json!({}),
+            json!({"lastRefreshTime": 0}),
+            json!({"lastRefreshTime": -1}),
+            json!({"lastRefreshTime": "not-a-number"}),
+            json!({"lastRefreshTime": null}),
+            json!({"lastRefreshTime": now + 60_000}),
+            json!({"auth": {"lastRefreshTime": now + 86_400_000}}),
+        ] {
+            let auth = build_auth_obj(&export_fixture(auth_raw.clone(), None));
+            assert_eq!(
+                auth["lastRefreshTime"],
+                json!(0),
+                "非法/未来时间必须写 0: {auth_raw}"
+            );
+        }
+
+        // `refreshedAt` 是未来时同样不能兜底成其它值。
+        let mut acc = export_fixture(json!({}), None);
+        acc["refreshedAt"] = json!(now + 60_000);
+        assert_eq!(build_auth_obj(&acc)["lastRefreshTime"], json!(0));
+    }
+
+    /// 加密信封必须原样写回，同时照常回填真实刷新时刻。
+    #[test]
+    fn export_preserves_encrypted_envelope_while_recording_refresh_time() {
+        let dir = TempAuthDir::new();
+        let path = dir.auth_path(WbVariant::Ai);
+        let envelope = json!({"$wbEncrypted": 1, "envelope": {"v": 1, "wrapped": "test"}});
+        let recorded = 1_789_600_000_000_i64;
+        let account = json!({
+            "uid": "u-envelope",
+            "access_token": envelope.clone(),
+            "refresh_token": envelope.clone(),
+            "auth_raw": {"auth": {"lastRefreshTime": recorded}},
+        });
+
+        write_account_to_auth_file_at(&account, &path).unwrap();
+
+        let written = read_auth_file_at(&path).unwrap();
+        assert_eq!(written["auth"]["accessToken"], envelope);
+        assert_eq!(written["auth"]["refreshToken"], envelope);
+        assert_eq!(written["auth"]["lastRefreshTime"], json!(recorded));
+    }

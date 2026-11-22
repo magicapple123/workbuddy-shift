@@ -37,7 +37,13 @@ pub use read::{
     backup_auth_file, build_account_obj, build_auth_obj, import_from_auth_file, read_auth_file,
     read_auth_file_at,
 };
-pub use sync::write_account_to_auth_file;
+// 凭据写入互斥与切号写回（issue #202）：两个入口（切号 / 令牌刷新）都从这里取锁，
+// 保证「读快照 → 写回」与「刷新 → 回写」不会交叉覆盖。
+pub use sync::{
+    ensure_snapshot_is_current, try_acquire_credential_write_lock, write_account_to_auth_file,
+    write_back_credentials, CredentialFreshness, CREDENTIAL_LOCK_BUSY_MESSAGE,
+    CREDENTIAL_LOCK_FILE, CREDENTIAL_LOCK_UNAVAILABLE_PREFIX,
+};
 
 #[cfg(test)]
 mod tests {
@@ -47,4 +53,5 @@ mod tests {
     use super::read::*;
     use super::sync::*;
     include!("tests/read.rs");
+    include!("tests/sync.rs");
 }

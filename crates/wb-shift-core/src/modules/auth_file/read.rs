@@ -72,6 +72,65 @@ pub fn build_account_obj(acc: &Value) -> Value {
     Value::Object(obj)
 }
 
+/// 秒级时间戳的判定上界：13 位毫秒必然大于它，10 位秒必然小于它。
+///
+/// 官方认证文件历史上出现过秒级与毫秒级两种写法，归一前必须先分数量级，
+/// 否则 10 位秒会被当成 1970 年附近的时刻（客户端会立即认为凭据需要刷新）。
+const SECONDS_UPPER_BOUND: i64 = 100_000_000_000;
+
+/// 把「整数 / 整数字符串 / 秒级 / 毫秒级」的时间戳归一成毫秒，不可用值返回 `None`。
+///
+/// 不可用的定义：非数字、非正数、以及晚于 `now` 的未来时刻。未来时刻会被官方客户端
+/// 当成「刚刚刷新过而且永远不到期」，从而无限期跳过刷新，所以必须按未知丢弃。
+pub(super) fn normalize_refresh_ts(value: &Value, now: i64) -> Option<i64> {
+    let raw = match value {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))?,
+        Value::String(s) => s.trim().parse::<i64>().ok()?,
+        _ => return None,
+    };
+    if raw <= 0 {
+        return None;
+    }
+    let ms = if raw < SECONDS_UPPER_BOUND {
+        raw.checked_mul(1000)?
+    } else {
+        raw
+    };
+    (ms > 0 && ms <= now).then_some(ms)
+}
+
+/// 导出认证文件时应写入的 `lastRefreshTime`（毫秒；`0` = 未知）。
+///
+/// 导出既没有登录也没有刷新 token，把「导出时刻」写进这个字段会让几小时前刷新过的
+/// 凭据看起来像刚刷新（官方客户端用该字段做约 30 秒的刷新冷却判断），从而推迟真正
+/// 需要的刷新。因此只回填**确实发生过**的刷新，取以下两个来源的最大有效值：
+///
+/// - 账号库的 `refreshedAt`：`refresh.rs` 续期成功时用 `now_ms()` 写入的毫秒；
+/// - 认证文件已记录的 `lastRefreshTime`：平铺 `auth_raw.lastRefreshTime` 与嵌套
+///   `auth_raw.auth.lastRefreshTime` 两种结构都要认（导入时 `auth_raw` 存的是
+///   完整认证文件根，历史版本两种都出现过）。
+///
+/// 两者都不可用时写 `0`：宁可让客户端认为「不知道上次刷新时刻」，也不要用导出时刻或
+/// `createdAt` 兜底制造一个假的刷新记录。
+pub(super) fn export_last_refresh_time(acc: &Value, now: i64) -> i64 {
+    let raw = acc.get("auth_raw");
+    let recorded_flat = raw
+        .and_then(|r| r.get("lastRefreshTime"))
+        .and_then(|v| normalize_refresh_ts(v, now));
+    let recorded_nested = raw
+        .and_then(|r| r.get("auth"))
+        .and_then(|a| a.get("lastRefreshTime"))
+        .and_then(|v| normalize_refresh_ts(v, now));
+    let refreshed = acc
+        .get("refreshedAt")
+        .and_then(|v| normalize_refresh_ts(v, now));
+    [recorded_flat, recorded_nested, refreshed]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+}
+
 /// 从账号库记录构造官方 auth 字段。对照 server.py `build_auth_obj`。
 pub fn build_auth_obj(acc: &Value) -> Value {
     let mut obj: Map<String, Value> = Map::new();
@@ -106,7 +165,11 @@ pub fn build_auth_obj(acc: &Value) -> Value {
         "domain".to_string(),
         get_str(acc, "domain").unwrap_or_default().into(),
     );
-    obj.insert("lastRefreshTime".to_string(), json!(now));
+    // 写真实刷新时刻（未知写 0），不能写导出时刻：见 export_last_refresh_time。
+    obj.insert(
+        "lastRefreshTime".to_string(),
+        json!(export_last_refresh_time(acc, now)),
+    );
     setdefault(
         &mut obj,
         "scope",

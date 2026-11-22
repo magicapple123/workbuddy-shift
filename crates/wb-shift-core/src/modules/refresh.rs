@@ -24,11 +24,68 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::modules::account::{build_auth_headers, upsert_account};
+use crate::modules::account::{account_meta, build_auth_headers, upsert_account};
+use crate::modules::auth_file;
 use crate::modules::config::{http_request, load_checkin_config, norm_ts, now_ms, RunFlagGuard};
 
 static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 static RELOGIN_SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 本条记录「本次没有真正刷新」的内存标记键（**从不落盘**）。
+///
+/// 抢不到凭据写入锁时既不能写 `needs_relogin`（那是「账号已失效」的错误结论），也不能
+/// 安静地返回成功（保活/复核会报 OK）。因此在返回值里放一个内存标记，让
+/// [`refresh_was_skipped`] 的调用方把这次算作「跳过」，不写冷却、不报成功。
+const REFRESH_SKIPPED_FIELD: &str = "refresh_skipped";
+/// [`REFRESH_SKIPPED_FIELD`] 的唯一取值：抢不到凭据写入锁。
+const REFRESH_SKIPPED_LOCK_BUSY: &str = "credential_lock_busy";
+
+/// 本次刷新是否因为抢不到凭据写入锁而被跳过（该标记只在内存里，从不落盘）。
+pub fn refresh_was_skipped(account: &Value) -> bool {
+    refresh_skip_reason(account).is_some()
+}
+
+/// 本次刷新被跳过的**机器可读**取值；没被跳过时返回 `None`。
+///
+/// 宿主（Tauri command / HTTP handler）用它给响应加 `refreshSkipped` 字段：跳过时既不能
+/// 报成功（界面会以为令牌已续期），也不能报失败（会让用户以为账号失效）。当前只有
+/// [`REFRESH_SKIPPED_LOCK_BUSY`] 一个取值。
+pub fn refresh_skip_reason(account: &Value) -> Option<&str> {
+    account
+        .get(REFRESH_SKIPPED_FIELD)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+/// 本次刷新被跳过的**用户可读**原因（含「未写入任何凭据」的说明）；没被跳过时返回 `None`。
+pub fn refresh_skip_message(account: &Value) -> Option<String> {
+    refresh_skip_reason(account)?;
+    account
+        .get("refresh_failed_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// 「刷新令牌」入口的响应投影：`account_meta` + 跳过标记（issue #202）。
+///
+/// 两个宿主（Tauri `commands::refresh_account_token` 与 HTTP `api_refresh_token`）**共用**
+/// 本函数，字段名与取值只有这一处定义：
+///
+/// - 正常刷新：与改造前完全一致，只有 `account_meta`，不新增任何字段；
+/// - 抢不到凭据写入锁：额外带 `refreshSkipped`（机器可读，当前唯一取值
+///   `credential_lock_busy`）与 `refreshSkippedReason`（用户可读原因）。
+///
+/// 为什么不复用 `needsRelogin` 之类既有字段：跳过既不是成功也不是「账号失效」，
+/// 借用任何一种都会让前端给出错误结论；新字段只在真正发生跳过的响应里出现，
+/// 老客户端读到未知字段会忽略，不构成兼容问题。
+pub fn refresh_result_meta(account: &Value) -> Value {
+    let mut meta = account_meta(account);
+    if let Some(reason) = refresh_skip_reason(account) {
+        meta["refreshSkipped"] = json!(reason);
+        meta["refreshSkippedReason"] = json!(refresh_skip_message(account).unwrap_or_default());
+    }
+    meta
+}
 
 // ---------------------------------------------------------------------------
 // R5-08 A：刷新失败分级
@@ -471,6 +528,19 @@ pub async fn verify_relogin(account_id: &str) -> Value {
         return json!({"accountId": account_id, "skipped": "no_marker"});
     }
     let verified = refresh_account_token(current).await;
+    if refresh_was_skipped(&verified) {
+        // 抢不到凭据写入锁：本次**没有**真正复核。既不能当成成功（会清掉标记、谎报复核通过），
+        // 也不能当成失败写冷却（会把真正的自愈往后推）。什么都不写，如实说「跳过了」。
+        return json!({
+            "accountId": account_id,
+            "verified": false,
+            "skipped": "credential_lock_busy",
+            "reason": verified
+                .get("refresh_failed_reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
     let recovered = !has_relogin_marker(&verified);
     record_verify_result(account_id, recovered);
     json!({
@@ -566,6 +636,17 @@ fn refresh_headers(account: &Value, refresh_token: &str) -> HashMap<String, Stri
 ///   `refresh_failed_reason`，保留原凭据等下一次重试。
 ///
 /// 成功是**唯一**清除标记的地方（`needs_relogin` / reason / since / 退避计数一起清）。
+///
+/// # 凭据写入互斥（issue #202）
+///
+/// 整个「读快照 → 打刷新接口 → 写回账号库」都在 `locks/credentials.lock` 里完成，
+/// 与切号写回共用同一把锁。两条硬约束：
+///
+/// 1. **必须在发出刷新请求之前抢到锁**。刷新会轮换 refresh token：若先打接口再抢锁，
+///    抢不到就只能丢弃新令牌，而服务端已经把旧令牌作废 —— 那等于把账号写成
+///    「需重新登录」，比原来那个 bug 更糟；
+/// 2. **抢不到就立即失败**（不等待、不降级继续）：不调用 `upsert_account`、不写
+///    `needs_relogin`，只在返回值里放一个内存标记供保活/复核判定为「跳过」。
 pub async fn refresh_account_token(mut account: Value) -> Value {
     let previous_access_token = account
         .get("access_token")
@@ -578,6 +659,15 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
         .unwrap_or_default();
     if rt.is_empty() {
         // 没有 refresh token 属于「确实无法续期」，按吊销处理。
+        //
+        // 这里是凭据写入互斥的**明确豁免**：不持 `credentials.lock` 就 `upsert_account`。
+        // 与文件头「两个写入入口必须共用同一把锁」的差别有两点：
+        // ① 那把锁要防的是「服务端已经把 refresh token 轮换掉、盘上还是旧的」这种双写竞态，
+        //    没有 refresh token 连刷新请求都发不出去，根本不存在「已被轮换的新令牌被丢弃」，
+        //    这里写下的只是一条「需重新登录」标记 + 未改动的原凭据；
+        // ② `upsert_account` 是「重新 load 全量账号库 → 只替换本账号 → 整文件原子写」的读改写，
+        //    不是把整份账号库覆盖成手里的旧快照，因此不会像主路径那样用过期快照盖掉别人的写入。
+        // 主路径（下面抢锁那段）之所以必须持锁，是因为它中间要 await 一次会轮换令牌的 HTTP 请求。
         mark_relogin_required(
             &mut account,
             "缺少 refresh token，无法刷新，需重新登录".to_string(),
@@ -586,12 +676,20 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
         return account;
     }
 
+    // ① 先抢锁：抢不到时一个字都还没写、接口也还没打（见上面的两条硬约束）。
+    let lock = match auth_file::try_acquire_credential_write_lock() {
+        Ok(lock) => lock,
+        Err(reason) => return refresh_skipped_by_credential_lock(account, reason),
+    };
+
     let headers = refresh_headers(&account, &rt);
     // 刷新必须走账号自身档位的域名：把国际版 token 打到国内网关等于登录失效。
     let url = refresh_url(&account);
     let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     let recovered = apply_refresh_response(&mut account, &resp);
     let _ = upsert_account(&account);
+    // ② 账号库已经落盘，临界区到此结束；后面的 CLI 配置同步与凭据无关，不必持锁。
+    drop(lock);
     // Windows 不执行 apiKeyHelper；当前 CLI 账号刷新后同步 settings env。
     // 同步失败不阻断 WorkBuddy 保活；状态接口会根据 settings 与账号库是否
     // 一致显示“待同步”，避免把认证配置错误混入账号数据。
@@ -602,6 +700,19 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
             previous_access_token.as_deref(),
         );
     }
+    account
+}
+
+/// 抢不到凭据写入锁时的返回：**不落盘、不写 `needs_relogin`**，只放内存诊断标记。
+///
+/// 刻意不调用 `upsert_account`：抢不到锁说明另有写入正在进行，任何读改写都可能拿旧快照
+/// 覆盖它的结果 —— 正是 issue #202 的原始故障。
+fn refresh_skipped_by_credential_lock(mut account: Value, reason: String) -> Value {
+    eprintln!("[refresh] 跳过刷新：{reason}");
+    account[REFRESH_SKIPPED_FIELD] = json!(REFRESH_SKIPPED_LOCK_BUSY);
+    // 与「暂时失败」同形：保活据此报 `temporary_failed`（不是 ok），且不写持久化字段。
+    account["refresh_failed_at"] = json!(now_ms());
+    account["refresh_failed_reason"] = json!(reason);
     account
 }
 
@@ -782,6 +893,10 @@ pub async fn run_keepalive_cycle() -> Value {
             .unwrap_or("")
             .is_empty()
         {
+            // 与 `refresh_account_token` 的「缺 refresh token」分支同一处理，同样**不持**
+            // 凭据写入锁。豁免理由也相同：没有 refresh token 就没有「服务端已轮换旧令牌」的
+            // 竞态，写下的只是「需重新登录」标记，原凭据一个字节不变；而 `upsert_account` 是
+            // 重新读全量账号库、只替换本账号的读改写，不是整文件覆盖，不会把别的账号刷回旧快照。
             mark_relogin_required(
                 &mut acc,
                 "缺少 refresh token，无法保活，需重新登录".to_string(),
@@ -1482,5 +1597,93 @@ mod tests {
             // 刷新不带 platform 查询参数/头：官方刷新同样不带（research §2 已推翻旧假设）。
             assert!(!headers.contains_key("platform"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // #202：抢不到凭据写入锁时的失败语义
+    // -----------------------------------------------------------------------
+
+    /// 抢不到锁：只放内存标记——不写 `needs_relogin`、不动凭据、不写 `refreshedAt`。
+    ///
+    /// 落盘由 `refresh_account_token` 保证（该分支不调用 `upsert_account`）；这里固定
+    /// 返回值本身的形状，避免将来把「跳过」写成「吊销」或「成功」。
+    #[test]
+    fn credential_lock_busy_skips_refresh_without_marking_relogin() {
+        let account = json!({
+            "id": "acc-lock-busy",
+            "access_token": "old-at",
+            "refresh_token": "old-rt",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        let skipped = refresh_skipped_by_credential_lock(
+            account.clone(),
+            auth_file::CREDENTIAL_LOCK_BUSY_MESSAGE.to_string(),
+        );
+
+        assert!(
+            refresh_was_skipped(&skipped),
+            "必须留下「本次没有刷新」的标记"
+        );
+        assert!(
+            !has_relogin_marker(&skipped),
+            "抢不到锁不是「需重新登录」：账号本身没被吊销"
+        );
+        // 凭据原样保留：调用方还会拿它继续发请求，不能被清空或改写成空串。
+        assert_eq!(skipped["access_token"], "old-at");
+        assert_eq!(skipped["refresh_token"], "old-rt");
+        assert_eq!(skipped["expiresAt"], 1_700_000_000_000i64);
+        assert!(
+            skipped.get("refreshedAt").is_none(),
+            "没有刷新就不能写刷新时刻"
+        );
+        // 与「暂时失败」同形：保活据此报 temporary_failed，而不是 ok。
+        assert!(skipped
+            .get("refresh_failed_at")
+            .and_then(Value::as_i64)
+            .is_some());
+        assert_eq!(
+            skipped["refresh_failed_reason"],
+            auth_file::CREDENTIAL_LOCK_BUSY_MESSAGE
+        );
+        // 正常账号不带这个标记，否则复核/保活会把正常结果也当成「跳过」。
+        assert!(!refresh_was_skipped(&account));
+    }
+
+    /// 「刷新令牌」入口的响应投影：跳过时带可识别字段，正常刷新一个字都不多。
+    #[test]
+    fn refresh_result_meta_exposes_skip_marker_only_when_skipped() {
+        let account = json!({
+            "id": "acc-202-meta",
+            "uid": "uid-202",
+            "nickname": "示例账号",
+            "access_token": "old-at",
+            "refresh_token": "old-rt",
+        });
+
+        // 正常刷新：响应形态与改造前完全一致（不多出任何字段）。
+        let normal = refresh_result_meta(&account);
+        assert!(normal.get("refreshSkipped").is_none());
+        assert!(normal.get("refreshSkippedReason").is_none());
+        assert_eq!(normal["uid"], "uid-202");
+
+        // 跳过：两个字段都要能被前端读到，且原因里带「未写入任何凭据」。
+        let skipped = refresh_skipped_by_credential_lock(
+            account,
+            auth_file::CREDENTIAL_LOCK_BUSY_MESSAGE.to_string(),
+        );
+        assert_eq!(
+            refresh_skip_reason(&skipped),
+            Some(REFRESH_SKIPPED_LOCK_BUSY),
+            "机器可读取值必须稳定"
+        );
+        let meta = refresh_result_meta(&skipped);
+        assert_eq!(meta["refreshSkipped"], REFRESH_SKIPPED_LOCK_BUSY);
+        assert_eq!(
+            meta["refreshSkippedReason"],
+            auth_file::CREDENTIAL_LOCK_BUSY_MESSAGE
+        );
+        // 元数据本身不含 token：响应投影不能把凭据漏给浏览器。
+        assert!(meta.get("access_token").is_none());
+        assert!(meta.get("refresh_token").is_none());
     }
 }

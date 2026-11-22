@@ -1,4 +1,14 @@
 //! 执行切换：switch_account 生命周期编排。
+//!
+//! # 凭据写入的互斥（issue #202）
+//!
+//! 切换在开头读一份账号快照，直到最后才把它写进官方认证文件——中间隔着关进程与
+//! 恢复/复制/同步会话（最坏数分钟）。这段窗口里如果有一次令牌刷新落盘，快照就变成了
+//! 旧令牌，写回去等于**静默写坏凭据**（WorkBuddy 一启动就掉线，切换还返回成功）。
+//!
+//! 因此写回只走 `auth_file::write_back_credentials`：它与令牌刷新共用同一把跨进程锁
+//! （`locks/credentials.lock`），并在锁内重读账号库与官方文件、校验快照没有被磁盘超越。
+//! 锁顺序见 `auth_file/sync.rs` 的文件头：本锁最外层，持锁期间不再获取任何其它锁。
 
 use super::plan::*;
 use super::*;
@@ -25,6 +35,9 @@ pub fn switch_account(
     };
 
     progress("开始切换账号…");
+    // 这份快照会一直被用到最后的写回（中间是先关闭客户端、再恢复/复制/同步会话）。
+    // 期间若发生了令牌刷新，快照就成了旧令牌 —— 写回前 `write_back_credentials` 会用
+    // 锁内重读到的时间戳发现它并放弃写回（issue #202），不会覆盖刚续期的新令牌。
     let acc =
         account::find_account(account_id).ok_or_else(|| format!("账号不存在: {account_id}"))?;
     // 档位以账号自身为准：签名里的参数无法表达「用 A 档位操作 B 档位账号」。
@@ -173,12 +186,18 @@ pub fn switch_account(
     };
 
     progress("正在写入认证文件…");
-    auth_file::write_account_to_auth_file(&acc, variant)?;
+    // 写回是唯一会改动官方登录态的一步：抢凭据写入锁 → 锁内重读 → 校验快照未过时 → 原子写。
+    // 抢不到锁或快照已被刷新超越都返回 Err（不写入、不返回成功），见 issue #202。
+    auth_file::write_back_credentials(&acc, variant)?;
     if restart {
         progress("正在启动 WorkBuddy…");
         launch_workbuddy(variant, Some(&progress))?;
     }
     progress("切换完成");
+
+    // 「最近切换」时间戳（issue #184）：只在认证文件已写入、WorkBuddy 已启动之后记录。
+    // 失败只影响卡片徽标与排序，不得回滚切换、不得让切换报错（见 `touch_last_used` 注释）。
+    let _ = account::touch_last_used(account_id, "workbuddy");
 
     let mut result = json!({
         "ok": true,

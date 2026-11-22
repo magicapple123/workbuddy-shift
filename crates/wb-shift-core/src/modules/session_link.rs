@@ -64,7 +64,9 @@ pub(crate) use operation_log::{
     OP_SCAN_PROBLEM_PREFIX,
 };
 // 旧公开路径：其它模块的单测仍按 `session_link::X` 取这些项（生产路径不直接使用）。
-pub use operation_log::{try_lock_file, LockError};
+// `FileLock` 一并导出：`auth_file` 的凭据写入锁（issue #202）要持有同一个 RAII 守卫类型，
+// 锁语义（try_lock + Busy/Unavailable 分类 + Drop 释放）仍只有本模块一份实现。
+pub use operation_log::{try_lock_file, FileLock, LockError};
 pub(crate) use preview::{
     group_fingerprint, load_preview_token, save_preview_token, verify_preview, PreviewBinding,
     PreviewMemberBinding,
