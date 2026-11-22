@@ -56,6 +56,14 @@ pub(super) fn close_codebuddy_cn_macos(timeout_secs: i64) -> Result<(), String> 
     ))
 }
 
+/// 优雅关闭 CodeBuddy CN IDE → 超时只强杀无窗口残留 → 报错点名残留 PID（+ 窗口标题）。
+///
+/// 关闭手段分两类（理由见 `process::win_close` 的模块注释）：
+/// - 有可见窗口的 PID → `SC_CLOSE`（等价用户点 ✕，保存提示由 IDE 自己弹），**不发** `taskkill`；
+/// - 没有可见窗口的 PID → 保持旧行为，`taskkill /PID /T`（不带 `/F`）。
+///
+/// 超时后的 `/F` 只打给「此刻仍没有可见窗口」的残留 PID：对走保存流程的 IDE 强杀会丢
+/// 用户未保存的编辑，宁可超时报错。
 #[cfg(target_os = "windows")]
 pub(super) fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String> {
     let rows = windows_cn_process_rows();
@@ -63,7 +71,14 @@ pub(super) fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String
         return Ok(());
     }
     let pids: Vec<u32> = rows.iter().map(|r| r.pid).collect();
-    for pid in &pids {
+
+    let window_pids = process::visible_window_pids(&pids);
+    for pid in &window_pids {
+        // 返回值只表示「有没有命中窗口」：集合已经算过，这里忽略即可。
+        let _ = process::post_close_to_visible_windows(*pid);
+    }
+    // 无窗口的 PID 走旧行为（不带 `/F` 的 `/T`），集合与「允许强杀」同源。
+    for pid in process::force_kill_targets(&pids, &window_pids) {
         let pid_s = pid.to_string();
         let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T"], 10);
     }
@@ -71,12 +86,15 @@ pub(super) fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String
     let started = Instant::now();
     let timeout = Duration::from_secs(timeout_secs.max(1) as u64);
     let graceful_budget = Duration::from_secs(8).min(timeout);
-    let remaining = process::wait_windows_pids_gone(&pids, graceful_budget);
+    let wait_targets = process::close_wait_targets(&pids, &window_pids);
+    let remaining = process::wait_windows_pids_gone(&wait_targets, graceful_budget);
     if remaining.is_empty() {
         return Ok(());
     }
 
-    for pid in &remaining {
+    // 重新探测：窗口可能是在上一轮探测之后才建出来的。
+    let still_windowed = process::visible_window_pids(&remaining);
+    for pid in process::force_kill_targets(&remaining, &still_windowed) {
         let pid_s = pid.to_string();
         let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
     }
@@ -87,7 +105,12 @@ pub(super) fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String
     if leftover.is_empty() {
         return Ok(());
     }
-    Err("CodeBuddy CN 进程无法关闭，请手动结束 CodeBuddy CN 进程".to_string())
+    let titles = process::window_titles(&leftover);
+    Err(process::close_timeout_error_message(
+        "CodeBuddy CN",
+        &leftover,
+        &titles,
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -322,6 +345,12 @@ pub(crate) fn inject_session_and_finish(
         eprintln!("[codebuddy-cn-ide] launching CodeBuddy CN…");
         launch_codebuddy_cn()?;
     }
+
+    // 「最近切换」时间戳（issue #184）：secret 已注入、当前账号已记录、（按需）已重启，
+    // 切换确实生效后才写。位置与 `switch::execute` 一致——启动失败会让本函数返回 Err，
+    // 那种情况下不记录，避免「提示失败但卡片显示刚切过」。
+    // 失败只影响卡片徽标与排序，不得回滚已写入的 secret、不得把成功改成报错。
+    let _ = account::touch_last_used(account_id, "codebuddy-cn-ide");
 
     Ok(json!({
         "ok": true,

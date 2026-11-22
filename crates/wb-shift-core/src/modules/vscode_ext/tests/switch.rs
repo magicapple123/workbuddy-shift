@@ -262,6 +262,64 @@
         assert!(message.contains("重新打开过 VS Code"), "{message}");
     }
 
+    /// 超时文案点名窗口标题：PID 保留（便于排查），标题让用户认出是哪个窗口没关掉。
+    #[test]
+    fn close_timeout_error_with_titles_names_windows_and_keeps_pids() {
+        let titles = vec![
+            "main.ts - 项目 - Visual Studio Code".to_string(),
+            // 重复 / 空白标题必须折叠，否则文案会变成噪音。
+            "main.ts - 项目 - Visual Studio Code".to_string(),
+            "   ".to_string(),
+            "另一个窗口 - Visual Studio Code".to_string(),
+        ];
+        let message = close_timeout_error_with_titles(&[4242], &titles);
+        assert!(message.contains("4242"), "{message}");
+        assert!(
+            message.contains("main.ts - 项目 - Visual Studio Code"),
+            "{message}"
+        );
+        assert!(message.contains("另一个窗口 - Visual Studio Code"), "{message}");
+        assert_eq!(
+            message.matches("main.ts - 项目").count(),
+            1,
+            "重复标题只点名一次: {message}"
+        );
+        // 排查提示一字不改地保留（两条路径话术不能漂移）。
+        assert!(message.contains("请在 VS Code 中处理保存提示"), "{message}");
+        assert!(message.contains("重新打开过 VS Code"), "{message}");
+        assert!(!message.contains("「   」"), "空白标题不得出现: {message}");
+    }
+
+    /// 拿不到窗口标题时必须退化到只报 PID（不能出现空的「窗口: 」）。
+    #[test]
+    fn close_timeout_error_with_titles_degrades_to_pids_only() {
+        assert_eq!(
+            close_timeout_error_with_titles(&[4242], &[]),
+            close_timeout_error(&[4242])
+        );
+        assert_eq!(
+            close_timeout_error_with_titles(&[4242], &[" ".to_string()]),
+            close_timeout_error(&[4242])
+        );
+    }
+
+    /// 标题过长（含完整文件路径）时截断，不把界面撑爆；也最多点名 3 个窗口。
+    #[test]
+    fn close_timeout_error_with_titles_truncates_and_caps() {
+        let long = "a".repeat(500);
+        let message = close_timeout_error_with_titles(&[1], &[long]);
+        // 字符上限的唯一来源在 `process`（四条关闭路径共用），这里不重复写死数字。
+        let cap = process::MAX_WINDOW_TITLE_CHARS;
+        assert!(message.contains(&"a".repeat(cap)), "{message}");
+        assert!(!message.contains(&"a".repeat(cap + 1)), "{message}");
+
+        let many: Vec<String> = (0..6).map(|i| format!("窗口{i}")).collect();
+        let message = close_timeout_error_with_titles(&[1], &many);
+        assert!(message.contains("窗口0"), "{message}");
+        assert!(message.contains("窗口2"), "{message}");
+        assert!(!message.contains("窗口3"), "最多点名 3 个: {message}");
+    }
+
     fn instance_with_pids(pids: Vec<u32>) -> RunningInstance {
         RunningInstance {
             pids,

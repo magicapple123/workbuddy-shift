@@ -149,6 +149,36 @@ pub(super) fn close_timeout_error(alive: &[u32]) -> String {
     )
 }
 
+/// 关闭超时文案（带窗口标题版）：在只报 PID 的基础上点名「卡住的是哪个窗口」。
+///
+/// 为什么需要标题：PID 对用户没有意义，而 `main.ts - 项目 - Visual Studio Code`
+/// 能直接告诉他是哪个窗口没关掉（例如弹了保存提示、或等待期间又打开了一个窗口）。
+/// 标题可能拿不到（窗口随进程一起消失、权限不足），此时必须退化到只报 PID。
+///
+/// 标题的归一化（去空白 / 截断到 80 字符 / 最多 3 个 / 去重）由
+/// [`process::window_titles_clause`] 统一提供：WorkBuddy / CodeBuddy / CodeBuddy CN /
+/// CodeBuddy CLI 四条关闭路径共用同一份规则，这里只负责 VS Code 自己的话术。
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+pub(super) fn close_timeout_error_with_titles(alive: &[u32], titles: &[String]) -> String {
+    let base = close_timeout_error(alive);
+    let Some(clause) = process::window_titles_clause(titles) else {
+        return base;
+    };
+    // 在括号内追加窗口名，其余文案（含排查提示）逐字保留，避免两条路径话术漂移。
+    base.replacen(
+        "）。请在 VS Code 中处理保存提示",
+        &format!("；{clause}）。请在 VS Code 中处理保存提示"),
+        1,
+    )
+}
+
+/// 关闭超时写入 `error.log`：超时是用户可感知的失败，现场（PID + 窗口标题）只在
+/// 这一刻拿得到——VS Code 彻底退出后就再也无法回溯是哪个窗口没关掉。
+#[cfg(target_os = "windows")]
+fn record_close_timeout(message: &str) {
+    crate::modules::error_log::record("backend", "关闭 VS Code 超时", message);
+}
+
 /// 优雅关闭 VS Code → 等待进程消失；超时返回可读错误，**绝不强杀**。
 ///
 /// `pids` 取自**关闭前**采集的 [`RunningInstance`] 快照：Windows / Linux 按这些 PID 精确
@@ -158,6 +188,8 @@ pub(super) fn close_timeout_error(alive: &[u32]) -> String {
 /// 契约（对齐 `.trellis/spec/wb-shift-core/backend/codebuddy-cn-process.md`）：
 /// 禁止 `pkill -f` / `pgrep -f` / `taskkill /IM`，一律精确 PID；等待退出不得早退
 /// （确认的是「按主进程模式命中的进程集合为空」，不是「主进程不在」）。
+/// Windows 的优雅退出走 `SC_CLOSE`（`process::win_close`），同样**不加强制终止**；
+/// 等待判据收窄为「仍持有可见窗口的 PID 全部退出」，理由见函数内 Windows 分支注释。
 pub(super) fn close_vscode(pids: &[u32], timeout_secs: i64) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -197,17 +229,41 @@ pub(super) fn close_vscode(pids: &[u32], timeout_secs: i64) -> Result<(), String
         if pids.is_empty() {
             return Ok(());
         }
-        // `taskkill /PID /T` **不带 `/F`**：等价 WM_CLOSE，会走保存提示。
-        for pid in pids {
-            let pid_arg = pid.to_string();
-            let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_arg, "/T"], 10);
+        // 关闭手段：优先 `SC_CLOSE`（= 点窗口关闭按钮），让主进程自己走保存/退出流程。
+        //
+        // 为什么不是 `taskkill /PID /T`：不带 `/F` 的 taskkill 只对「有窗口」的进程有效，
+        // 对语言服务 / GPU / 扩展宿主这类无窗口进程只回一行「只能强制终止」、进程原样存活；
+        // 带上 `/F` 又是强杀，会丢用户未保存的编辑。原实现两种作用都没落到真正要关的主
+        // 窗口上，于是必然等到超时（用户看到的「等待 VS Code 退出超时」）。
+        //
+        // 等待判据同步收窄：只等「仍持有可见窗口」的 PID——主进程负责把账号写回
+        // `state.vscdb`，主进程退出即写入安全；剩下的语言服务再等下去只会误判超时。
+        // 一个 pid 都没有可见窗口时（后台启动 / 窗口还没建出来）退回旧行为：对每个 PID
+        // 发不带 `/F` 的 taskkill，并按全部 PID 等待。
+        let window_pids = process::visible_window_pids(pids);
+        if window_pids.is_empty() {
+            for pid in pids {
+                let pid_arg = pid.to_string();
+                let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_arg, "/T"], 10);
+            }
+        } else {
+            for pid in &window_pids {
+                // 返回值只用于判断「有没有窗口」：已经算过 window_pids，这里忽略即可。
+                let _ = process::post_close_to_visible_windows(*pid);
+            }
         }
-        let alive =
-            process::wait_windows_pids_gone(pids, Duration::from_secs(timeout_secs.max(1) as u64));
+        let wait_targets = process::close_wait_targets(pids, &window_pids);
+        let alive = process::wait_windows_pids_gone(
+            &wait_targets,
+            Duration::from_secs(timeout_secs.max(1) as u64),
+        );
         if alive.is_empty() {
             Ok(())
         } else {
-            Err(close_timeout_error(&alive))
+            let titles = process::window_titles(&alive);
+            let message = close_timeout_error_with_titles(&alive, &titles);
+            record_close_timeout(&message);
+            Err(message)
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

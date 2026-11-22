@@ -84,6 +84,10 @@ pub(super) fn switch_after_close_inner(
 
     set_active_account_id(account_id)?;
 
+    // 「最近切换」时间戳（issue #184）：全部目标已写入、当前账号已记录，切换已生效。
+    // 失败只影响卡片徽标与排序，不得触发回滚、不得改成报错。
+    let _ = account::touch_last_used(account_id, "jetbrains");
+
     let mut restarted = false;
     let mut relaunch_error: Option<String> = None;
     for inst in closed {

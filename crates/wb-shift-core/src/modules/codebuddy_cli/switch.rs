@@ -139,9 +139,20 @@ pub(super) fn terminate_codebuddy_cli_pids(pids: &[u32]) {
             let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T"], 10);
         }
         let remaining = process::wait_windows_pids_gone(pids, Duration::from_secs(3));
-        for pid in remaining {
+        // CLI 是终端进程，没有可以投 `SC_CLOSE` 的窗口：`window_pids` 传空集 = 残留全部可
+        // 强杀（与旧行为等价）。判定仍走 [`process::force_kill_targets`]，与三条 GUI 关闭
+        // 路径共用同一份「只强杀无窗口进程」的约束，不在这里另写一份。
+        for pid in process::force_kill_targets(&remaining, &[]) {
             let pid_s = pid.to_string();
             let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
+        }
+        let leftover = process::wait_windows_pids_gone(&remaining, Duration::from_secs(2));
+        if !leftover.is_empty() {
+            // 关闭不阻断切换（见 `close_running_codebuddy_cli` 的契约），所以文案进错误日志
+            // 而不是返回值：点名残留 PID，用户可在日志页看到并手动处理。
+            let message = process::close_timeout_error_message("CodeBuddy CLI", &leftover, &[]);
+            crate::modules::error_log::record("backend", "关闭 CodeBuddy CLI 超时", &message);
+            eprintln!("[codebuddy-cli] close timeout: {message}");
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -473,6 +484,15 @@ pub fn switch_active_account(account_id: &str) -> Result<Value, String> {
     }
 
     let region_changed = previous_variant != Some(variant);
+
+    // 「最近切换」时间戳（issue #184）：state 与 helper/区域环境都已落盘，切换确实生效后才写。
+    // 位置与 `switch::execute` / `codebuddy_ide::switch` 一致——上面任一失败都会提前返回 Err，
+    // 那种情况下不记录，避免「提示失败但卡片显示刚切过」。
+    // 失败只影响卡片徽标与排序，不得回滚已写入的 state、不得把成功改成报错。
+    //
+    // 用 `canonical_id`（账号的 `id` 字段）而不是入参 `account_id`：入参允许是 `uid`
+    // （见 `account_index`），而 `touch_last_used` 只按 `id` 定位账号。
+    let _ = account::touch_last_used(&canonical_id, "cli");
 
     Ok(json!({
         "ok": true,

@@ -32,6 +32,9 @@ use std::io::Read;
 
 #[cfg(target_os = "macos")]
 mod macos;
+// Win32 窗口消息关闭助手（`SC_CLOSE`）：只在 Windows 编译，非 Windows 上没有 FFI 面。
+#[cfg(target_os = "windows")]
+mod win_close;
 mod windows;
 
 #[cfg(target_os = "macos")]
@@ -52,6 +55,10 @@ pub use self::macos::macos_workbuddy_app_path;
 pub(crate) use self::macos::wait_macos_main_gone;
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::wait_macos_patterns_empty;
+#[cfg(target_os = "windows")]
+pub(crate) use self::win_close::{
+    post_close_to_visible_windows, visible_window_pids, window_titles,
+};
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::existing_windows_drives;
 pub(crate) use self::windows::parse_windows_display_icon;
@@ -132,6 +139,141 @@ pub(crate) fn run_cmd_timeout(program: &str, args: &[&str], timeout_secs: u64) -
         stdout: out,
         stderr: err,
     })
+}
+
+/// 给 PowerShell 脚本前置 UTF-8 输出编码设置。
+///
+/// **为什么需要**：Windows PowerShell 5.1 按控制台代码页写 stdout，简中系统是 GBK（936）；
+/// 我们按 UTF-8 解码，`C:\Users\丁昊\…` 这类非 ASCII 路径会变成替换字符 `U+FFFD`，
+/// 之后再拿这个路径 spawn 只会得到 `os error 3`（系统找不到指定的路径）。
+/// 把 `[Console]::OutputEncoding` 改成 UTF-8 后，PowerShell 自己的输出流与它转发的原生
+/// 命令输出都按 UTF-8 编码，与 Rust 侧的 `String::from_utf8_lossy` 对齐。
+///
+/// 用 `try/catch` 包住：极少数环境（无控制台句柄）设不上编码，此时宁可维持旧行为，
+/// 也不能让整条探测脚本因为一行前置语句失败而不返回任何结果。
+pub(crate) fn utf8_script(script: &str) -> String {
+    format!("try {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8 }} catch {{}}; {script}")
+}
+
+/// 关闭后的等待集合：只等「仍持有可见顶层窗口」的 PID。
+///
+/// **为什么可以收窄**：主进程负责把状态写回 `state.vscdb`（Electron 主进程持有全部
+/// 内存态），语言服务 / GPU / 扩展宿主这类子进程不参与落盘。用户关窗口后主进程退出，
+/// 库写入就已经安全；此时若还坚持等那些后台进程退出，只会把「已经关掉了」误判成
+/// 「等待退出超时」，正是本次要修的两个故障之一。
+///
+/// 退化规则（宁可多等，不能误判成功）：
+/// - `window_pids` 为空（进程都在后台 / 窗口还没创建出来）→ 等全部 `pids`（旧行为）；
+/// - 交集为空（调用方给的集合对不上）→ 同样等全部 `pids`。
+pub(crate) fn close_wait_targets(pids: &[u32], window_pids: &[u32]) -> Vec<u32> {
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    if window_pids.is_empty() {
+        return pids.to_vec();
+    }
+    let mut targets: Vec<u32> = Vec::new();
+    for pid in pids {
+        if window_pids.contains(pid) && !targets.contains(pid) {
+            targets.push(*pid);
+        }
+    }
+    if targets.is_empty() {
+        return pids.to_vec();
+    }
+    targets
+}
+
+/// 允许 `/F` 强杀的 PID：`pids` 里**当前仍没有可见窗口**的那些。
+///
+/// **硬约束**：有可见窗口的进程正在走自己的退出流程（可能正弹着保存提示），对它强杀会
+/// 丢掉用户未保存的编辑。这类进程一律只投 `SC_CLOSE`，并且宁可超时报错（文案点名残留
+/// PID + 窗口标题，由用户自己决定怎么处理），绝不 `/F`。
+///
+/// 语义与边界：
+/// - 保持入参顺序、去重；
+/// - `window_pids` 中不属于 `pids` 的 PID 一律忽略（不越权关闭别的进程）；
+/// - `window_pids` 为空 = 这批进程都没有可见窗口（例如 CodeBuddy CLI）→ 全部可强杀；
+/// - 崩溃后 PID 被复用时，新进程若持有可见窗口就出现在 `window_pids` 里 → 不会被强杀。
+///
+/// 四条 Windows 关闭路径（WorkBuddy / CodeBuddy IDE / CodeBuddy CN IDE / CodeBuddy CLI）
+/// 共用这一份判定，不要各写一遍「pids - window_pids」。
+pub(crate) fn force_kill_targets(pids: &[u32], window_pids: &[u32]) -> Vec<u32> {
+    let mut targets: Vec<u32> = Vec::new();
+    for pid in pids {
+        if window_pids.contains(pid) || targets.contains(pid) {
+            continue;
+        }
+        targets.push(*pid);
+    }
+    targets
+}
+
+/// 超时文案里最多点名的窗口数：再多用户也读不完，且说明不是单一卡点。
+pub(crate) const MAX_NAMED_WINDOW_TITLES: usize = 3;
+/// 单个窗口标题的字符上限：标题常带完整文件路径，原样拼进界面会把提示撑爆。
+pub(crate) const MAX_WINDOW_TITLE_CHARS: usize = 80;
+
+/// 归一化窗口标题：去首尾空白 → 丢掉空串 → 按**字符**截断到 [`MAX_WINDOW_TITLE_CHARS`]
+/// → 去重 → 最多 [`MAX_NAMED_WINDOW_TITLES`] 个。
+///
+/// 纯逻辑，便于单测覆盖「重复 / 空白 / 超长 / 超量」四种脏数据；Win32 取标题本身无法单测。
+pub(crate) fn named_window_titles(titles: &[String]) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for title in titles {
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        let short: String = title.chars().take(MAX_WINDOW_TITLE_CHARS).collect();
+        if named.contains(&short) {
+            continue;
+        }
+        named.push(short);
+        if named.len() >= MAX_NAMED_WINDOW_TITLES {
+            break;
+        }
+    }
+    named
+}
+
+/// 「窗口: 「a」、「b」」；没有可用标题时返回 `None`（调用方必须能退化成只报 PID）。
+pub(crate) fn window_titles_clause(titles: &[String]) -> Option<String> {
+    let named = named_window_titles(titles);
+    if named.is_empty() {
+        return None;
+    }
+    let windows = named
+        .iter()
+        .map(|title| format!("「{title}」"))
+        .collect::<Vec<String>>()
+        .join("、");
+    Some(format!("窗口: {windows}"))
+}
+
+/// Windows 关闭路径共用的超时文案：点名残留 PID，拿得到窗口标题时一并列出。
+///
+/// 例：`WorkBuddy 进程无法关闭（残留 PID: 1234, 5678；窗口: 「main.ts - 项目」）。请手动结束这些进程，处理完可重试。`
+///
+/// **为什么点名 PID**：`请手动结束 WorkBuddy 进程` 这类泛化文案把用户丢进任务管理器
+/// 自己找；残留 PID（+ 可读的窗口标题）直接告诉他该结束哪一个。文案只用于 Windows
+/// （「任务管理器」是 Windows 说法），macOS / Linux 的超时文案各自列 PID，不要混用。
+pub(crate) fn close_timeout_error_message(
+    product: &str,
+    alive: &[u32],
+    titles: &[String],
+) -> String {
+    let pids = alive
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<String>>()
+        .join(", ");
+    let windows = window_titles_clause(titles)
+        .map(|clause| format!("；{clause}"))
+        .unwrap_or_default();
+    format!(
+        "{product} 进程无法关闭（残留 PID: {pids}{windows}）。请手动结束这些进程，处理完可重试。"
+    )
 }
 
 fn image_stem(name: &str) -> &str {
@@ -275,5 +417,147 @@ pub fn launch_workbuddy(variant: WbVariant, progress: Option<&dyn Fn(&str)>) -> 
                 .spawn();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PowerShell 脚本前置 UTF-8 输出编码：必须是脚本的一部分（同一条 `-Command`），
+    /// 且原脚本内容一字不改地跟在后面。
+    #[test]
+    fn utf8_script_prepends_output_encoding_and_keeps_script() {
+        let script = "Get-CimInstance Win32_Process | ForEach-Object { $_.ExecutablePath }";
+        let wrapped = utf8_script(script);
+        assert!(
+            wrapped.contains("[Console]::OutputEncoding = [Text.Encoding]::UTF8"),
+            "{wrapped}"
+        );
+        // 设不上编码时不能让整条脚本失败：必须被 try/catch 包住。
+        assert!(wrapped.contains("try {"), "{wrapped}");
+        assert!(wrapped.contains("catch {}"), "{wrapped}");
+        assert!(wrapped.ends_with(script), "{wrapped}");
+        assert_eq!(
+            wrapped,
+            format!(
+                "try {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8 }} catch {{}}; {script}"
+            )
+        );
+    }
+
+    /// 等待集合收窄：有窗口的 pid 全退出即算关闭完成；一个都没有 / 对不上时退回全部 pid
+    /// （宁可多等，也不能把「其实还开着」误判成「已关闭」）。
+    #[test]
+    fn close_wait_targets_narrows_to_windowed_pids_without_false_success() {
+        // 主进程 1001 有可见窗口，语言服务 1002 / GPU 1003 没有 → 只等 1001。
+        assert_eq!(close_wait_targets(&[1001, 1002, 1003], &[1001]), vec![1001]);
+        // 多个窗口进程都要等（多开窗口时每个窗口的 pid 都可能有窗口）。
+        assert_eq!(
+            close_wait_targets(&[1001, 1002], &[1001, 1002]),
+            vec![1001, 1002]
+        );
+        // 全部在后台（没有任何可见窗口）→ 退回旧行为，等全部。
+        assert_eq!(close_wait_targets(&[1001, 1002], &[]), vec![1001, 1002]);
+        // 窗口集合与 pid 集合对不上（调用方算错 / 进程刚好换代）→ 等全部，不误判成功。
+        assert_eq!(close_wait_targets(&[1001], &[9999]), vec![1001]);
+        // 空 pid → 空集合（调用方据此直接返回 Ok）。
+        assert!(close_wait_targets(&[], &[1001]).is_empty());
+    }
+
+    /// 强杀集合 = 残留中「当前仍无可见窗口」的那些：有窗口的一律排除（硬约束，
+    /// 强杀它们会丢用户未保存的编辑），顺序保持、去重、不越权。
+    #[test]
+    fn force_kill_targets_excludes_windowed_pids() {
+        // 主进程 1001 有窗口、子进程 1002 / 1003 没有 → 只能强杀 1002 / 1003。
+        assert_eq!(
+            force_kill_targets(&[1001, 1002, 1003], &[1001]),
+            vec![1002, 1003]
+        );
+        // 全都没有可见窗口（CLI / 后台启动）→ 全部可强杀。
+        assert_eq!(force_kill_targets(&[1001, 1002], &[]), vec![1001, 1002]);
+        // 全都有可见窗口 → 一个都不许强杀（宁可超时报错）。
+        assert!(force_kill_targets(&[1001, 1002], &[1001, 1002]).is_empty());
+        // 空集入参 → 空集。
+        assert!(force_kill_targets(&[], &[1001]).is_empty());
+        assert!(force_kill_targets(&[], &[]).is_empty());
+        // 重复 pid 只强杀一次。
+        assert_eq!(force_kill_targets(&[1002, 1002], &[]), vec![1002]);
+        // 换代 pid：`window_pids` 里多出来的 PID 不返回（不越权关闭别的进程）；
+        // 入参里的 PID 只要不在 `window_pids` 中就算「无窗口」，所以调用方必须传**当前**
+        // 的可见窗口集合（残留 pid 要重新探测，不能复用关闭前的快照）。
+        assert_eq!(
+            force_kill_targets(&[1002], &[9999]),
+            vec![1002],
+            "窗口集合里不属于入参的 PID 被忽略"
+        );
+    }
+
+    /// 超时文案点名残留 PID，并在拿得到标题时把窗口一并列出来。
+    #[test]
+    fn close_timeout_error_message_names_pids_and_windows() {
+        let titles = vec![
+            "main.ts - 项目 - WorkBuddy".to_string(),
+            // 重复 / 空白标题必须折叠，否则文案会变成噪音。
+            "main.ts - 项目 - WorkBuddy".to_string(),
+            "   ".to_string(),
+        ];
+        let message = close_timeout_error_message("WorkBuddy", &[4242, 4243], &titles);
+        assert!(message.contains("4242, 4243"), "{message}");
+        assert!(message.contains("main.ts - 项目 - WorkBuddy"), "{message}");
+        assert_eq!(
+            message.matches("main.ts - 项目").count(),
+            1,
+            "重复标题只点名一次: {message}"
+        );
+        assert!(message.contains("处理完可重试"), "{message}");
+        assert!(!message.contains("「   」"), "空白标题不得出现: {message}");
+
+        // 拿不到标题 → 退化到只报 PID，不能出现空的「窗口: 」。
+        let bare = close_timeout_error_message("WorkBuddy", &[4242], &[]);
+        assert!(bare.contains("残留 PID: 4242"), "{bare}");
+        assert!(!bare.contains("窗口"), "{bare}");
+        assert_eq!(
+            bare,
+            close_timeout_error_message("WorkBuddy", &[4242], &[String::new()])
+        );
+    }
+
+    /// 标题超长（含完整路径）时截断到字符上限，不把界面撑爆；最多点名 3 个窗口。
+    #[test]
+    fn close_timeout_error_message_truncates_and_caps_titles() {
+        let long = "a".repeat(500);
+        let message = close_timeout_error_message("CodeBuddy", &[1], &[long]);
+        assert!(
+            message.contains(&"a".repeat(MAX_WINDOW_TITLE_CHARS)),
+            "{message}"
+        );
+        assert!(
+            !message.contains(&"a".repeat(MAX_WINDOW_TITLE_CHARS + 1)),
+            "{message}"
+        );
+
+        let many: Vec<String> = (0..6).map(|i| format!("窗口{i}")).collect();
+        let message = close_timeout_error_message("CodeBuddy", &[1], &many);
+        assert!(message.contains("窗口0"), "{message}");
+        assert!(message.contains("窗口2"), "{message}");
+        assert!(!message.contains("窗口3"), "最多点名 3 个: {message}");
+    }
+
+    /// 窗口标题归一化的纯逻辑边界：按字符（不是字节）截断，中文标题不会被切坏。
+    #[test]
+    fn named_window_titles_truncates_on_char_boundaries() {
+        let chinese = "视".repeat(MAX_WINDOW_TITLE_CHARS + 10);
+        let named = named_window_titles(&[chinese]);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].chars().count(), MAX_WINDOW_TITLE_CHARS);
+        assert!(named[0].is_char_boundary(named[0].len()));
+        // 只有空白的集合 → 没有可点名标题。
+        assert!(named_window_titles(&[" ".to_string(), "\t".to_string()]).is_empty());
+        assert!(window_titles_clause(&[" ".to_string()]).is_none());
+        assert_eq!(
+            window_titles_clause(&["a".to_string(), "b".to_string()]),
+            Some("窗口: 「a」、「b」".to_string())
+        );
     }
 }

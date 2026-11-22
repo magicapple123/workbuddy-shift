@@ -258,3 +258,285 @@
         assert_eq!(read.as_deref(), Some(plaintext));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    /// 临时库辅助：返回 (目录, state.vscdb 路径)，目录由调用方清理。
+    use std::time::Duration;
+
+    fn temp_state_db(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "wb-state-db-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.vscdb");
+        (dir, db)
+    }
+
+    /// 建好 `ItemTable` 的临时库。
+    fn create_item_table(db: &std::path::Path) {
+        let conn = open_state_db(db, false).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 让调用方所在的线程**持有**独占写锁，直到显式 `COMMIT`。
+    ///
+    /// 用 `EXCLUSIVE` 而不是 `IMMEDIATE`：独占锁会把**第一条**语句就挡住
+    /// （`IMMEDIATE` 只挡写、读仍可过），这样「生产写入路径撞锁」的位置是确定的，
+    /// 不受「`CREATE TABLE IF NOT EXISTS` 是否真的需要写」这类细节影响。
+    ///
+    /// 刻意**不**放到后台线程里 sleep 到期释放：那样测试结果取决于调度与时序，
+    /// 会是 flaky 的。释放时机由测试自己控制（在两次重试之间 `COMMIT`）。
+    fn hold_exclusive(db: &std::path::Path) -> Connection {
+        let holder = open_state_db(db, false).unwrap();
+        holder
+            .execute_batch(
+                "BEGIN EXCLUSIVE; INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('holder', 'x');",
+            )
+            .unwrap();
+        holder
+    }
+
+    /// 一次「打开 + 写入」尝试：与生产路径同一套失败分类（`classify_db_error`）。
+    fn insert_row(
+        db: &std::path::Path,
+        timeout: Duration,
+        key: &str,
+    ) -> Result<(), InjectFailure> {
+        let conn = open_state_db_with_timeout(db, false, timeout)
+            .map_err(|e| classify_db_error("打开 state.vscdb 失败", e))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?1, 'v')",
+            [key],
+        )
+        .map_err(|e| classify_db_error("写入 state.vscdb 失败", e))?;
+        Ok(())
+    }
+
+    /// `PRAGMA busy_timeout` 的当前值（毫秒）。
+    fn busy_timeout_ms(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    }
+
+    /// `open_state_db` 必须给两类连接都设上 `STATE_DB_BUSY_TIMEOUT`（读写 + 只读）。
+    ///
+    /// **诚实的边界**：rusqlite 0.32 在 `sqlite3_open` 后自己就设了 5000ms，
+    /// 所以这条断言今天无法区分「我们设的」与「库默认」。它的价值是钉住**文档化的取值**
+    /// （依赖升级把默认改小、或有人调大常量都会被发现）。真正验证等待行为的是
+    /// [`write_retry_survives_a_lock_held_longer_than_one_timeout`]。
+    #[test]
+    fn state_db_connections_report_expected_busy_timeout() {
+        let (dir, db) = temp_state_db("busy-timeout");
+        let write_conn = open_state_db(&db, false).unwrap();
+        assert_eq!(
+            busy_timeout_ms(&write_conn),
+            STATE_DB_BUSY_TIMEOUT.as_millis() as i64,
+            "读写连接必须带 busy_timeout"
+        );
+        drop(write_conn);
+
+        let read_conn = open_state_db(&db, true).unwrap();
+        assert_eq!(
+            busy_timeout_ms(&read_conn),
+            STATE_DB_BUSY_TIMEOUT.as_millis() as i64,
+            "只读连接同样要带 busy_timeout（读也会撞 SQLITE_BUSY）"
+        );
+        drop(read_conn);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 生产写入入口（`inject_secret_for_with_policy`）撞锁时必须给出锁冲突文案，
+    /// 而不是把它混进「加密/校验失败」。
+    ///
+    /// 这里能在**所有平台**稳定断言：`BEGIN EXCLUSIVE` 会让第一条语句（建表）就拿到
+    /// `SQLITE_BUSY`，走不到平台相关的加解密步骤。
+    #[test]
+    fn inject_secret_reports_lock_contention_from_the_real_write_path() {
+        let (dir, db) = temp_state_db("inject-lock");
+        create_item_table(&db);
+        let policy = BusyRetryPolicy {
+            timeout: Duration::from_millis(100),
+            attempts: 1,
+            backoff: Duration::from_millis(0),
+        };
+        let lock = hold_exclusive(&db);
+        let error = inject_secret_for_with_policy(&CODEBUDDY_CN_TARGET, "{}", Some(&dir), policy)
+            .expect_err("库被独占时必须失败");
+        lock.execute_batch("COMMIT;").unwrap();
+        assert!(error.contains("写入 state.vscdb 失败"), "{error}");
+        assert!(error.contains("已完全退出"), "{error}");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 回归（本次故障的正题）：写锁没在第一次尝试时释放，只有「整轮重试」能救回来。
+    ///
+    /// 两个用例用同一把独占锁、同一套路径，唯一变量是 `attempts`。这正是「VS Code 主进程
+    /// 刚退出、子进程还持着写锁」时用户看到失败的机理，也是「只把 busy_timeout 补上」
+    /// 并不够的证据（rusqlite 本来就有 5 秒默认）：
+    ///
+    /// - `attempts = 1`（等价于只加 busy_timeout、不重试）→ 必然 `Busy` 失败；
+    /// - `attempts = 3` 且锁在两次尝试之间释放 → 第二次写入成功。
+    #[test]
+    fn write_retry_survives_a_lock_released_between_attempts() {
+        let (dir, db) = temp_state_db("lock-retry");
+        create_item_table(&db);
+
+        // ① 只尝试一次（= 只有 busy_timeout、没有重试）：锁一直不放 → 必然 Busy。
+        let single_shot = BusyRetryPolicy {
+            timeout: Duration::from_millis(50),
+            attempts: 1,
+            backoff: Duration::from_millis(0),
+        };
+        let holder = hold_exclusive(&db);
+        let failure = retry_on_busy(single_shot, |timeout| insert_row(&db, timeout, "single"))
+            .expect_err("锁未释放、只尝试一次时必须失败");
+        assert!(
+            matches!(failure, InjectFailure::Busy(_)),
+            "失败原因应为锁冲突（而不是被误判成其它错误）"
+        );
+        holder.execute_batch("COMMIT;").unwrap();
+        drop(holder);
+
+        // ② 允许重试，且锁在**两次尝试之间**释放：第一次撞锁、第二次成功。
+        //    释放时机由测试控制（不靠 sleep），所以这条用例没有时序 flaky。
+        let retrying = BusyRetryPolicy {
+            timeout: Duration::from_millis(50),
+            attempts: 3,
+            backoff: Duration::from_millis(1),
+        };
+        let mut holder = Some(hold_exclusive(&db));
+        let mut calls = 0usize;
+        retry_on_busy(retrying, |timeout| {
+            calls += 1;
+            if calls == 2 {
+                // 模拟「编辑器的收尾子进程终于释放了写锁」。
+                if let Some(holder) = holder.take() {
+                    holder.execute_batch("COMMIT;").unwrap();
+                }
+            }
+            insert_row(&db, timeout, "retried")
+        })
+        .expect("锁释放后应当写入成功");
+        assert_eq!(calls, 2, "第一次撞锁、第二次成功：重试必须真的发生一次");
+
+        let conn = open_state_db(&db, false).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ItemTable", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "持锁方的行与重试写入的行都应在");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 重试循环的边界：只在锁冲突时重试；次数受 policy 约束；非锁失败立刻返回。
+    #[test]
+    fn retry_on_busy_retries_only_lock_conflicts() {
+        let policy = BusyRetryPolicy {
+            timeout: Duration::from_millis(1),
+            attempts: 3,
+            backoff: Duration::from_millis(1),
+        };
+        // 构造 Busy 只需要「有个 rusqlite 错误」：这里考的是循环语义，
+        // 分类是否正确由带真实锁的用例覆盖。
+        let busy = || InjectFailure::Busy(rusqlite::Error::InvalidQuery);
+
+        // ① 前两次撞锁、第三次成功 → 共 3 次调用
+        let mut calls = 0;
+        retry_on_busy(policy, |_| {
+            calls += 1;
+            if calls < 3 {
+                Err(busy())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+
+        // ② 一直撞锁 → 用尽 attempts 后返回最后一个 Busy
+        let mut calls = 0;
+        let failure = retry_on_busy(policy, |_| {
+            calls += 1;
+            Err(busy())
+        })
+        .unwrap_err();
+        assert_eq!(calls, 3, "尝试次数必须等于 policy.attempts");
+        assert!(matches!(failure, InjectFailure::Busy(_)));
+
+        // ③ 非锁失败立刻返回，不浪费重试
+        let mut calls = 0;
+        let failure = retry_on_busy(policy, |_| {
+            calls += 1;
+            Err(InjectFailure::Fatal("加密失败".to_string()))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1, "非锁失败不得重试");
+        assert!(matches!(failure, InjectFailure::Fatal(_)));
+
+        // ④ attempts = 0 也要至少跑一次（配置写错不能变成「一次都不试」）
+        let mut calls = 0;
+        retry_on_busy(
+            BusyRetryPolicy {
+                attempts: 0,
+                ..policy
+            },
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+    }
+
+    /// 锁冲突文案必须点名原因与可操作动作；非锁错误保持改造前的原样文案。
+    ///
+    /// 用**真实的** SQLite 错误验证分类（不手工构造 `SqliteFailure`）。
+    #[test]
+    fn lock_conflict_message_names_cause_and_action() {
+        let (dir, db) = temp_state_db("lock-msg");
+        create_item_table(&db);
+
+        let lock = hold_exclusive(&db);
+        let busy = open_state_db_with_timeout(&db, false, Duration::from_millis(50))
+            .and_then(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('w', 'y')",
+                    [],
+                )
+            })
+            .expect_err("持写锁时短 timeout 的连接必须失败");
+        let message = classify_db_error("写入 state.vscdb 失败", busy).into_message(DEFAULT_WRITE_POLICY);
+        lock.execute_batch("COMMIT;").unwrap();
+        drop(lock);
+        assert!(
+            message.starts_with("写入 state.vscdb 失败: "),
+            "{message}"
+        );
+        assert!(message.contains("已完全退出"), "{message}");
+        assert!(message.contains("已重试 3 次"), "{message}");
+
+        // 非锁冲突（表不存在）：文案与改造前一致，不追加误导性提示。
+        let conn = open_state_db(&db, false).unwrap();
+        let other = conn
+            .execute("INSERT INTO no_such_table (a) VALUES (1)", [])
+            .expect_err("表不存在必须报错");
+        assert!(!is_db_busy_error(&other), "非锁错误不得判为锁冲突: {other}");
+        let message = classify_db_error("写入 state.vscdb 失败", other).into_message(DEFAULT_WRITE_POLICY);
+        assert!(
+            message.starts_with("写入 state.vscdb 失败: "),
+            "{message}"
+        );
+        assert!(
+            !message.contains("已完全退出"),
+            "非锁错误不得追加锁提示: {message}"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
