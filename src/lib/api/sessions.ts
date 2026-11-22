@@ -40,12 +40,16 @@ export function listAccountSessions(accountId: string, client?: SessionGroupClie
  *
  * 与 `copySessions` 同形，只多一个 `sourceAccountId`：源可为国内版或国际版账号，
  * 不再要求源是当前登录账号；报告另带 `sourceVariant` / `targetVariant`。
+ *
+ * `copyMemory` 为复制弹窗里**默认不勾**的「同时复制工作记忆（MEMORY.md）」：
+ * 不勾时请求体不带该字段（后端缺省 false），后端连源文件都不读。
  */
 export function copySessionsCross(
   sourceAccountId: string,
   targetAccountId: string,
   sessionIds: string[],
   ignoreAuxData?: boolean,
+  copyMemory?: boolean,
 ): Promise<SessionCopyReport & { variant?: WbVariant }> {
   return call("copy_sessions_cross", {
     sourceAccountId,
@@ -53,6 +57,8 @@ export function copySessionsCross(
     sessionIds,
     // 只由「仍然复制（不带用量与中断记录）」传 true：忽略后不会后台补写账本。
     ...(ignoreAuxData ? { ignoreAuxData: true } : {}),
+    // 只由用户勾选「同时复制工作记忆」时传 true：不勾就不产生任何读文件动作。
+    ...(copyMemory ? { copyMemory: true } : {}),
   });
 }
 

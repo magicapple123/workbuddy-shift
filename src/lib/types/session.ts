@@ -81,6 +81,20 @@ export interface LinkedCopyResult {
   groupId: string;
 }
 
+/**
+ * 工作记忆（`MEMORY.md`）跨账号同步结果（issue #209）。
+ *
+ * 只由复制弹窗里**默认不勾**的「同时复制工作记忆」触发；未勾选时报告里不出现 `memory`
+ * 字段（后端连源文件都不读）。同步口径是**只追加不覆盖**：按行去重后把目标缺失的行
+ * 追加到末尾，目标已有内容逐字保留。
+ */
+export interface SessionMemoryReport {
+  /** 本次追加到目标账号的行数（`0` 表示无需同步或已是最新）。 */
+  appendedLines: number;
+  /** 非致命失败原因；缺字段表示正常（工作记忆不影响复制结果）。 */
+  skippedReason?: string;
+}
+
 /** 切换时的会话复制报告；复制失败时后端只回 `error`（切换本身仍继续）。 */
 export interface SessionCopyReport {
   sourceUid?: string;
@@ -106,6 +120,8 @@ export interface SessionCopyReport {
   recovered?: string[];
   /** 临时备份残留（待清理/待恢复）；无异常时为空数组。 */
   temporaryFiles?: TemporaryFileInfo[];
+  /** 工作记忆同步结果：只在勾选「同时复制工作记忆」时出现。 */
+  memory?: SessionMemoryReport;
   error?: string;
 }
 

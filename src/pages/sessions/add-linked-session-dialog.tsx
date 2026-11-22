@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { DemoAction } from "@/components/demo-action";
 import { SessionTreeList } from "@/components/session-tree";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { displayName } from "@/lib/account-display";
@@ -50,6 +51,11 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
    * 忽略是**不可逆**选择——副本永久不含用量与中断记录，不做后台补写，所以必须点一次确认。
    */
   const [auxBlocked, setAuxBlocked] = useState<{ count: number } | null>(null);
+  /**
+   * 「同时复制工作记忆（MEMORY.md）」（issue #209）：**按操作勾选、默认不勾**。
+   * 不勾时后端连源文件都不读，报告里也不会出现 `memory` 字段。
+   */
+  const [copyMemory, setCopyMemory] = useState(false);
   const requestId = useRef(0);
   /** 复制请求代号。关窗换代后，晚到的结果不得再关闭或改写当前这次弹窗。 */
   const copyRequestId = useRef(0);
@@ -125,6 +131,8 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
     setSessionsError("");
     setSelected(new Set());
     setExpanded(new Set());
+    // 换来源账号 = 换一份工作记忆：勾选状态回到默认（不勾），避免误带上一份记忆。
+    setCopyMemory(false);
     setOpen(true);
   }
   function toggleSession(id: string) {
@@ -209,7 +217,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
     setBusy(true);
     setAuxBlocked(null);
     try {
-      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [...selected], ignoreAux);
+      const report = await api.copySessionsCross(sourceAccount.id, targetAccountId, [...selected], ignoreAux, copyMemory);
       const copied = report.copied?.length ?? 0;
       const alreadyLinked = report.alreadyLinked?.length ?? 0;
       const errors = report.errors ?? [];
@@ -232,6 +240,14 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
       // 账本写入失败是唯一带「显式忽略」出口的失败：不在报告层吞掉，摆在弹窗里让用户选。
       if (report.canIgnoreAux) setAuxBlocked({ count: report.auxFailed?.length ?? errors.length });
       if (report.needsRecovery) toast.error("会话操作待恢复", { description: "已保留恢复所需材料。" });
+      // 工作记忆是增强数据：只在勾选时才出现在报告里，失败也只提示，不影响复制结果。
+      if (report.memory) {
+        if (report.memory.skippedReason) {
+          toast.warning("工作记忆没有同步", { description: report.memory.skippedReason });
+        } else if (report.memory.appendedLines > 0) {
+          toast.info(`已向「${targetName}」追加 ${report.memory.appendedLines} 行工作记忆`);
+        }
+      }
       if (copied === 0 && alreadyLinked === 0 && recovered === 0 && errors.length === 0 && !report.needsRecovery) {
         toast.error("复制并关联失败", report.error ? { description: report.error } : undefined);
       }
@@ -315,6 +331,23 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
             <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>
             <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{displayName(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
           </Select>
+        </div>
+        <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">附加内容</p>
+          <label className="flex min-w-0 items-start gap-2 text-xs">
+            <Checkbox
+              className="mt-0.5"
+              checked={copyMemory}
+              disabled={busy || client !== "workbuddy" || !sourceAccountId || !targetAccountId}
+              onCheckedChange={(state) => setCopyMemory(state === true)}
+              aria-label="同时复制工作记忆（MEMORY.md）"
+            />
+            <span className="min-w-0">
+              <span className="font-medium">同时复制工作记忆（MEMORY.md）</span>
+              <span className="mt-0.5 block text-muted-foreground">
+                把来源账号积累的长期偏好搬到目标账号：<span className="font-medium text-foreground">只追加目标里没有的行，不覆盖目标已有内容</span>。默认不勾。
+              </span>
+            </span>
+          </label>
         </div>
       </div>
       <DialogFooter className="shrink-0 sm:justify-between">

@@ -91,6 +91,8 @@ const ROUTES: Record<string, Route> = {
   export_accounts_to_path: { method: "POST", path: "/api/export-accounts-to-path" },
   preview_import_accounts: { method: "POST", path: "/api/import/preview" },
   import_accounts: { method: "POST", path: "/api/import" },
+  export_accounts_encrypted: { method: "POST", path: "/api/accounts/export-encrypted" },
+  import_accounts_encrypted: { method: "POST", path: "/api/accounts/import-encrypted" },
   switch_account: { method: "POST", path: "/api/switch" },
   list_sessions: { method: "GET", path: "/api/sessions" },
   list_account_sessions: { method: "GET", path: "/api/sessions/account" },
@@ -124,6 +126,8 @@ const ROUTES: Record<string, Route> = {
   save_rate_limit_config: { method: "POST", path: "/api/rate-limits/config" },
   checkin: { method: "POST", path: "/api/checkin" },
   checkin_all: { method: "POST", path: "/api/checkin/all" },
+  // 国际版每日活跃会话（issue #214）：只有手动触发，没有定时/启动钩子。
+  run_daily_activity: { method: "POST", path: "/api/daily-activity/run" },
   get_auto_checkin_config: { method: "GET", path: "/api/checkin/config" },
   save_auto_checkin_config: { method: "POST", path: "/api/checkin/config" },
   get_checkin_logs: { method: "GET", path: "/api/checkin/logs" },

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getCreditExpiry, getDevEnvironment, getStatus } from "./api";
+import { copySessionsCross, getCreditExpiry, getDevEnvironment, getStatus } from "./api";
 
 /**
  * webui（浏览器）模式下的 HTTP 请求地址构造。
@@ -104,5 +104,41 @@ describe("webui 下的沙箱信息降级", () => {
       realHome: "",
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 「同时复制工作记忆（MEMORY.md）」是**按操作勾选、默认不勾**（issue #209）。
+ *
+ * 不勾时请求体里**不出现** `copyMemory`：后端 DTO 缺省 false，连源文件都不读；
+ * 勾选才显式传 true。这里断言的正是「默认值不在前端被悄悄翻转」。
+ */
+describe("copySessionsCross 的工作记忆开关", () => {
+  it("未勾选时不传 copyMemory", async () => {
+    const fetchMock = stubFetch();
+
+    await copySessionsCross("acc-src", "acc-dst", ["s1"]);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/sessions/copy-cross");
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body).toEqual({
+      sourceAccountId: "acc-src",
+      targetAccountId: "acc-dst",
+      sessionIds: ["s1"],
+    });
+    expect("copyMemory" in body).toBe(false);
+  });
+
+  it("勾选后显式传 copyMemory:true", async () => {
+    const fetchMock = stubFetch();
+
+    await copySessionsCross("acc-src", "acc-dst", ["s1"], false, true);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.copyMemory).toBe(true);
+    // 忽略账本仍是独立的开关：没传就保持不出现。
+    expect("ignoreAuxData" in body).toBe(false);
   });
 });

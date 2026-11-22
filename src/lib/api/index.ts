@@ -9,6 +9,7 @@ export * from "./core";
 export * from "./accounts";
 export * from "./automation";
 export * from "./clients";
+export * from "./daily-activity";
 export * from "./sessions";
 export * from "./stats";
 export * from "./storage";

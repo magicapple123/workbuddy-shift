@@ -51,6 +51,21 @@ export interface AccountMark {
  */
 export type UpdateAccountMark = Pick<AccountMark, "text" | "color" | "expiresAt">;
 
+/**
+ * 「最后使用」来源端标签（issue #184）：账号最后一次被切到哪个客户端。
+ *
+ * 与后端 `LAST_USED_CLIENTS` 一一对应；后端遇到不认识的标签会下发 `null`，
+ * 前端另外给未知字符串留了「其它客户端」兜底文案，所以这里保持宽松的 `string`。
+ */
+export type LastUsedClient =
+  | "workbuddy"
+  | "codebuddy-ide"
+  | "codebuddy-cn-ide"
+  | "vscode"
+  | "jetbrains"
+  | "cli"
+  | "rotate";
+
 export interface AccountMeta {
   id: string;
   uid: string | null;
@@ -74,6 +89,19 @@ export interface AccountMeta {
   createdAt: number | null;
   needsRelogin: boolean;
   needsReloginReason: string | null;
+  /**
+   * 本次刷新「被跳过」的机器可读标记（issue #202）；只有真的跳过时才出现。
+   *
+   * 当前唯一取值 `credential_lock_busy`：抢不到 `locks/credentials.lock` 时 core 直接放弃，
+   * **一个字都没写**（既不是成功，也不是账号失效）。只在「刷新令牌」入口的响应里下发，
+   * 账号库与列表接口都不带这个字段，所以是可选字段。
+   */
+  refreshSkipped?: string;
+  /**
+   * 上面那次跳过的用户可读原因，可直接展示给用户（已包含「未写入任何凭据」的说明）。
+   * 与 `refreshSkipped` 成对出现；未跳过时两者都缺省。
+   */
+  refreshSkippedReason?: string;
   /** 账号所属档位；缺省（旧后端/历史账号）按国内版处理。 */
   variant?: WbVariant;
   /**
@@ -81,6 +109,19 @@ export interface AccountMeta {
    * 缺省（旧后端/历史账号）按非企业处理。
    */
   isEnterprise?: boolean;
+  /**
+   * 本机最后一次把该账号切到某个客户端的时刻（绝对毫秒，issue #184）。
+   *
+   * 只在切换**已生效之后**由后端写入；缺省 / `null`（旧账号库、从未切过）= 卡片不显示
+   * 「最近切换」徽标，排序时恒排最后。属于本地字段，官方资料重采不会覆盖它。
+   */
+  lastUsedAt?: number | null;
+  /**
+   * 上面那次切换的来源端标签；`null` = 记录里没有可识别的来源端。
+   *
+   * 后端只接受 `LastUsedClient` 里的取值，未知取值折叠成 `null`。
+   */
+  lastUsedClient?: LastUsedClient | null;
 }
 
 export interface AppStatus {
@@ -144,6 +185,18 @@ export interface ImportResult {
   imported: number;
   skipped: number;
   overwritten: number;
+}
+
+/**
+ * 加密导出（issue #186）的结果。
+ *
+ * `path` 是实际写入的文件路径（保存对话框选的那一个），`count` 是写进文件的账号数。
+ * 口令一概不回传：后端只报"写到了哪里、写了几个"。
+ */
+export interface EncryptedExportResult {
+  ok: boolean;
+  path: string;
+  count: number;
 }
 
 /**

@@ -3,6 +3,7 @@ import type {
   AccountRecord,
   AppStatus,
   DisplayField,
+  EncryptedExportResult,
   ImportPreviewAccount,
   ImportResult,
   OAuthPollResult,
@@ -117,6 +118,25 @@ export function previewImportAccounts(
 
 export function importAccounts(fileText: string, indexes: number[]): Promise<ImportResult> {
   return call("import_accounts", { fileText, indexes });
+}
+
+/**
+ * 加密导出（issue #186）：把**全部**账号用口令加密写入用户选择的路径。
+ *
+ * 口令策略（≥8 位）、信封格式与原子写都在 core；这里只转发两个参数。
+ * 只有桌面端会调用（保存对话框给的是本机绝对路径），WebUI 没有等价入口。
+ */
+export function exportAccountsEncrypted(path: string, password: string): Promise<EncryptedExportResult> {
+  return call("export_accounts_encrypted", { path, password });
+}
+
+/**
+ * 加密导入（issue #186）：解密备份文件并按「导入备份」的同一套合并语义写回账号库。
+ *
+ * 不需要预览勾选：加密导出导的就是整份账号集，导入时整份合入。
+ */
+export function importAccountsEncrypted(path: string, password: string): Promise<ImportResult> {
+  return call("import_accounts_encrypted", { path, password });
 }
 
 export function switchAccount(args: {

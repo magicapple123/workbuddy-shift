@@ -8,6 +8,7 @@
 
 export * from "./account";
 export * from "./app";
+export * from "./daily-activity";
 export * from "./session";
 export * from "./stats";
 export * from "./storage";

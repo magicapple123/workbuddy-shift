@@ -6,7 +6,7 @@
  * （`scripts/check-structure.mjs` 会拒绝 `src/pages` / `src/components` 的直接引用。）
  */
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SaveDialogOptions } from "@tauri-apps/plugin-dialog";
+import type { OpenDialogOptions, SaveDialogOptions } from "@tauri-apps/plugin-dialog";
 
 /** 宿主平台。`unknown` 只出现在无法读取 UA 的环境（SSR / 测试）。 */
 export type DesktopPlatform = "macos" | "windows" | "linux" | "unknown";
@@ -67,4 +67,17 @@ export async function revealPathInFileManager(path: string): Promise<void> {
 export async function saveFileDialog(options: SaveDialogOptions): Promise<string | null> {
   const { save } = await import("@tauri-apps/plugin-dialog");
   return save(options);
+}
+
+/**
+ * 系统打开对话框（单选文件）；用户取消时返回 null。
+ *
+ * 前端拿到的只是路径本身：加密备份的解密与合并都在 Rust 侧完成（口令不外传字节码、
+ * 大文件也不用先读进 JS 内存）。多选形态 `open()` 会返回数组，这里只接受单选字符串，
+ * 形状不符一律按"没选"处理。
+ */
+export async function openFileDialog(options: OpenDialogOptions): Promise<string | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({ ...options, multiple: false, directory: false });
+  return typeof picked === "string" ? picked : null;
 }
