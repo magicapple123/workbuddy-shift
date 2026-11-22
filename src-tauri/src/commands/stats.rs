@@ -35,11 +35,14 @@ pub async fn get_token_statistics(days: Option<i64>) -> Result<Value, String> {
 }
 
 /// POST /api/refresh-token —— 单账号刷新 token。
+///
+/// 响应投影由 core 的 `refresh::refresh_result_meta` 统一提供（与 HTTP 端逐字段同形）：
+/// 抢不到凭据写入锁时额外带 `refreshSkipped` / `refreshSkippedReason`（issue #202）。
 #[tauri::command]
 pub async fn refresh_account_token(account_id: String) -> Result<Value, String> {
     let acc = account::find_account(&account_id).ok_or("账号不存在")?;
     let fresh = refresh::refresh_account_token(acc).await;
-    Ok(account::account_meta(&fresh))
+    Ok(refresh::refresh_result_meta(&fresh))
 }
 
 // ---------------------------------------------------------------------------

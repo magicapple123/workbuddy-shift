@@ -73,17 +73,21 @@ pub(crate) async fn api_token_statistics(RawQuery(query): RawQuery) -> Response 
 
 /// POST /api/refresh-token —— 刷新单账号 token。
 ///
-/// 只返回 `account_meta`（与桌面端 `refresh_account_token` 命令逐字段同形）：
-/// core 的刷新函数返回的是完整账号记录（含 access_token / refresh_token），
-/// 直接回给浏览器会越过「账号库元数据不含 token」的既有边界，两个宿主也会因此
-/// 出现响应形态不一致。
+/// 只返回 `refresh::refresh_result_meta`（= `account_meta` + 跳过标记，与桌面端
+/// `refresh_account_token` 命令逐字段同形）：core 的刷新函数返回的是完整账号记录
+/// （含 access_token / refresh_token），直接回给浏览器会越过「账号库元数据不含 token」
+/// 的既有边界，两个宿主也会因此出现响应形态不一致。
+///
+/// issue #202：抢不到凭据写入锁时本次没有刷新，`refresh_result_meta` 会补
+/// `refreshSkipped` / `refreshSkippedReason` 两个字段，前端据此提示「稍后重试」，
+/// 而不是把未刷新的旧 meta 当成成功。
 pub(crate) async fn api_refresh_token(Json(body): Json<Value>) -> Response {
     let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
     let Some(acc) = account::find_account(id) else {
         return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
     };
     let fresh = refresh::refresh_account_token(acc).await;
-    json_ok(account::account_meta(&fresh))
+    json_ok(refresh::refresh_result_meta(&fresh))
 }
 
 // ---------------------------------------------------------------------------

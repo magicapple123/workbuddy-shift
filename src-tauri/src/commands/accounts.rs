@@ -6,7 +6,7 @@ use super::AppStatus;
 use serde_json::json;
 use serde_json::Value;
 use wb_shift_core::modules::variant::WbVariant;
-use wb_shift_core::modules::{account, auth_file, export_import, oauth, process, update};
+use wb_shift_core::modules::{account, auth_file, config, export_import, oauth, process, update};
 
 /// GET /api/status —— WorkBuddy 运行状态 + 当前账号。
 ///
@@ -129,6 +129,56 @@ pub fn import_accounts(file_text: String, indexes: Vec<usize>) -> Result<Value, 
         "skipped": result.skipped,
         "overwritten": result.overwritten,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// 加密导出 / 导入（换机迁移，issue #186）
+//
+// 口令策略（≥8 位）、信封格式、体积上限与文件读写都在 core
+// （`export_import::export_accounts_encrypted_at` / `import_accounts_encrypted_at`），
+// 两个宿主只做参数转发与结果整形，保证桌面端与 WebUI 的错误文案逐字一致。
+// 口令只作为参数向下传：这里不记日志、不回显，错误文案里也不会出现它。
+// ---------------------------------------------------------------------------
+
+/// POST /api/accounts/export-encrypted —— 用口令加密导出**全部**账号到用户选择的路径。
+///
+/// PBKDF2 是 600000 次迭代（本机实测 0.1–0.3 s），同步 command 会在 Tauri 主线程上跑，
+/// 期间窗口消息循环被占住；与 `get_status` 同样丢进 blocking 线程，避免导出时界面卡顿。
+#[tauri::command]
+pub async fn export_accounts_encrypted(path: String, password: String) -> Result<Value, String> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let accounts = account::load_accounts();
+        let count = accounts.len();
+        export_import::export_accounts_encrypted_at(&path, &password, &accounts, config::now_ms())?;
+        Ok(json!({ "ok": true, "path": path, "count": count }))
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("导出加密备份失败: {error}")),
+    }
+}
+
+/// POST /api/accounts/import-encrypted —— 用口令解密备份文件并按既有合并语义导入。
+///
+/// 合并语义完全复用「导入备份」那条路径（按 uid 去重覆盖、保留本地展示字段、缺 id 补齐），
+/// 加密只改变"文件怎么读出来"，不改变"记录怎么合进去"。
+#[tauri::command]
+pub async fn import_accounts_encrypted(path: String, password: String) -> Result<Value, String> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        export_import::import_accounts_encrypted_at(&path, &password)
+    })
+    .await
+    {
+        Ok(Ok(result)) => Ok(json!({
+            "ok": true,
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "overwritten": result.overwritten,
+        })),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!("导入加密备份失败: {error}")),
+    }
 }
 
 /// 打开系统设置授权面板。仅 macOS 提供「完全磁盘访问 / App 管理」；

@@ -40,6 +40,7 @@ pub async fn copy_sessions(
     target_account_id: String,
     session_ids: Vec<String>,
     ignore_aux_data: Option<bool>,
+    copy_memory: Option<bool>,
 ) -> Result<Value, String> {
     if target_account_id.trim().is_empty() {
         return Err("缺少 targetAccountId".to_string());
@@ -50,7 +51,15 @@ pub async fn copy_sessions(
     tauri::async_runtime::spawn_blocking(move || {
         let target = account::find_account(&target_account_id).ok_or("目标账号不存在")?;
         // 档位取目标账号自身（copy_sessions_for_switch 内部判定）。
-        session::copy_sessions_for_switch(&target, &session_ids, ignore_aux_data.unwrap_or(false))
+        // `copy_memory` 缺省 false：未勾选「同时复制工作记忆」时完全不读源 `MEMORY.md`。
+        session::copy_sessions_for_switch_opts(
+            &target,
+            &session_ids,
+            session::CopyOptions::new(
+                ignore_aux_data.unwrap_or(false),
+                copy_memory.unwrap_or(false),
+            ),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -66,6 +75,7 @@ pub async fn copy_sessions_cross(
     target_account_id: String,
     session_ids: Vec<String>,
     ignore_aux_data: Option<bool>,
+    copy_memory: Option<bool>,
 ) -> Result<Value, String> {
     if source_account_id.trim().is_empty() {
         return Err("缺少 sourceAccountId".to_string());
@@ -79,11 +89,14 @@ pub async fn copy_sessions_cross(
     tauri::async_runtime::spawn_blocking(move || {
         let source = account::find_account(&source_account_id).ok_or("源账号不存在")?;
         let target = account::find_account(&target_account_id).ok_or("目标账号不存在")?;
-        session::copy_sessions_cross(
+        session::copy_sessions_cross_opts(
             &source,
             &target,
             &session_ids,
-            ignore_aux_data.unwrap_or(false),
+            session::CopyOptions::new(
+                ignore_aux_data.unwrap_or(false),
+                copy_memory.unwrap_or(false),
+            ),
         )
     })
     .await

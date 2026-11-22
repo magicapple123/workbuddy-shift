@@ -153,7 +153,8 @@ pub(crate) async fn api_vscode_ext_switch(Json(body): Json<Value>) -> Response {
         .get("accountId")
         .or_else(|| body.get("account_id"))
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
     // 默认重启（= 自动关闭并重开）：VS Code 运行时由后端先优雅退出再写入。
     // 显式传 restart=false 时退回「请先完全退出 VS Code」的手动模式。
     let restart = body
@@ -189,19 +190,27 @@ pub(crate) async fn api_vscode_ext_switch(Json(body): Json<Value>) -> Response {
         Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
     };
 
-    let result = if copy_items.is_empty() && sync_selections.is_empty() {
-        vscode_ext::switch_account(account_id, restart)
-    } else {
-        vscode_session::switch_vscode_ext_with_copy(
-            account_id,
-            restart,
-            &copy_items,
-            &sync_selections,
-        )
-    };
+    // 切换本身是**阻塞**调用（落盘 state.vscdb、等 VS Code 优雅退出、必要时重新拉起进程），
+    // 必须在阻塞线程池里执行：本文件相邻的处理函数都这么写，直接在 async fn 里调用会把
+    // 整个运行时的 worker 卡在这一次切换上（WebUI 的其它请求全部排队）。
+    // 行为语义不变：同样的参数、同样的分支、同样的错误映射。
+    let result = tokio::task::spawn_blocking(move || {
+        if copy_items.is_empty() && sync_selections.is_empty() {
+            vscode_ext::switch_account(&account_id, restart)
+        } else {
+            vscode_session::switch_vscode_ext_with_copy(
+                &account_id,
+                restart,
+                &copy_items,
+                &sync_selections,
+            )
+        }
+    })
+    .await;
     match result {
-        Ok(v) => json_ok(v),
-        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+        Ok(Ok(v)) => json_ok(v),
+        Ok(Err(e)) => json_err(e, StatusCode::BAD_REQUEST),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

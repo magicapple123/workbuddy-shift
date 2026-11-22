@@ -85,6 +85,14 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/import/preview", post(api_preview_import))
         .route("/api/import", post(api_import))
+        .route(
+            "/api/accounts/export-encrypted",
+            post(api_export_accounts_encrypted),
+        )
+        .route(
+            "/api/accounts/import-encrypted",
+            post(api_import_accounts_encrypted),
+        )
         .route("/api/switch", post(api_switch))
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
@@ -163,6 +171,8 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/checkin", post(api_checkin))
         .route("/api/checkin/all", post(api_checkin_all))
+        // 国际版每日活跃会话（issue #214）：只有手动触发，没有定时/启动钩子。
+        .route("/api/daily-activity/run", post(api_run_daily_activity))
         .route(
             "/api/checkin/config",
             get(api_checkin_config).post(api_save_checkin_config),

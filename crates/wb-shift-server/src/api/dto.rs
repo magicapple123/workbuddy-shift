@@ -145,6 +145,31 @@ pub(crate) struct ImportAccountsRequest {
     pub(crate) indexes: Vec<usize>,
 }
 
+/// `POST /api/accounts/export-encrypted`。
+///
+/// **刻意不写 `default`**：`path` 与 `password` 都是必填参数。缺字段必须在边界得到 400，
+/// 不能静默降级成空串——空口令会被 core 的 8 位下限拒绝，但那已经是"请求形状错误"
+/// 被伪装成"用户输入错误"，排查时看不出是谁的问题。
+///
+/// 口令原样透传给 core：这里不 trim、不记日志、不进错误文案（见 `encrypted.rs` 文件头）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExportAccountsEncryptedRequest {
+    pub(crate) path: String,
+    pub(crate) password: String,
+}
+
+/// `POST /api/accounts/import-encrypted`。
+///
+/// 字段与 [`ExportAccountsEncryptedRequest`] 同形（`path` 是待导入的信封文件），
+/// 必填理由同上。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ImportAccountsEncryptedRequest {
+    pub(crate) path: String,
+    pub(crate) password: String,
+}
+
 // ---------------------------------------------------------------------------
 // 会话复制 / 同步
 // ---------------------------------------------------------------------------
@@ -157,6 +182,8 @@ pub(crate) struct CopySessionsRequest {
     pub(crate) session_ids: Vec<String>,
     /// 显式忽略会话账本（用量 + 中断记录）：只由「仍然复制」按钮传 true。
     pub(crate) ignore_aux_data: bool,
+    /// 同时把源账号的工作记忆（`MEMORY.md`）追加到目标账号（issue #209），缺省 false。
+    pub(crate) copy_memory: bool,
 }
 
 /// `POST /api/sessions/copy-cross`。
@@ -168,6 +195,8 @@ pub(crate) struct CopySessionsCrossRequest {
     pub(crate) session_ids: Vec<String>,
     /// 显式忽略会话账本（用量 + 中断记录）：只由「仍然复制」按钮传 true。
     pub(crate) ignore_aux_data: bool,
+    /// 同时把源账号的工作记忆（`MEMORY.md`）追加到目标账号（issue #209），缺省 false。
+    pub(crate) copy_memory: bool,
 }
 
 /// `POST /api/session-links/preview`。
@@ -432,6 +461,16 @@ pub(crate) struct SettingsSyncRestoreRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct RefreshOfficialUsageRequest {}
+
+/// `POST /api/daily-activity/run`：无参数（账号由后端从账号库读取）。
+///
+/// 空结构而不是 `Json<Value>`：手动触发的语义就是「对账号库里的全部账号跑一轮」，
+/// 没有可下发参数；前端传空对象即可。将来真要支持「只跑某几个账号」，在这里加字段
+/// 就会被 `scripts/check-api-contract.mjs` 拿去和 Tauri `run_daily_activity` 的参数
+/// 逐字比对，两侧不会悄悄漂移。`default` 保留「空请求体 = 空请求」的语义。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct DailyActivityRunRequest {}
 
 /// `POST /api/save-text-file`（CSV 落盘；扩展名与体积在 core 校验）。
 #[derive(Debug, Default, Deserialize)]
