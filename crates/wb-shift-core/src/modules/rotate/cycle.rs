@@ -146,6 +146,9 @@ pub async fn run_rotate_cycle() -> Value {
             match codebuddy_cli::switch_active_account(&target_id) {
                 Ok(res) => {
                     LAST_SWITCH_AT.store(now, Ordering::SeqCst);
+                    // 「最近切换」时间戳（issue #184）：CLI 已切到目标账号后才记录。
+                    // 失败只影响卡片徽标与排序，不得把已成功的轮换改成 error。
+                    let _ = account::touch_last_used(&target_id, "rotate");
                     log["action"] = json!("switched");
                     json!({"status": "switched", "to": target_id, "detail": res})
                 }
