@@ -3,7 +3,9 @@ use super::parse::Event;
 use super::parse::LogFormat;
 use super::payload::build_payload;
 use super::payload::Resolved;
+use super::scan::agent_log_roots;
 use super::scan::collect_events;
+use super::scan::collect_events_in;
 use super::scan::CLI_DATA_DIR;
 use super::scan::LOG_DIR_NAME;
 use crate::modules::account;
@@ -29,6 +31,13 @@ pub(super) const IDE_STATE_FILE: &str = "codebuddy_ide.json";
 
 const CN_IDE_STATE_FILE: &str = "codebuddy_cn_ide.json";
 
+/// 插件宿主来源的回落状态文件（`vscode_ext.rs` 的 `set_active_account_id` 是写入方）。
+///
+/// 与 CLI / IDE 的状态文件同构：只有**用本工具切过插件账号**才会写下
+/// `activeAccountId` + `updatedAt`，因此回落天然带「确实切过一次」的门控，
+/// 没切过的机器上宁可少显示也不用「当前是谁」去猜（与 `ActiveAccount::account_for` 一致）。
+pub(super) const AGENT_STATE_FILE: &str = "vscode_ext.json";
+
 /// 一个日志来源（扫描范围的最小单位）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ScanSource {
@@ -38,10 +47,20 @@ pub(crate) enum ScanSource {
     Cli,
     /// CodeBuddy IDE 的一个形态（429 不触发任何事件；`scanIdeLogs` 开启且数据根存在才扫）。
     Ide(CodeBuddyIdeFlavor),
+    /// VS Code 插件宿主（CodeBuddy 扩展）的 agent 日志（#118 / #188）。
+    ///
+    /// 插件侧的 429 只写在这份日志里：两个 IDE 的 `exthost` 树里没有对应记录，
+    /// 所以既不能靠「按 IDE 归因复用」，也不能靠 hook（插件宿主不认本工具装的 hook）。
+    AgentLog,
 }
 
 impl ScanSource {
     /// 对外来源标签（payload 的 `source` 字段）。
+    ///
+    /// `vscode-ext` 是**既有对外契约**（前端 `status-chips.tsx` 的 `SOURCE_LABELS`、
+    /// `docs/cli.md` 的来源词表、payload 的 borrowed 判据都认它），插件来源沿用同一字符串，
+    /// 不新造 `vscode-agent` 之类的近义标签——否则前端会把它显示成「其它客户端」，
+    /// 且 `has_vscode` / borrowed 兜底会同时失效。
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::WorkBuddy(WbVariant::Cn) => "workbuddy-cn",
@@ -49,10 +68,15 @@ impl ScanSource {
             Self::Cli => "codebuddy-cli",
             Self::Ide(CodeBuddyIdeFlavor::Intl) => "codebuddy-ide",
             Self::Ide(CodeBuddyIdeFlavor::Cn) => "codebuddy-cn-ide",
+            Self::AgentLog => "vscode-ext",
         }
     }
 
     /// 位图里的位序（与 `ScanScope::ALL` 对应）。
+    ///
+    /// 位序只增不改：`ScanScope` 是 `u8`，当前用掉 0..=5，还剩 6/7 两位。
+    /// 再用满时把 `ScanScope` 换成 `u16`（`ScanScope(u16)` + `ALL = 0x3f` 起改），
+    /// 位序本身不用动——它只在本模块内部对齐位序，不落到任何持久化 / 契约里。
     fn bit(self) -> u8 {
         match self {
             Self::WorkBuddy(WbVariant::Cn) => 0,
@@ -60,6 +84,7 @@ impl ScanSource {
             Self::Cli => 2,
             Self::Ide(CodeBuddyIdeFlavor::Intl) => 3,
             Self::Ide(CodeBuddyIdeFlavor::Cn) => 4,
+            Self::AgentLog => 5,
         }
     }
 }
@@ -71,10 +96,10 @@ pub(crate) struct ScanScope(u8);
 impl ScanScope {
     /// 一个来源都不扫。
     pub(super) const NONE: Self = Self(0);
-    /// 全量五源。生产路径的范围一律由 `scan_scope` 按来源算出（可能正好是它），
+    /// 全量六源。生产路径的范围一律由 `scan_scope` 按来源算出（可能正好是它），
     /// 这里保留给缓存超集语义的测试用。
     #[cfg(test)]
-    pub(super) const ALL: Self = Self(0b1_1111);
+    pub(super) const ALL: Self = Self(0b11_1111);
 
     pub(super) fn insert(&mut self, source: ScanSource) {
         self.0 |= 1 << source.bit();
@@ -96,6 +121,9 @@ pub(crate) struct ScanRoots {
     pub(super) hook_sources: Vec<(ScanSource, PathBuf, PathBuf)>,
     /// 只判「数据根存在」的来源：两个 IDE。
     pub(super) ide_sources: Vec<(ScanSource, PathBuf)>,
+    /// 插件宿主 agent 日志根：探测不到的候选不进来，空集合即「本机没装 VS Code / 没装插件」，
+    /// 该来源贡献 0 条 —— 不是错误，也不影响其它来源。
+    pub(super) agent_log_roots: Vec<PathBuf>,
     /// 本工具 hook 脚本的绝对路径（配置里的 marker）。
     pub(super) marker: String,
 }
@@ -126,6 +154,7 @@ impl ScanRoots {
         Self {
             hook_sources,
             ide_sources,
+            agent_log_roots: agent_log_roots(),
             marker: hook_marker(),
         }
     }
@@ -135,7 +164,8 @@ impl ScanRoots {
 ///
 /// 两条通路合并：
 /// - **hook 通路**（CLI / WorkBuddy 两档位）：事件驱动、实时归因，由 `rate_limit_events` 持有；
-/// - **日志扫描**（两个 IDE 只走这条，受 `scanIdeLogs` 开关约束；CLI / WorkBuddy 只在「该处未注册 hook」时回退扫描）：
+/// - **日志扫描**（两个 IDE 与 VS Code 插件宿主只走这条，受 `scanIdeLogs` 开关约束；
+///   CLI / WorkBuddy 只在「该处未注册 hook」时回退扫描）：
 ///   按 `SCAN_MIN_INTERVAL_MS` 节流，合并后的 `scannedAt` 是**最近一次真实扫描**的时刻
 ///   （前端据此节流）。
 ///
@@ -207,8 +237,8 @@ pub(crate) use payload::account_by_session;
 // 测试通过 `use super::*` 复用这些重导出；lib 目标下它们看起来未被使用。
 #[allow(unused_imports)]
 pub(crate) use cache::{
-    cached_scan, cli_logs_root, cli_state_path, scan_ide_logs_enabled, scan_ide_logs_of,
-    scan_scope, scan_sources, ScanCache, SCAN_CACHE, SCAN_MIN_INTERVAL_MS,
+    cached_scan, cli_logs_root, cli_state_path, scan_agent_logs, scan_ide_logs_enabled,
+    scan_ide_logs_of, scan_scope, scan_sources, ScanCache, SCAN_CACHE, SCAN_MIN_INTERVAL_MS,
 };
 // 测试通过 `use super::*` 复用这些重导出；lib 目标下它们看起来未被使用。
 #[allow(unused_imports)]

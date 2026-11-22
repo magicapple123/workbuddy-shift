@@ -1,7 +1,7 @@
 use super::scan::LONG_LINE_SNIFF_BYTES;
 use super::scan::SDK_CONVERSATIONS_DIR;
 use super::scan::SDK_LOG_DIR;
-use chrono::{FixedOffset, Local, NaiveDateTime, TimeZone};
+use chrono::{FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -81,6 +81,14 @@ const BUSINESS_TS_FORMAT: &str = "%m/%d/%Y, %I:%M:%S %p%.3f";
 /// 只认上面那一种时，这类行会被 `line_timestamp` 判为「无时间戳」而整行跳过 —— 表现为台账为空。
 const BUSINESS_TS_ALT_FORMAT: &str = "%Y/%m/%d %H:%M:%S%.3f";
 
+/// 插件宿主 agent 日志的日期/时刻两段（`2026/9/27` + `13:27:37.109`）。
+///
+/// 单独写的理由：月/日/时都可能是**一位数**（`2026/9/7 3:07:37.109`），定长切片会切错；
+/// 先按空白切成「日期 token + 时刻 token」再各自解析才稳。
+const AGENT_TS_DATE_FORMAT: &str = "%Y/%m/%d";
+const AGENT_TS_CLOCK_FORMAT: &str = "%H:%M:%S%.3f";
+const AGENT_TS_CLOCK_FORMAT_NO_MS: &str = "%H:%M:%S";
+
 // ---------------------------------------------------------------------------
 // 扫描
 // ---------------------------------------------------------------------------
@@ -92,6 +100,16 @@ pub(crate) enum LogFormat {
     WorkBuddy,
     /// `2026-09-17 10:28:26.730 [info] …`：两个 CodeBuddy IDE。
     Ide,
+    /// `[2026/9/27 13:27:37.109] …`：VS Code 插件宿主（CodeBuddy 扩展）的 agent 日志（#188）。
+    ///
+    /// 独立变体的价值不在时间戳：`BUSINESS_TS_ALT_FORMAT`（`%Y/%m/%d %H:%M:%S%.3f`）本来
+    /// 就能解析同一串数字，两者解析结果相同。真正需要区分的是**文件枚举口径**——插件宿主的
+    /// 日志落在 `logs/<会话>/window<N>/exthost/<插件>/` 下，要按 mtime 收窗 + 插件目录过滤
+    /// （`scan::agent_log_files`），不能用日期目录枚举；另外这里**允许省略毫秒**
+    /// （`AGENT_TS_CLOCK_FORMAT_NO_MS`），IDE 的定长前缀做不到。
+    /// 事件 id / 模型归因与业务日志同族（同一套 agent 代码写出来的行），
+    /// 因此 `scan_text_scoped` 里与 `WorkBuddy` 共用分支。
+    Agent,
 }
 
 /// 鉴权行标记：顺序扫描时据此维护「事件前最近一次 uid」，是新来源唯一的时态可靠账号线索。
@@ -103,6 +121,9 @@ pub(crate) enum AuthMarker {
     AuthDoInitProbe,
     /// 两个 CodeBuddy IDE：`[PulseServiceLifecycle] Auth session changed: … uid=<uuid>`。
     AuthSessionChanged,
+    /// 插件宿主 agent 日志：**两种鉴权行都可能出现**（同一份扩展代码，登录探测与 Pulse
+    /// 生命周期各写一份），任一命中即更新「当前 uid」。
+    ExtensionAny,
 }
 
 /// 去重前的原始命中行。
@@ -179,7 +200,9 @@ pub(super) fn scan_text_scoped(
             current_uid = Some(uid.to_string());
         }
         match format {
-            LogFormat::WorkBuddy => {
+            // 插件宿主 agent 日志与 WorkBuddy 格式同族：同一套 `requestId → model` /
+            // `resolved model=` / 分类器兜底线索（扩展的 agent 就是这套代码写出来的行）。
+            LogFormat::WorkBuddy | LogFormat::Agent => {
                 if let Some(model) = model_after(line, RESOLVED_MODEL_MARKER) {
                     if let Some(session) = field_after(line, "sessionId=") {
                         session_models.insert(session.to_string(), model.to_string());
@@ -245,7 +268,7 @@ pub(super) fn scan_text_scoped(
             continue;
         };
         let (session_id, model) = match format {
-            LogFormat::WorkBuddy => {
+            LogFormat::WorkBuddy | LogFormat::Agent => {
                 // 分类器兜底只认「紧随其后」的裸文案行：quota 行发生在分类器行之后
                 // 且在时间窗内才允许借道（上游实测 1ms；回显行相隔分钟级 ⇒ 出局）。
                 let classifier = classifier_session.as_ref().and_then(|(session, ts)| {
@@ -265,6 +288,8 @@ pub(super) fn scan_text_scoped(
         //
         // 只对 WorkBuddy 两档位成立：CLI 与它们共用同一格式，但归因走日志内鉴权 uid /
         // 轮换状态文件，缺 `session_id` 不代表事件不可靠 —— 不能统一短路（2026-09-20 审查）。
+        // 插件宿主 agent 日志（`LogFormat::Agent`）同理：它没有 `sessions` 表可查，
+        // 归因链与 CLI 一致（uid → 状态文件），因此不适用这条短路。
         if format == LogFormat::WorkBuddy && auth == AuthMarker::None && session_id.is_none() {
             continue;
         }

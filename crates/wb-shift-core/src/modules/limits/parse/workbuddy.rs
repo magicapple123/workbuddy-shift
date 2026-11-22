@@ -102,9 +102,12 @@ pub(crate) fn session_from_file_name(path: &Path) -> Option<String> {
 
 /// 取行首时间戳（毫秒）。
 ///
-/// WorkBuddy 格式：业务日志是本地时间，SDK 日志是 UTC（`2026-09-16T16:20:31.523Z`），
-/// 两者都折算到同一绝对时间轴后再比较。IDE 格式：行首 `2026-09-17 10:28:26.730` 定长
-/// 23 字节，本地时间、无时区标记。
+/// 三种来源三种写法，彼此都不兼容：
+/// - WorkBuddy 桌面 / CLI（`WorkBuddy`）：`[9/15/2026, 6:19:48 PM.755]`（M/D/YYYY + 12 小时制
+///   + AM/PM，方括号包住）；SDK 日志另用 RFC3339（`2026-09-16T16:20:31.523Z`，UTC）；
+/// - 两个 CodeBuddy IDE（`Ide`）：`2026-09-17 10:28:26.730`（Y-M-D，无方括号，定长 23 字节，本地时间）；
+/// - 插件宿主 agent 日志（`Agent`）：`[2026/9/27 13:27:37.109]`（Y/M/D + 24 小时制 + 毫秒，
+///   方括号包住），见 [`agent_naive_datetime`]。
 pub(crate) fn line_timestamp(line: &str, format: LogFormat) -> Option<i64> {
     let trimmed = line.trim_start();
     let naive = match format {
@@ -124,12 +127,46 @@ pub(crate) fn line_timestamp(line: &str, format: LogFormat) -> Option<i64> {
             let head = std::str::from_utf8(trimmed.as_bytes().get(..IDE_TS_LEN)?).ok()?;
             NaiveDateTime::parse_from_str(head, IDE_TS_FORMAT).ok()?
         }
+        LogFormat::Agent => agent_naive_datetime(trimmed)?,
     };
     // DST 回拨的那一小时是歧义的：取较早的一次，而不是丢掉这一行。
     Local
         .from_local_datetime(&naive)
         .earliest()
         .map(|date| date.timestamp_millis())
+}
+
+/// 插件宿主 agent 日志的行首时间：`[2026/9/27 13:27:37.109]`（本地时间、Y/M/D、24 小时制、毫秒）。
+///
+/// 解析顺序（保守兜底：格式漂移时宁可慢一点，也不要整份日志静默零结果）：
+/// 1. 方括号内文本按业务日志的**两种**写法尝试（`M/D/YYYY, h:mm:ss AM.mmm` 与
+///    `Y/M/D H:M:S.mmm`）—— 扩展与 WorkBuddy 共用同一套写入器时会出现这两种；
+/// 2. 否则按「日期 token + 时刻 token」解析：月/日/时都可能是一位数
+///    （`2026/9/7 3:07:37.109`），所以不能按定长 23 字节切片（那是 IDE 格式的前提）；
+/// 3. 时刻允许**省略毫秒**（`2026/9/27 13:27:37`），此时毫秒按 0 计。
+pub(crate) fn agent_naive_datetime(line: &str) -> Option<NaiveDateTime> {
+    let trimmed = line.trim_start();
+    let bracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.split(']').next())
+        .map(str::trim)
+        .filter(|stamp| !stamp.is_empty());
+    if let Some(stamp) = bracketed {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, BUSINESS_TS_FORMAT) {
+            return Some(naive);
+        }
+        if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, BUSINESS_TS_ALT_FORMAT) {
+            return Some(naive);
+        }
+    }
+    let stamp = bracketed.unwrap_or(trimmed);
+    let mut tokens = stamp.split_whitespace();
+    let date = NaiveDate::parse_from_str(tokens.next()?, AGENT_TS_DATE_FORMAT).ok()?;
+    let clock_token = tokens.next()?;
+    let clock = NaiveTime::parse_from_str(clock_token, AGENT_TS_CLOCK_FORMAT)
+        .or_else(|_| NaiveTime::parse_from_str(clock_token, AGENT_TS_CLOCK_FORMAT_NO_MS))
+        .ok()?;
+    Some(date.and_time(clock))
 }
 
 /// 官方给出的重置时刻（毫秒）。原文形如 `将在 2026-09-17 17:59:27 UTC+8 重置` /
@@ -213,13 +250,19 @@ pub(crate) fn request_pair(line: &str) -> Option<(String, String)> {
 /// 鉴权行给出的账号 uid（顺序扫描时维护「事件前最近一次」）。
 ///
 /// `uid=none` 是「无会话 / 未登录」的哨兵值，必须忽略。
+///
+/// `AuthMarker::ExtensionAny`（插件宿主 agent 日志）同时认两种鉴权行：同一份扩展代码在
+/// 登录探测与 Pulse 生命周期两条路径各写一份，认哪种取决于当次激活顺序，只认一种会漏账号。
 pub(crate) fn auth_uid(line: &str, auth: AuthMarker) -> Option<&str> {
-    let marker = match auth {
+    let hit = match auth {
         AuthMarker::None => return None,
-        AuthMarker::AuthDoInitProbe => CLI_AUTH_MARKER,
-        AuthMarker::AuthSessionChanged => IDE_AUTH_MARKER,
+        AuthMarker::AuthDoInitProbe => line.contains(CLI_AUTH_MARKER),
+        AuthMarker::AuthSessionChanged => line.contains(IDE_AUTH_MARKER),
+        AuthMarker::ExtensionAny => {
+            line.contains(CLI_AUTH_MARKER) || line.contains(IDE_AUTH_MARKER)
+        }
     };
-    if !line.contains(marker) {
+    if !hit {
         return None;
     }
     let uid = field_after(line, "uid=")?;

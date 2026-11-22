@@ -32,7 +32,10 @@ use crate::modules::vscode_cn_inject::{
 
 const STATE_FILE: &str = "vscode_ext.json";
 /// VS Code 扩展的 marketplace id（= secret key 中的 `extensionId`）。
-const EXTENSION_ID: &str = "tencent-cloud.coding-copilot";
+///
+/// 也是插件宿主 `exthost/` 下本扩展日志目录名的判定依据（`limits::scan` 用它把
+/// `ms-python.python`、`github.copilot-chat` 等无关扩展的日志排除在候选集之外）。
+pub(crate) const EXTENSION_ID: &str = "tencent-cloud.coding-copilot";
 /// 扩展写入 globalState 的 id 前缀（= 载荷顶层 `id`）。
 const PAYLOAD_ID: &str = "Tencent-Cloud.coding-copilot";
 

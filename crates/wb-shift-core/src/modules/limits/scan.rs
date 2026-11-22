@@ -9,7 +9,8 @@ use super::parse::QUOTA_MARKERS;
 use crate::modules::config::now_ms;
 use chrono::NaiveDate;
 use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -43,6 +44,23 @@ pub(super) const IDE_LOG_DIR_NAME: &str = "Tencent-Cloud.coding-copilot";
 /// IDE 的 `Agent execution failed` 行含完整请求体（本机实测 117 KB，研究报告另有 350 KB
 /// 样本）：只对行首/行尾各一个定长窗口做字段嗅探，不对整行做全量正则或 JSON 反序列化。
 pub(super) const LONG_LINE_SNIFF_BYTES: usize = 4 * 1024;
+
+// --- VS Code 插件宿主 agent 日志（#118 / #188）--------------------------------
+
+/// VS Code 用户数据目录名（官方版与其 Insiders 变体，按此顺序探测）。
+const VSCODE_USER_DIRS: [&str; 2] = ["Code", "Code - Insiders"];
+
+/// 扩展数据根下的日志段名（`…/CodeBuddyExtension/Logs/<客户端>/`）。
+const EXTENSION_LOG_DIR_NAME: &str = "Logs";
+
+/// 扩展日志段下的客户端目录名（VS Code 插件）。
+const EXTENSION_CLIENT_DIR_NAME: &str = "VSCode";
+
+/// 插件宿主日志的粗筛窗口（字节）：可能是几十 MB 的完整会话记录，只嗅探首尾。
+const AGENT_SNIFF_BYTES: u64 = 256 * 1024;
+
+/// 插件宿主日志目录的递归深度上限（`exthost/<插件>/<日期>/…`）。
+const AGENT_MAX_DEPTH: usize = 10;
 
 /// 同一事件的重置时刻相同时，发生时刻相差 ≤ 该值即视为同一次事件。
 ///
@@ -164,7 +182,39 @@ pub(super) fn collect_events(root: &Path, format: LogFormat, auth: AuthMarker) -
         LogFormat::WorkBuddy => windowed_log_files(root, cutoff_ms),
         // IDE 会话目录下按插件目录过滤 + 文件 mtime 收窗。
         LogFormat::Ide => ide_log_files(root, cutoff_ms),
+        // 插件宿主日志：`logs/<会话>/window<N>/exthost/**` 或扩展目录树，按文件 mtime 收窗。
+        LogFormat::Agent => agent_log_files(root, cutoff_ms),
     };
+    scan_files(files, format, auth)
+}
+
+/// 多根版本：插件宿主的候选根**可能同时存在多个**（VS Code 用户日志树 + 扩展目录日志），
+/// 逐个枚举后按文件路径去重再统一解析（同一份日志被两条路径指到时只算一次）。
+pub(super) fn collect_events_in(
+    roots: &[PathBuf],
+    format: LogFormat,
+    auth: AuthMarker,
+) -> Vec<Event> {
+    let cutoff_ms = now_ms() - WINDOW_DAYS as i64 * DAY_MS;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        let found = match format {
+            LogFormat::WorkBuddy => windowed_log_files(root, cutoff_ms),
+            LogFormat::Ide => ide_log_files(root, cutoff_ms),
+            LogFormat::Agent => agent_log_files(root, cutoff_ms),
+        };
+        for file in found {
+            if seen.insert(file.clone()) {
+                files.push(file);
+            }
+        }
+    }
+    scan_files(files, format, auth)
+}
+
+/// 候选文件 → 逐文件粗筛/解析 → 去重。
+fn scan_files(files: Vec<PathBuf>, format: LogFormat, auth: AuthMarker) -> Vec<Event> {
     let mut hits = Vec::new();
     for file in files {
         scan_file(&file, format, auth, &mut hits);
@@ -222,6 +272,245 @@ fn modified_ms(metadata: &std::fs::Metadata) -> Option<i64> {
     i64::try_from(since_epoch.as_millis()).ok()
 }
 
+// ---------------------------------------------------------------------------
+// VS Code 插件宿主 agent 日志（#118 / #188）
+// ---------------------------------------------------------------------------
+
+/// 插件宿主 agent 日志根（探测不到 → 空集合）。
+///
+/// **所有存在的候选根都要扫**（union），不是「挑第一个存在的」：VS Code 用户日志树与扩展
+/// 目录日志会同时存在且内容互不覆盖 —— 前者是宿主进程日志（只有它带 `exthost/` 分段），
+/// 后者是扩展自己写的日志（不经 VS Code 用户数据目录）。只挑第一个时，只要
+/// `Code/logs` 存在就永远读不到扩展目录那一份，扩展侧的事件会整体消失。
+/// 口径与 [`super::vscode_ext::log_roots`] 一致（同样按「全部候选」收集）。
+///
+/// 探测不到**不是错误**：本机不一定装了 VS Code，装了也不一定装了 CodeBuddy 插件。
+/// 这种情况下该来源贡献 0 条事件，整轮扫描照常完成（不能因此判定失败，也不能 panic）。
+pub(crate) fn agent_log_roots() -> Vec<PathBuf> {
+    let home = crate::modules::config::home_dir();
+    agent_log_roots_from(&agent_log_candidates(
+        &home,
+        dirs::data_dir().as_deref(),
+        dirs::data_local_dir().as_deref(),
+    ))
+}
+
+/// 候选日志根（按优先级），**纯函数**：家目录与平台数据根都由调用方注入，便于用临时目录测试。
+///
+/// 规则（优先级从高到低）：
+/// 1. `<VS Code 用户数据>/logs` —— Windows `%APPDATA%/Code{,- Insiders}/logs`、
+///    macOS `~/Library/Application Support/Code{,- Insiders}/logs`、
+///    Linux `~/.config/Code{,- Insiders}/logs`（官方版先于 Insiders）；
+/// 2. `<扩展数据根>/CodeBuddyExtension/Logs/VSCode` —— 退路（扩展自己写的日志）。
+pub(crate) fn agent_log_candidates(
+    home: &Path,
+    roaming: Option<&Path>,
+    local_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(roaming) = roaming {
+            for dir in VSCODE_USER_DIRS {
+                candidates.push(roaming.join(dir).join(LOG_DIR_NAME));
+            }
+        }
+        if let Some(local_data) = local_data {
+            candidates.push(extension_logs_root(local_data));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let support = home.join("Library").join("Application Support");
+        for dir in VSCODE_USER_DIRS {
+            candidates.push(support.join(dir).join(LOG_DIR_NAME));
+        }
+        candidates.push(extension_logs_root(&support));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let config = home.join(".config");
+        for dir in VSCODE_USER_DIRS {
+            candidates.push(config.join(dir).join(LOG_DIR_NAME));
+        }
+        candidates.push(extension_logs_root(&home.join(".local").join("share")));
+    }
+    // 部分平台的注入参数没有用上（例如 Windows 不用 `home`）：显式引用一次，
+    // 避免 `-D warnings` 报未使用变量，也不引入 `#[allow]`。
+    let _ = (home, roaming, local_data);
+    candidates
+}
+
+/// 扩展数据根下的插件宿主日志根（`<data_root>/CodeBuddyExtension/Logs/VSCode`）。
+fn extension_logs_root(data_root: &Path) -> PathBuf {
+    data_root
+        .join("CodeBuddyExtension")
+        .join(EXTENSION_LOG_DIR_NAME)
+        .join(EXTENSION_CLIENT_DIR_NAME)
+}
+
+/// 候选里**所有真实存在**的日志根（按候选顺序，去重）；一个都不存在 → 空集合
+/// （该来源贡献 0 条）。
+///
+/// 不做「取第一个」的短路：见 [`agent_log_roots`] 的解释。
+pub(crate) fn agent_log_roots_from(candidates: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for path in candidates {
+        if path.is_dir() && !roots.contains(path) {
+            roots.push(path.clone());
+        }
+    }
+    roots
+}
+
+/// 插件宿主 agent 日志的候选文件。
+///
+/// 两种布局都兼容（同一份日志在不同安装形态下的落点不同）：
+/// - VS Code 用户日志树：`<root>/<会话>/window<N>/exthost/<插件>/**`（宿主进程的日志夹在这
+///   棵树下，插件自己的子目录再深一层也能收到）；
+/// - 扩展目录树：`<root>/**`（没有 `exthost` 分段）。
+///
+/// 都只收窗口内（按文件 mtime）的常规文件，并先做一次「限额文案」首尾嗅探：
+/// `exthost/` 下还有**其它扩展**的日志，不能让它们整份进内存。
+///
+/// `exthost/` 下**先按插件目录过滤**再递归（[`is_codebuddy_extension_dir`]）：
+/// `ms-python.python`、`github.copilot-chat` 之类的日志与限额无关，只按文件 mtime 收窗会把
+/// 它们全收进候选 —— 既拖慢扫描，也让「限额文案嗅探」在大文件上白做一遍。
+pub(crate) fn agent_log_files(root: &Path, cutoff_ms: i64) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if has_exthost_tree(root) {
+        for session in subdirs(root) {
+            for window in subdirs(&session) {
+                for plugin in subdirs(&window.join("exthost")) {
+                    if !is_codebuddy_extension_dir(&plugin) {
+                        continue;
+                    }
+                    walk_agent_logs(&plugin, 0, cutoff_ms, &mut files);
+                }
+            }
+        }
+    } else {
+        walk_agent_logs(root, 0, cutoff_ms, &mut files);
+    }
+    files
+}
+
+/// 是否 CodeBuddy 扩展自己的日志目录。
+///
+/// 判定复用 `vscode_ext` 的扩展 marketplace id（大小写不敏感**包含**），不写死目录名清单：
+/// marketplace id 在不同版本里大小写与后缀都变过（`Tencent-Cloud.coding-copilot`、
+/// `coding-copilot-*`），前缀或全等匹配都会把本插件判成「别的扩展」。
+fn is_codebuddy_extension_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.to_ascii_lowercase()
+                .contains(crate::modules::vscode_ext::EXTENSION_ID)
+        })
+}
+
+/// 目录下所有子目录（读不到就是空集，不是错误）。
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+/// 是否是 VS Code 用户日志树：存在 `<会话>/window<N>/exthost` 这一层。
+fn has_exthost_tree(root: &Path) -> bool {
+    subdirs(root).iter().any(|session| {
+        subdirs(session).iter().any(|window| {
+            let name = window
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            name.starts_with("window") && window.join("exthost").is_dir()
+        })
+    })
+}
+
+/// 递归收集窗口内的常规文件（限额文案嗅探通过才进候选）。
+fn walk_agent_logs(dir: &Path, depth: usize, cutoff_ms: i64, out: &mut Vec<PathBuf>) {
+    if depth > AGENT_MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_agent_logs(&path, depth + 1, cutoff_ms, out);
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if !modified_ms(&metadata).is_some_and(|modified| modified >= cutoff_ms) {
+            continue;
+        }
+        if sniff_quota_markers(&path, metadata.len()) {
+            out.push(path);
+        }
+    }
+}
+
+/// 首尾窗口嗅探限额文案：整份读 `exthost` 下所有扩展的日志是不可接受的（几十 MB）。
+///
+/// 首窗够了（日志是追加写、限额行落在开头附近时才可能命中），尾窗兜住「文件很大且
+/// 事件刚写在末尾」这类常见形态；两处都没有就跳过 —— 与 `scan_file` 的粗筛口径一致。
+fn sniff_quota_markers(path: &Path, size: u64) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let head_limit = size.min(AGENT_SNIFF_BYTES);
+    let mut head = Vec::new();
+    if file
+        .by_ref()
+        .take(head_limit)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return false;
+    }
+    if has_quota_marker(&head) {
+        return true;
+    }
+    if size <= AGENT_SNIFF_BYTES {
+        return false;
+    }
+    if file
+        .seek(SeekFrom::Start(size - AGENT_SNIFF_BYTES))
+        .is_err()
+    {
+        return false;
+    }
+    let mut tail = Vec::new();
+    if file
+        .by_ref()
+        .take(AGENT_SNIFF_BYTES)
+        .read_to_end(&mut tail)
+        .is_err()
+    {
+        return false;
+    }
+    has_quota_marker(&tail)
+}
+
+/// 字节级粗筛：是否含任一限额文案（与 `scan_file` 同一套标记）。
+fn has_quota_marker(bytes: &[u8]) -> bool {
+    QUOTA_MARKERS
+        .iter()
+        .any(|marker| contains(bytes, marker.as_bytes()))
+}
 /// 两步去重：① `(事件 id, 重置时刻)` 相同即同一次事件；② 重置时刻相同且发生时刻相差
 /// ≤ `MERGE_WINDOW_MS` 的记录再合并一次（业务日志与 SDK 日志各写一份，IDE 侧一次事件写
 /// 8 行且只有部分行带事件 id，且两边的 id 未必都取得到）。

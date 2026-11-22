@@ -4,6 +4,7 @@ use super::ledger::cli_state_path;
 use super::ledger::invalidate_scan_cache;
 use super::ledger::resolve_by_uid;
 use super::ledger::save_rate_limit_config_at;
+use super::ledger::scan_agent_logs;
 use super::ledger::scan_scope;
 use super::ledger::ActiveAccount;
 use super::ledger::ScanCache;
@@ -32,6 +33,9 @@ use super::parse::MODEL_UNKNOWN;
 use super::parse::QUOTA_MARKERS;
 use super::payload::build_payload;
 use super::payload::Resolved;
+use super::scan::agent_log_candidates;
+use super::scan::agent_log_files;
+use super::scan::agent_log_roots_from;
 use super::scan::collect_events;
 use super::scan::contains;
 use super::scan::dedupe;
@@ -965,6 +969,115 @@ fn payload_drops_entries_reset_between_scan_and_now() {
         .is_empty());
 }
 
+/// 同一次 429 在插件宿主日志里缺 `[ModelProvider]` 行 → 模型未知，另一次扫描（IDE 侧）能
+/// 补上模型：两条必须聚合成 **1 条**，不能让用户看到两个限额 chip。
+///
+/// 判据是「同账号 + 同 `resetAt`」：这是唯一能证明两条来自同一次限流的信号。
+#[test]
+fn payload_merges_unknown_model_into_the_same_event() {
+    let now = 1_000_000;
+    let reset_at = now + 1_800_000;
+    let resolved = vec![
+        Resolved {
+            account_id: "a".to_string(),
+            model: Some("hy4-preview-f".to_string()),
+            reset_at,
+            first_seen_at: now - 10_000,
+            hit_count: 6,
+            source: "codebuddy-ide".to_string(),
+        },
+        Resolved {
+            account_id: "a".to_string(),
+            model: None,
+            reset_at,
+            first_seen_at: now - 12_000,
+            hit_count: 2,
+            source: "vscode-ext".to_string(),
+        },
+    ];
+    let payload = build_payload(resolved, now, now, true);
+    let limited = payload["accounts"][0]["limited"]
+        .as_array()
+        .expect("limited 数组");
+    assert_eq!(limited.len(), 1, "同一次 429 只展示一条：{limited:?}");
+    assert_eq!(
+        limited[0]["model"], "hy4-preview-f",
+        "模型名由有模型的一侧补上"
+    );
+    assert_eq!(limited[0]["resetAt"], reset_at);
+    assert_eq!(
+        limited[0]["source"], "vscode-ext",
+        "触发限流的是插件本身，来源标签保留 vscode-ext"
+    );
+    assert_eq!(limited[0]["hitCount"], 8, "命中次数累加（6 + 2）");
+    assert_eq!(limited[0]["firstSeenAt"], now - 12_000, "首次出现取更早");
+    // 有 vscode 记录 → 不再给出 borrowed 兜底。
+    assert_eq!(payload["accounts"][0]["borrowed"], Value::Null);
+}
+
+/// 反向约束：`resetAt` 不同的两条**不是**同一次限流，绝不能合并（漏报比重复更糟）。
+#[test]
+fn payload_keeps_events_with_different_reset_times_apart() {
+    let now = 1_000_000;
+    let resolved = vec![
+        Resolved {
+            account_id: "a".to_string(),
+            model: Some("hy4-preview-f".to_string()),
+            reset_at: now + 1_800_000,
+            first_seen_at: now - 10_000,
+            hit_count: 6,
+            source: "codebuddy-ide".to_string(),
+        },
+        Resolved {
+            account_id: "a".to_string(),
+            model: None,
+            reset_at: now + 7_200_000,
+            first_seen_at: now - 5_000,
+            hit_count: 1,
+            source: "vscode-ext".to_string(),
+        },
+    ];
+    let payload = build_payload(resolved, now, now, true);
+    let limited = payload["accounts"][0]["limited"]
+        .as_array()
+        .expect("limited 数组");
+    assert_eq!(limited.len(), 2, "重置时刻不同 → 两次限流：{limited:?}");
+    assert_eq!(limited[0]["resetAt"], now + 1_800_000, "按恢复时间升序");
+    assert_eq!(limited[1]["model"], Value::Null);
+    assert_eq!(limited[1]["resetAt"], now + 7_200_000);
+}
+
+/// 归并只在**同一账号**内发生：不同账号的重置时刻相同也不能并（那是两个账号各被限流一次）。
+#[test]
+fn payload_does_not_merge_across_accounts() {
+    let now = 1_000_000;
+    let reset_at = now + 1_800_000;
+    let resolved = vec![
+        Resolved {
+            account_id: "a".to_string(),
+            model: Some("hy4-preview-f".to_string()),
+            reset_at,
+            first_seen_at: 0,
+            hit_count: 1,
+            source: "codebuddy-ide".to_string(),
+        },
+        Resolved {
+            account_id: "b".to_string(),
+            model: None,
+            reset_at,
+            first_seen_at: 0,
+            hit_count: 1,
+            source: "vscode-ext".to_string(),
+        },
+    ];
+    let payload = build_payload(resolved, now, now, false);
+    let accounts = payload["accounts"].as_array().expect("accounts 数组");
+    assert_eq!(accounts.len(), 2, "{accounts:?}");
+    assert_eq!(accounts[0]["limited"].as_array().map(Vec::len), Some(1));
+    assert_eq!(accounts[1]["limited"].as_array().map(Vec::len), Some(1));
+    assert_eq!(accounts[1]["limited"][0]["model"], Value::Null);
+}
+
 // -----------------------------------------------------------------------
 // CodeBuddy CLI
 // -----------------------------------------------------------------------
@@ -1569,6 +1682,9 @@ fn scan_roots_for(dir: &Path, marker: &str) -> ScanRoots {
                 dir.join("CodeBuddy CN"),
             ),
         ],
+        // 插件宿主 agent 日志根默认不注入（空集合 = 本机没装 VS Code / 没装插件），
+        // 需要它的测试自己赋值。
+        agent_log_roots: Vec::new(),
         marker: marker.to_string(),
     }
 }
@@ -1841,4 +1957,373 @@ fn payload_borrows_latest_other_client_limit_only_without_vscode_record() {
         .filter_map(|item| item["source"].as_str())
         .collect();
     assert!(sources.contains(&"vscode-ext"));
+}
+
+// -----------------------------------------------------------------------
+// VS Code 插件宿主 agent 日志（#118 / #188：插件限额标记从来没触发过）
+// -----------------------------------------------------------------------
+
+/// 插件宿主 agent 日志的行骨架：**第三种**时间格式 `[2026/9/27 13:27:37.109]`
+/// （Y/M/D + 24 小时制 + 毫秒，方括号包住）。
+fn agent_line(timestamp: &str, body: &str) -> String {
+    format!("[{timestamp}] [info] [pid=1] {body}")
+}
+
+const AGENT_SESSION: &str = "7c1f4e2a-9b3d-4c58-8a41-2d6f0b7e5c93";
+const AGENT_REQUEST: &str = "9f2c7a1b4d5e46f8a0b1c2d3e4f50617";
+
+/// 一次插件侧 429 的三行：鉴权行（Pulse 生命周期）+ 请求行（`requestId → model`）+ 限额行。
+fn agent_event_lines(model: &str, reset: &str) -> String {
+    [
+        agent_line(
+            "2026/9/27 13:27:30.000",
+            &format!(
+                "[PulseServiceLifecycle] Auth session changed: hasSession=true, initialized=true, uid={UID_A}"
+            ),
+        ),
+        agent_line(
+            "2026/9/27 13:27:31.000",
+            &provider_line(AGENT_REQUEST, model),
+        ),
+        agent_line(
+            "2026/9/27 13:27:37.109",
+            &cn_quota_with(AGENT_SESSION, AGENT_REQUEST, reset),
+        ),
+    ]
+    .join("\n")
+}
+
+/// 造一棵 VS Code 用户日志树：`<root>/<会话>/window<N>/exthost/<插件>/agent.log`。
+fn write_agent_log(root: &Path, contents: &str) {
+    let dir = root
+        .join("20260927T132700")
+        .join("window1")
+        .join("exthost")
+        .join(IDE_LOG_DIR_NAME);
+    std::fs::create_dir_all(&dir).expect("插件宿主日志目录");
+    std::fs::write(dir.join("agent.log"), contents).expect("写入 agent 日志");
+}
+
+/// 没有回落状态文件时的归因输入（只有 uid 命中账号库才入账）。
+fn no_fallback() -> ActiveAccount {
+    ActiveAccount {
+        account_id: None,
+        updated_at: None,
+    }
+}
+
+/// 第三种时间格式必须与另外两种**区分开**：认错的表现不是报错，而是整份日志零结果
+/// （#188 的根因之一）。
+///
+/// - WorkBuddy 桌面：`[9/15/2026, 6:19:48 PM.755]`（M/D/YYYY + 12 小时制 + AM/PM）；
+/// - CodeBuddy IDE：`2026-09-17 10:28:26.730`（Y-M-D、无方括号、定长 23 字节）；
+/// - 插件宿主 agent：`[2026/9/27 18:27:37.109]`（Y/M/D + 24 小时制 + 毫秒）。
+#[test]
+fn agent_log_timestamp_is_year_first_24h_and_keeps_millis() {
+    // (行首时间戳, 年, 月, 日, 时, 分, 秒, 毫秒)
+    let cases = [
+        ("[2026/9/27 18:27:37.109]", 2026, 9, 27, 18, 27, 37, 109),
+        // 补零的月/日与 13 点（12 小时制会读成 1 点，这里必须读成 13）。
+        ("[2026/09/07 13:05:01.000]", 2026, 9, 7, 13, 5, 1, 0),
+        // 一位数的小时：定长切片会切错，必须按「日期 token + 时刻 token」解析。
+        ("[2026/12/31 3:07:09.950]", 2026, 12, 31, 3, 7, 9, 950),
+    ];
+    for (stamp, year, month, day, hour, minute, second, millis) in cases {
+        let expected = Local
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .earliest()
+            .expect("测试时间必须存在");
+        let line = agent_line(&stamp[1..stamp.len() - 1], &cn_quota());
+        assert_eq!(
+            line_timestamp(&line, LogFormat::Agent),
+            Some(expected.timestamp_millis() + millis),
+            "时间戳 {stamp} 未被按第三种格式解析（毫秒/24 小时制/单双位月日）"
+        );
+    }
+
+    // 同一形态的无方括号排版（写入器的另一种输出）同样要认。
+    assert_eq!(
+        line_timestamp("2026/9/27 13:27:37.109 [info] x", LogFormat::Agent),
+        line_timestamp(&agent_line("2026/9/27 13:27:37.109", "x"), LogFormat::Agent)
+    );
+    // 省略毫秒：毫秒按 0 计（IDE 的定长格式做不到这点）。
+    let without_ms = Local
+        .with_ymd_and_hms(2026, 9, 27, 13, 27, 37)
+        .earliest()
+        .expect("测试时间必须存在");
+    assert_eq!(
+        line_timestamp(&agent_line("2026/9/27 13:27:37", "x"), LogFormat::Agent),
+        Some(without_ms.timestamp_millis())
+    );
+    // 没有时间戳的行不猜时间。
+    assert_eq!(line_timestamp("no timestamp here", LogFormat::Agent), None);
+    assert_eq!(line_timestamp("", LogFormat::Agent), None);
+}
+
+/// 端到端：临时目录造一条插件宿主 agent 日志 → 扫出 1 条 429，来源标签是 `vscode-ext`。
+///
+/// 标签是对外契约（前端 `SOURCE_LABELS` / `has_vscode` / borrowed 兜底都认这个字符串），
+/// 不能用 `vscode-agent` 之类的近义名替换。
+#[test]
+fn agent_source_collects_the_plugin_429_under_the_vscode_ext_label() {
+    let root = temp_dir("agent-source");
+    write_agent_log(
+        &root,
+        &agent_event_lines("hy4-preview-f", "2026-09-17 17:59:27"),
+    );
+
+    let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-plugin".to_string())]);
+    let resolved = scan_agent_logs(std::slice::from_ref(&root), &uid_to_account, &no_fallback());
+    assert_eq!(resolved.len(), 1, "一次 429 只产出一条事件");
+    assert_eq!(resolved[0].source, "vscode-ext");
+    assert_eq!(resolved[0].account_id, "acc-plugin", "归因走日志内鉴权 uid");
+    assert_eq!(resolved[0].model.as_deref(), Some("hy4-preview-f"));
+    assert_eq!(resolved[0].reset_at, CN_RESET_AT);
+
+    // 枚举口径：`exthost/<插件>/**` 下的文件按 mtime 收窗，窗口外一个都不收。
+    let cutoff = now_ms() - WINDOW_DAYS as i64 * DAY_MS;
+    assert_eq!(agent_log_files(&root, cutoff).len(), 1);
+    assert!(agent_log_files(&root, now_ms() + DAY_MS).is_empty());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 同一次 429 在 IDE 侧与插件宿主侧都写了 → 聚合为 **1 条**，不重复展示。
+///
+/// 聚合点是 `build_payload` 的 `(账号, 模型)` 归并（既有行为）：两条 `Resolved` 的重置时刻
+/// 相同，保留先入的那条（IDE，扫描顺序在前）；保留哪一侧的来源标签只是展示口径，
+/// 「只出现一条」才是要求。
+#[test]
+fn the_same_429_in_the_ide_and_the_plugin_collapses_into_one_entry() {
+    let ide_root = temp_dir("agent-dedupe-ide");
+    let copilot = ide_root
+        .join("20260917T102952")
+        .join("window3")
+        .join("exthost")
+        .join(IDE_LOG_DIR_NAME);
+    std::fs::create_dir_all(&copilot).expect("IDE 插件日志目录");
+    std::fs::write(
+        copilot.join("腾讯云代码助手.log"),
+        [
+            ide_auth_line(UID_A),
+            ide_model_selection_line(IDE_CONV, IDE_MODEL),
+            ide_event_lines(IDE_CONV, UID_A),
+        ]
+        .join("\n"),
+    )
+    .expect("IDE 日志");
+
+    // 插件宿主侧对同一次 429 再写一份：同账号、同模型、同重置时刻。
+    let agent_root = temp_dir("agent-dedupe-agent");
+    write_agent_log(
+        &agent_root,
+        &agent_event_lines(IDE_MODEL, "2026-09-17 17:59:27"),
+    );
+
+    let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-1".to_string())]);
+    let fallback = no_fallback();
+    let mut all = resolve_by_uid(
+        &collect_events(&ide_root, LogFormat::Ide, AuthMarker::AuthSessionChanged),
+        &uid_to_account,
+        &fallback,
+        ScanSource::Ide(CodeBuddyIdeFlavor::Intl).label(),
+    );
+    all.extend(scan_agent_logs(
+        std::slice::from_ref(&agent_root),
+        &uid_to_account,
+        &fallback,
+    ));
+    assert_eq!(all.len(), 2, "两侧各扫出 1 条（聚合前）");
+
+    let now = 1_000_000;
+    let payload = build_payload(all, now, now, true);
+    let limited = payload["accounts"][0]["limited"]
+        .as_array()
+        .expect("limited 数组");
+    assert_eq!(limited.len(), 1, "同一次 429 不得展示成两条");
+    assert_eq!(limited[0]["model"], IDE_MODEL);
+    assert_eq!(limited[0]["resetAt"], CN_RESET_AT);
+    std::fs::remove_dir_all(&ide_root).ok();
+    std::fs::remove_dir_all(&agent_root).ok();
+}
+
+/// 探测不到日志根 → 该来源贡献 0 条，**不 panic、也不把整轮扫描判成失败**。
+#[test]
+fn agent_source_yields_nothing_when_the_log_root_is_missing() {
+    let root = temp_dir("agent-missing");
+    let missing = root.join("no-such-root");
+    assert!(agent_log_roots_from(&[]).is_empty());
+    assert!(agent_log_roots_from(std::slice::from_ref(&missing)).is_empty());
+
+    let fallback = no_fallback();
+    assert!(scan_agent_logs(std::slice::from_ref(&missing), &HashMap::new(), &fallback).is_empty());
+    assert!(collect_events(&missing, LogFormat::Agent, AuthMarker::ExtensionAny).is_empty());
+
+    // 装了 VS Code 但没装插件：目录在、里面没有日志 → 同样是 0 条。
+    let empty = root.join("empty-logs");
+    std::fs::create_dir_all(&empty).expect("空日志根");
+    assert!(scan_agent_logs(std::slice::from_ref(&empty), &HashMap::new(), &fallback).is_empty());
+    assert_eq!(
+        agent_log_roots_from(std::slice::from_ref(&empty)),
+        vec![empty]
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 非 429 / 与配额无关的行不得被误收（本机 VS Code 日志里有 7 条 EDU 接口的
+/// `Status: 429`，把它们算成限流就是误报）。
+#[test]
+fn agent_source_ignores_lines_without_quota_text() {
+    let root = temp_dir("agent-noise");
+    write_agent_log(
+        &root,
+        &[
+            agent_line("2026/9/27 13:27:30.000", "agent started"),
+            agent_line(
+                "2026/9/27 13:27:31.000",
+                "Unable to resolve optional EDU details. Status: 429",
+            ),
+            agent_line("2026/9/27 13:27:32.000", "request finished, statusCode=200"),
+        ]
+        .join("\n"),
+    );
+    assert!(collect_events(&root, LogFormat::Agent, AuthMarker::ExtensionAny).is_empty());
+    let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-1".to_string())]);
+    assert!(
+        scan_agent_logs(std::slice::from_ref(&root), &uid_to_account, &no_fallback()).is_empty()
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 根探测规则：**所有存在的候选根都要扫**（union），不是「挑第一个存在的」。
+///
+/// 反例（修复前）：只要 `Code/logs` 存在就永不走扩展目录退路 —— 而扩展目录日志
+/// （`CodeBuddyExtension/Logs/VSCode`）与 VS Code 用户日志树的内容互不覆盖，
+/// 取第一个等于整体丢掉另一侧的事件。
+#[test]
+fn agent_log_roots_collects_every_existing_candidate() {
+    let dir = temp_dir("agent-roots");
+    let user_logs = dir.join("Code").join("logs");
+    let insiders = dir.join("Code - Insiders").join("logs");
+    let extension = dir.join("CodeBuddyExtension").join("Logs").join("VSCode");
+    let candidates = vec![user_logs.clone(), insiders.clone(), extension.clone()];
+
+    // 一个都不存在 → 空集合（该来源 0 条）。
+    assert!(agent_log_roots_from(&candidates).is_empty());
+    // 只有扩展目录 → 只有它。
+    std::fs::create_dir_all(&extension).expect("扩展日志目录");
+    assert_eq!(agent_log_roots_from(&candidates), vec![extension.clone()]);
+    // 出现 Insiders 日志树：两个都收（顺序按候选表：Insiders 在前）。
+    std::fs::create_dir_all(&insiders).expect("Insiders 日志树");
+    assert_eq!(
+        agent_log_roots_from(&candidates),
+        vec![insiders.clone(), extension.clone()]
+    );
+    // 三个都在：官方版 → Insiders → 扩展目录，**一个都不丢**。
+    std::fs::create_dir_all(&user_logs).expect("官方版日志树");
+    assert_eq!(
+        agent_log_roots_from(&candidates),
+        vec![user_logs.clone(), insiders, extension]
+    );
+
+    // 真实候选表：官方版 → Insiders → 扩展目录，最后一项恒为扩展目录。
+    let built = agent_log_candidates(&dir.join("home"), Some(&dir), Some(&dir));
+    assert_eq!(
+        built.len(),
+        3,
+        "三个候选：Code → Code - Insiders → 扩展目录"
+    );
+    let official_suffix = Path::new("Code").join("logs");
+    let insiders_suffix = Path::new("Code - Insiders").join("logs");
+    let extension_suffix = Path::new("CodeBuddyExtension").join("Logs").join("VSCode");
+    assert!(built[0].ends_with(&official_suffix), "首选 {:?}", built[0]);
+    assert!(built[1].ends_with(&insiders_suffix), "次选 {:?}", built[1]);
+    assert!(built[2].ends_with(&extension_suffix), "退路 {:?}", built[2]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 两个日志根同时存在时，两侧的事件都要进账（修复前只扫第一个根 → 扩展侧事件整体消失）。
+#[test]
+fn agent_source_scans_both_roots_instead_of_only_the_first() {
+    let dir = temp_dir("agent-union");
+    // 根 1：VS Code 用户日志树（`exthost/<插件>/`）。
+    let user_logs = dir.join("Code").join("logs");
+    write_agent_log(
+        &user_logs,
+        &agent_event_lines("hy4-preview-f", "2026-09-17 17:59:27"),
+    );
+    // 根 2：扩展目录日志树（没有 `exthost` 分段，直接 `<root>/agent.log`）。
+    let extension = dir.join("CodeBuddyExtension").join("Logs").join("VSCode");
+    std::fs::create_dir_all(&extension).expect("扩展日志根");
+    std::fs::write(
+        extension.join("agent.log"),
+        agent_event_lines("hy4-preview-f", "2026-09-17 19:59:27"),
+    )
+    .expect("扩展侧 agent 日志");
+
+    let roots = agent_log_roots_from(&[user_logs, extension]);
+    assert_eq!(roots.len(), 2, "两个根都存在 → 两个都要扫：{roots:?}");
+
+    let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-plugin".to_string())]);
+    let resolved = scan_agent_logs(&roots, &uid_to_account, &no_fallback());
+    assert_eq!(
+        resolved.len(),
+        2,
+        "两个根各一条（重置时刻不同，不是同一次限流）：{resolved:?}"
+    );
+    let resets: BTreeSet<i64> = resolved.iter().map(|item| item.reset_at).collect();
+    assert!(resets.contains(&CN_RESET_AT));
+    assert_eq!(resets.len(), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `exthost/` 下别的扩展（`ms-python.python`、`github.copilot-chat`）的日志不进候选：
+/// 它们与限额无关，跟着扫只会把候选集和嗅探开销一起放大。
+#[test]
+fn agent_log_files_only_walks_codebuddy_extension_dirs() {
+    let root = temp_dir("agent-plugin-filter");
+    let exthost = root.join("20260927T132700").join("window1").join("exthost");
+    let ours = exthost.join("Tencent-Cloud.coding-copilot");
+    let python = exthost.join("ms-python.python");
+    let copilot_chat = exthost.join("github.copilot-chat");
+    for dir in [&ours, &python, &copilot_chat] {
+        std::fs::create_dir_all(dir).expect("exthost 插件目录");
+        // 内容相同：命中与否只能来自目录过滤，不能来自文件内容。
+        std::fs::write(
+            dir.join("agent.log"),
+            agent_event_lines("hy4-preview-f", "2026-09-17 17:59:27"),
+        )
+        .expect("插件日志");
+    }
+
+    let cutoff = now_ms() - WINDOW_DAYS as i64 * DAY_MS;
+    let files = agent_log_files(&root, cutoff);
+    assert_eq!(files.len(), 1, "只收本插件目录：{files:?}");
+    assert_eq!(files[0], ours.join("agent.log"));
+
+    // 端到端：别的扩展目录里的同一份内容不得被解析成事件。
+    let uid_to_account = HashMap::from([(UID_A.to_string(), "acc-plugin".to_string())]);
+    let resolved = scan_agent_logs(std::slice::from_ref(&root), &uid_to_account, &no_fallback());
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 插件来源与两个 IDE 共用 `scanIdeLogs` 开关：关掉后不入范围；探测不到日志根也不入范围。
+#[test]
+fn agent_source_scope_follows_the_ide_log_switch() {
+    let dir = temp_dir("agent-scope");
+    let marker = quoted_marker(&dir);
+    let mut roots = scan_roots_for(&dir, &marker);
+
+    assert!(
+        !scan_scope(&roots, true).contains(ScanSource::AgentLog),
+        "探测不到日志根 → 不入范围（也不报错）"
+    );
+
+    roots.agent_log_roots = vec![dir.join("Code").join("logs")];
+    assert!(scan_scope(&roots, true).contains(ScanSource::AgentLog));
+    assert!(
+        !scan_scope(&roots, false).contains(ScanSource::AgentLog),
+        "关掉「扫描 IDE 日志」后插件来源也不扫（否则关开关反而多扫一棵树）"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -28,8 +28,8 @@ pub(crate) const SCAN_MIN_INTERVAL_MS: i64 = 5 * 60 * 1000;
 ///
 /// - CLI / WorkBuddy(x)：数据根存在 **且** 该处配置未注册本工具 hook —— 某处注册失败
 ///   （非法 JSON / 用户手删条目）时只有那一处回退日志扫描，其余来源继续走事件通路；
-/// - IDE(x)：`scan_ide_logs` 开启 **且** 数据根存在才扫（IDE 的 429 不触发任何事件，
-///   日志是它唯一的数据源；开关关闭时两个 IDE 一律不入范围）。
+/// - IDE(x) / 插件宿主：`scan_ide_logs` 开启 **且** 日志根存在才扫（这两类的 429 不触发任何
+///   事件，日志是唯一数据源；开关关闭时一律不入范围）。
 pub(crate) fn scan_scope(roots: &ScanRoots, scan_ide_logs: bool) -> ScanScope {
     let mut scope = ScanScope::NONE;
     for (source, data_root, settings) in &roots.hook_sources {
@@ -42,6 +42,12 @@ pub(crate) fn scan_scope(roots: &ScanRoots, scan_ide_logs: bool) -> ScanScope {
             if data_root.is_dir() {
                 scope.insert(*source);
             }
+        }
+        // 插件宿主 agent 日志与两个 IDE 同为「日志唯一数据源」，共用 `scanIdeLogs` 开关：
+        // 关掉日志扫描时它也不入范围（否则关开关反而多扫一棵 VS Code 日志树）。
+        // 探测不到日志根（没装 VS Code / 没装插件）→ 不入范围，该来源贡献 0 条，不报错。
+        if !roots.agent_log_roots.is_empty() {
+            scope.insert(ScanSource::AgentLog);
         }
     }
     scope
@@ -150,9 +156,12 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
     }
     // ③ 两个 CodeBuddy IDE：同一份 Ide 格式与同一套归因，只有日志根与状态文件不同。
     //
-    // **不扫** `CodeBuddyExtension/Logs/CodeBuddyIDE/`：它是插件宿主的跨 App 共享日志根，
-    // 与 CN IDE 真身重复记录同一次 429（同一 requestId、行时间差 3 ms），扫它会重复展示
-    // 且档位归属不清（PRD D1）。
+    // 仍然**不扫** `CodeBuddyExtension/Logs/CodeBuddyIDE/`：那里与 CN IDE 真身重复记录同一次
+    // 429（同一 requestId、行时间差 3 ms），扫它会重复展示且档位归属不清（PRD D1）。
+    //
+    // 但**要扫**插件宿主的 agent 日志（见 ④）：插件侧的 429 只写在那儿，两个 IDE 的
+    // `exthost` 树里都没有对应记录 —— 所以「按 IDE 归因复用」在这里行不通，
+    // 不单独扫这一路，插件限额标记就永远不会触发（#118 / #188）。
     let mut ide_uid_to_account: Option<HashMap<String, String>> = None;
     for (flavor, state_file) in [
         (CodeBuddyIdeFlavor::Intl, IDE_STATE_FILE),
@@ -178,5 +187,45 @@ pub(crate) fn scan_sources(scope: ScanScope) -> Vec<Resolved> {
             ScanSource::Ide(flavor).label(),
         ));
     }
+    // ④ VS Code 插件宿主（CodeBuddy 扩展）的 agent 日志：插件侧的 429 只写在这里。
+    // 归因与 CLI / IDE 同链（日志内鉴权 uid 优先，回落本工具切过插件账号后写下的状态文件），
+    // 因此不需要新造归因逻辑；日志根探测不到（没装 VS Code / 没装插件）时按 0 条处理。
+    //
+    // 探测到的**全部**日志根都要扫：VS Code 用户日志树与扩展目录日志可以同时存在且内容
+    // 互不覆盖，只扫第一个会整体漏掉另一侧的事件（`agent_log_roots` 的注释）。
+    if scope.contains(ScanSource::AgentLog) {
+        let roots = agent_log_roots();
+        if !roots.is_empty() {
+            let uid_to_account = account_id_by_uid();
+            resolved.extend(scan_agent_logs(
+                &roots,
+                &uid_to_account,
+                &ActiveAccount::load(&store_dir().join(AGENT_STATE_FILE)),
+            ));
+        }
+    }
     resolved
+}
+
+/// 插件宿主 agent 日志来源：枚举 → 粗筛 → 解析 → 去重 → 归因。
+///
+/// 只有时间格式与鉴权行标记与其它来源不同（`LogFormat::Agent` / `AuthMarker::ExtensionAny`），
+/// 归因链完全复用 `resolve_by_uid`：uid 命中账号库优先，其次回落状态文件（带
+/// `updatedAt ≤ 事件时刻` 门控），都取不到就丢弃该事件 —— 宁可少显示，不可错归。
+///
+/// `roots` 是**全部**探测到的日志根（VS Code 用户日志树 + 扩展目录日志，见
+/// [`agent_log_roots`]）：多个根按文件路径去重后统一解析一次，同一份日志被两个根指到
+/// 也只算一次。由调用方注入（`scan_sources` 传探测结果，单测传临时目录）。
+pub(crate) fn scan_agent_logs(
+    roots: &[PathBuf],
+    uid_to_account: &HashMap<String, String>,
+    fallback: &ActiveAccount,
+) -> Vec<Resolved> {
+    let events = collect_events_in(roots, LogFormat::Agent, AuthMarker::ExtensionAny);
+    resolve_by_uid(
+        &events,
+        uid_to_account,
+        fallback,
+        ScanSource::AgentLog.label(),
+    )
 }
