@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { DemoAction } from "@/components/demo-action";
@@ -43,7 +43,7 @@ import {
  *
  * 三个入口都会在复制后建立关联：不做「只复制不建关联」的降级——关联断了用户会以为同步成功。
  */
-export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone, requestRestartConfirm }: {
+export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone, requestRestartConfirm, prefill, onPrefillConsumed }: {
   client: SessionGroupClient;
   /** 仅 CodeBuddy IDE 使用：当前页面选中的档位（其余客户端忽略）。 */
   variantScope?: WbVariant;
@@ -51,6 +51,15 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
   onDone: () => void;
   /** 插件侧运行中：请求页面统一的「关闭并重开」确认框；用户确认后执行 `run`。 */
   requestRestartConfirm: (actionLabel: string, run: () => Promise<void>) => void;
+  /**
+   * 外部预填（issue #3 的「重新复制并重建关联」用）：非空时自动打开弹窗并预选来源 / 目标账号；
+   * `null` / 省略 = 走原有的手动路径（点页头按钮打开）。
+   *
+   * 只预选账号，**不预选会话**：复制哪几个会话必须由用户自己勾选，这里不替他决定。
+   */
+  prefill?: { sourceAccountId: string; targetAccountId: string } | null;
+  /** 弹窗关闭时通知调用方清空预填，避免下一次手动打开还带着上一次的账号。 */
+  onPrefillConsumed?: () => void;
 }) {
   const accounts = useAccountsStore((state) => state.accounts);
   const [open, setOpen] = useState(false);
@@ -134,18 +143,48 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
     const account = workbuddyAccounts.find((item) => item.id === id);
     if (account) void loadSessions(account);
   }
+  // 预填消费：账号库与读取函数每次渲染都会变，用 ref 取最新值——把它们放进依赖会让
+  // 「复制后刷新账号库」把用户已经改过的来源 / 目标覆盖回去。依赖只留 `prefill`
+  // （它变成非空 = 有一次新的预填请求）。
+  const accountsRef = useRef(workbuddyAccounts);
+  accountsRef.current = workbuddyAccounts;
+  const loadSessionsRef = useRef(loadSessions);
+  loadSessionsRef.current = loadSessions;
+  useEffect(() => {
+    if (!prefill) return;
+    // 与手动打开同一套复位：作废在途请求、清空勾选，再按预填项落座。
+    requestId.current += 1;
+    copyRequestId.current += 1;
+    setSessionsLoading(false);
+    setBusy(false);
+    setSessions([]);
+    setSessionsError("");
+    setSelected(new Set());
+    setExpanded(new Set());
+    setCopyMemory(false);
+    setSourceAccountId(prefill.sourceAccountId);
+    setTargetAccountId(prefill.targetAccountId);
+    setOpen(true);
+    const account = accountsRef.current.find((item) => item.id === prefill.sourceAccountId);
+    if (account) void loadSessionsRef.current(account);
+  }, [prefill]);
   function blockDismissWhileBusy(event: { preventDefault: () => void }) {
     // 遮罩写明执行中不可关闭；只藏关闭按钮挡不住 Esc 和点遮罩。
     if (busy) event.preventDefault();
+  }
+  /** 关闭弹窗并消费预填：预填只对「这一次」打开有效，下次手动打开回到干净状态。 */
+  function closeAndConsume() {
+    requestId.current += 1;
+    setSessionsLoading(false);
+    setOpen(false);
+    onPrefillConsumed?.();
   }
   function openChange(next: boolean) {
     if (!next) {
       if (busy) return;
       // 关闭时作废在途的会话读取和复制回写：晚到结果不得写回下一次打开。
-      requestId.current += 1;
       copyRequestId.current += 1;
-      setSessionsLoading(false);
-      setOpen(false);
+      closeAndConsume();
       return;
     }
     // 重新打开回到干净状态：来源 / 目标 / 勾选都重选，不复用上一次的会话列表。
@@ -241,9 +280,7 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
         return;
       }
       if (status === "linked") {
-        requestId.current += 1;
-        setSessionsLoading(false);
-        setOpen(false);
+        closeAndConsume();
         onDone();
       }
     } catch (error) {
@@ -301,9 +338,7 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
       }
       // 有成功复制，或没有 errors 的已存在副本：关闭并刷新。纯失败留在弹窗。
       if (copied > 0 || recovered > 0 || (alreadyLinked > 0 && errors.length === 0 && !report.canIgnoreAux)) {
-        requestId.current += 1;
-        setSessionsLoading(false);
-        setOpen(false);
+        closeAndConsume();
         onDone();
       }
     } catch (error) {

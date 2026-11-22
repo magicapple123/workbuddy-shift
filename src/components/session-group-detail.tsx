@@ -15,6 +15,8 @@ import { displayName } from "@/lib/account-display";
 import { formatDateTime } from "@/lib/format";
 import { accountVariant, variantIsIntl, variantLabel } from "@/lib/variant";
 import type { SessionGroupClient, SessionGroupCurrentAccount, SessionGroupDetail, SessionGroupMemberDetail, SessionGroupUnifyPlan } from "@/lib/types";
+import { BLOCKED_POLICY_NOTICE, describeBlockedTargets, unifyConfirmBlocked } from "@/pages/sessions/blocked-target";
+import type { RebuildLinkRequest } from "@/pages/sessions/blocked-target";
 import "./session-group-detail.css";
 
 export interface GroupDetailPanelProps {
@@ -38,6 +40,11 @@ export interface GroupDetailPanelProps {
   onBatchSync: () => void;
   onAdd: () => Promise<void>;
   onUnlinkMember: (member: SessionGroupMemberDetail) => Promise<void>;
+  /**
+   * 被阻塞目标的出路：先解除该账号与当前会话组的关联（会话内容不动），再用来源账号重新复制
+   * 一份并建立新关联。返回 `false` = 解除关联失败（父层已 toast），二次确认框保持打开可重试。
+   */
+  onRebuildLink: (request: RebuildLinkRequest) => Promise<boolean>;
   addOpen: boolean;
   setAddOpen: (open: boolean) => void;
   fullPage: boolean;
@@ -58,6 +65,9 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
   const [unlinkTargetId, setUnlinkTargetId] = useState<string | null>(null);
   const [unlinkBusy, setUnlinkBusy] = useState(false);
   const unlinkTarget = detail?.members.find((member) => member.memberId === unlinkTargetId) ?? null;
+  /** 被阻塞目标的「重新复制并重建关联」二次确认（只存 id，条目由当前方案 + 详情派生）。 */
+  const [rebuildTargetId, setRebuildTargetId] = useState<string | null>(null);
+  const [rebuildBusy, setRebuildBusy] = useState(false);
   const graphRef = useRef<HTMLDivElement>(null);
   const [connections, setConnections] = useState<GraphLine[]>([]);
   useLayoutEffect(() => {
@@ -122,17 +132,14 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       return rank(left) - rank(right);
     })
     : detail?.members ?? [];
-  const blockedTargets = props.unifyPlan?.targets.flatMap((target) => {
-    const preview = target.preview;
-    const issue = target.error || !preview ? target.error ?? "无法检查内容"
-      : preview.client !== props.unifyPlan?.client || preview.groupId !== props.unifyPlan.groupId
-        || preview.sourceMemberId !== props.unifyPlan.sourceMemberId || preview.targetMemberId !== target.memberId
-        ? "检查结果与当前会话不匹配，请重新选择副本"
-        : preview.verdict !== "identical" && (!preview.previewToken || !preview.availableModes.some((mode) => ["fastForward", "overwrite", "unifyOverwrite"].includes(mode)))
-          ? preview.reason || "无法安全更新此副本"
-          : null;
-    return issue ? [{ ...target, issue }] : [];
-  }) ?? [];
+  // 判定口径与执行前复核一致，见 `@/pages/sessions/blocked-target`：这里只翻译原因，
+  // 不放宽任何写入许可（unknown 仍然不匹配任何模式）。
+  const blockedTargets = props.unifyPlan
+    ? describeBlockedTargets({ plan: props.unifyPlan, members: detail?.members ?? [] })
+    : [];
+  /** 二次确认框的条目：方案刷新后（例如解除关联成功）条目消失，框自动关闭。 */
+  const rebuildTarget = blockedTargets.find((target) => target.memberId === rebuildTargetId) ?? null;
+  const confirmBlocked = unifyConfirmBlocked(blockedTargets);
   const changedTargets = props.unifyPlan?.targets.filter((target) => target.preview?.verdict !== "identical") ?? [];
   const overwrittenTargets = props.unifyPlan?.targets.filter((target) => target.preview?.availableModes.some((mode) => mode === "overwrite" || mode === "unifyOverwrite")) ?? [];
   const runningVariants = props.currentAccounts.flatMap((current) => current.running && current.variant ? [current.variant] : []);
@@ -190,6 +197,25 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       // 父层已 toast。
     } finally {
       setUnlinkBusy(false);
+    }
+  }
+  // 死胡同的出路：先解除关联（会话内容不动），父层随即打开预填好的「新增关联会话」。
+  // 返回 true 才关本框；false 表示解除失败（父层已 toast），框留着可重试。
+  async function completeRebuild() {
+    const target = rebuildTarget;
+    if (!target?.prefill || rebuildBusy) return;
+    setRebuildBusy(true);
+    try {
+      const opened = await props.onRebuildLink({
+        memberId: target.memberId,
+        accountName: target.accountName,
+        prefill: target.prefill,
+      });
+      if (opened) setRebuildTargetId(null);
+    } catch {
+      // 父层已 toast。
+    } finally {
+      setRebuildBusy(false);
     }
   }
   function sourceSelect(label: string) {
@@ -319,7 +345,7 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
       </PopoverContent>
     </Popover>}
     <AlertDialog open={!!props.unifyPlan} onOpenChange={(open) => { if (!open) props.setUnifyPlan(null); }}>
-      <AlertDialogContent>
+      <AlertDialogContent className="max-h-[min(88vh,calc(100vh-2rem))] overflow-y-auto">
         <AlertDialogHeader>
           <AlertDialogTitle>以「{props.unifyPlan?.sourceName}」的内容为准？</AlertDialogTitle>
           <AlertDialogDescription>
@@ -337,14 +363,23 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
           <AlertDescription className="text-[11px] leading-4 text-warning-foreground">{restartNotice.description}</AlertDescription>
         </Alert>}
         {overwrittenTargets.length > 0 && <p className="text-sm text-danger">其中 {overwrittenTargets.length} 个账号有独有内容；确认后，它们现有的会话内容会被完整替换。</p>}
-        {blockedTargets.length > 0 && <div role="alert" className="space-y-1 rounded-lg bg-muted p-3 text-sm">
-          <p className="font-medium">目前无法统一全部账号</p>
-          {blockedTargets.map((target) => <p key={target.memberId} className="break-words text-muted-foreground">{target.accountName}：{target.issue}</p>)}
+        {blockedTargets.length > 0 && <div role="alert" className="space-y-2 rounded-lg bg-muted p-3 text-sm">
+          <p className="font-medium">{blockedTargets.length} 个账号暂时无法写入</p>
+          <p className="text-xs leading-4 text-muted-foreground">{BLOCKED_POLICY_NOTICE}</p>
+          <ul className="space-y-2">
+            {blockedTargets.map((target) => <li key={target.memberId} className="space-y-1 rounded-md bg-background/70 p-2">
+              <p className="break-words text-xs font-medium">{target.accountName}</p>
+              <p className="break-words text-[11px] leading-4 text-muted-foreground">{target.reason}</p>
+              {target.prefill
+                ? <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={props.busy || rebuildBusy} onClick={() => setRebuildTargetId(target.memberId)}><Copy className="size-3.5" />重新复制并重建关联</Button>
+                : <p className="text-[11px] leading-4 text-muted-foreground">{target.rebuildBlockedReason}</p>}
+            </li>)}
+          </ul>
         </div>}
         {blockedTargets.length === 0 && <p className="text-xs text-muted-foreground">将更新 {changedTargets.length} 个账号。执行前会重新校验各副本内容；若内容已变化，操作会停止并报告结果。</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={props.busy}>取消</AlertDialogCancel>
-          {blockedTargets.length === 0 && <DemoAction><Button variant={overwrittenTargets.length > 0 ? "destructive" : "default"} disabled={props.busy} onClick={() => void props.onConfirmUnify()}>{props.busy ? "处理中…" : restartNotice?.willRestart ? "确认同步并重启" : "确认统一"}</Button></DemoAction>}
+          <DemoAction><Button variant={overwrittenTargets.length > 0 ? "destructive" : "default"} disabled={props.busy || confirmBlocked} title={confirmBlocked ? "先处理上面列出的账号：系统无法确认内容先后时不会覆盖" : undefined} onClick={() => void props.onConfirmUnify()}>{props.busy ? "处理中…" : restartNotice?.willRestart ? "确认同步并重启" : "确认统一"}</Button></DemoAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -359,6 +394,22 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
         <AlertDialogFooter>
           <AlertDialogCancel disabled={unlinkBusy}>取消</AlertDialogCancel>
           <DemoAction><Button variant="destructive" disabled={unlinkBusy || props.busy} onClick={() => void completeUnlink()}>{unlinkBusy ? "处理中…" : "确认取消关联"}</Button></DemoAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    <AlertDialog open={!!rebuildTarget} onOpenChange={(open) => { if (!open && !rebuildBusy) setRebuildTargetId(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>重新复制「{rebuildTarget?.accountName}」的副本？</AlertDialogTitle>
+          <AlertDialogDescription>
+            会先解除「{rebuildTarget?.accountName}」与这个会话组的关联——该账号里的会话内容不会被删除，只是不再参与同步；
+            然后用「{props.unifyPlan?.sourceName}」的会话重新复制一份到「{rebuildTarget?.accountName}」，并建立新的关联。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <p className="text-xs leading-4 text-muted-foreground">下一步需要在「新增关联会话」里勾选要复制的会话；复制完成后，两份内容会重新做一次比对。</p>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={rebuildBusy}>取消</AlertDialogCancel>
+          <DemoAction><Button variant="destructive" disabled={rebuildBusy || props.busy} onClick={() => void completeRebuild()}>{rebuildBusy ? "处理中…" : "解除关联并重新复制"}</Button></DemoAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

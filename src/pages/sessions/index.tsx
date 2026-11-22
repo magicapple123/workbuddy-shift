@@ -26,6 +26,7 @@ import { CLIENTS, PAGE_SIZE, PAGINATION_HIDE_MAX } from "./constants";
 import { ScanProgressHint } from "@/components/scan-progress-hint";
 
 import { ClientMark, GroupSkeleton, SessionGroupCard } from "./group-list";
+import type { RebuildLinkPrefill, RebuildLinkRequest } from "./blocked-target";
 import { useSessionActions } from "./hooks/use-session-actions";
 import { useSessionDetail } from "./hooks/use-session-detail";
 import { useSessionGroups } from "./hooks/use-session-groups";
@@ -39,6 +40,8 @@ export default function SessionsPage() {
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  /** 「重新复制并重建关联」的预填：非空即自动打开「新增关联会话」并预选来源 / 目标账号。 */
+  const [rebuildPrefill, setRebuildPrefill] = useState<RebuildLinkPrefill | null>(null);
   const [contentWidth, setContentWidth] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -105,6 +108,8 @@ export default function SessionsPage() {
     detail.resetForOpen();
     setSelectedGroupId(id);
     setAddOpen(false);
+    // 上一次没走完的重建不带进新的会话组。
+    setRebuildPrefill(null);
     setDetailOpen(true);
   }
 
@@ -113,6 +118,26 @@ export default function SessionsPage() {
     setClient(next);
     setDetailOpen(false);
     setSelectedGroupId(null);
+    setRebuildPrefill(null);
+  }
+
+  /**
+   * 被阻塞目标的出路（issue #3）：先解除该账号与当前会话组的关联（账号里的会话内容不动），
+   * 再把这个账号预填成「新增关联会话」的目标账号，由用户勾选会话后走既有的复制 + 关联流程。
+   *
+   * 不碰任何写入许可：这里不解锁 `unknown` 的覆盖，只是把「组里这份坏掉的关联」换成一份新的副本。
+   * 返回 `false` = 解除关联失败（`actions.unlinkMember` 已 toast），二次确认框留着可重试。
+   */
+  async function rebuildLink(request: RebuildLinkRequest): Promise<boolean> {
+    const member = detail.detail?.members.find((item) => item.memberId === request.memberId) ?? null;
+    if (!member) return false;
+    try {
+      await actions.unlinkMember(member);
+    } catch {
+      return false;
+    }
+    setRebuildPrefill(request.prefill);
+    return true;
   }
 
   const detailPanel = (
@@ -126,6 +151,7 @@ export default function SessionsPage() {
       onRetry={() => { detail.setDetailError(null); void detail.reloadSelectedGroup(); }}
       onPrepareUnify={actions.prepareUnify} onConfirmUnify={actions.confirmUnify} onBatchSync={actions.syncSafeBatch} onAdd={actions.addMember}
       onUnlinkMember={actions.unlinkMember}
+      onRebuildLink={rebuildLink}
       addOpen={addOpen} setAddOpen={setAddOpen} fullPage={false}
     />
   );
@@ -149,7 +175,7 @@ export default function SessionsPage() {
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={list.loading || detail.detailLoading}><RefreshCw className={list.loading ? "animate-spin" : undefined} />刷新</Button>
               {showPruneEntry({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount }) && <span className="shrink-0" title={list.pruneBlocked ?? undefined}><Button variant="outline" size="sm" onClick={() => void actions.requestPrune()} disabled={!canPruneGroups({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount, busy: actions.actionBusy || list.loading, blockedReason: list.pruneBlocked })}><Eraser />清理失效关联组</Button></span>}
-              <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
+              <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} prefill={rebuildPrefill} onPrefillConsumed={() => setRebuildPrefill(null)} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
             </div>
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">
