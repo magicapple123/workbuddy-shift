@@ -76,17 +76,29 @@
 | macOS（Intel） | `workbuddy-shift_0.3.0-rc.1_x86_64.dmg` | 同上 |
 | Linux（通用） | `workbuddy-shift-linux-x86_64.AppImage` | 下载后 `chmod +x` 再运行 |
 | Debian / Ubuntu | `workbuddy-shift-linux-x86_64.deb` | `sudo dpkg -i` 安装 |
-| 不想装桌面版 | `npm i -g workbuddy-shift` | 需要 Node.js 20.19+，浏览器访问 WebUI |
+| 不想装桌面版 | `npm i -g workbuddy-shift@next` | 预览版发布在 `next` 通道（`latest` 仍是 0.2.6）；需要 Node.js 20.19+ |
 | 服务器 / NAS | `docker pull ghcr.io/magicapple123/workbuddy-shift:0.3.0-rc.1` | 默认只绑 `127.0.0.1`，局域网访问要显式放开 |
 
-**分不清 Mac 是哪种芯片**：左上角  →「关于本机」，看「芯片」一行——Apple M 系列选 `aarch64`，Intel 选 `x86_64`。
+**分不清 Mac 是哪种芯片**：左上角 Apple 菜单 →「关于本机」，看「芯片」一行——Apple M 系列选 `aarch64`，Intel 选 `x86_64`。
 
 **这是预览版**：建议先在一份备份或非主力账号库上试。升级前可以用「加密导出」留一份（这也是本版新增的能力）。
 
+## 其余文件是什么？
+
+| 文件 | 用途 |
+| --- | --- |
+| `*.sig` | 自动更新的签名文件，不要手动下载 |
+| `latest*.json` | 客户端检查更新用的清单，不要手动下载 |
+| `workbuddy-shift-macos-*.app.tar.gz` | macOS 自动更新包，供应用内更新器使用（本预览版仍需手动下载安装） |
+
+> `latest-macos-*.json` 与 `latest-darwin-*.json` 内容相同：前者是生成器侧的可读名，
+> 后者是 Tauri 在 macOS 上实际请求的名字，两者都必须保留。
+
 ## 升级说明
 
-- 桌面版与 npm 版可在应用内直接升级；数据目录、默认监听与 Host/Origin 校验口径不变。
-- 预览版会显示为 `Prerelease`，不会被自动更新强推；想留在 0.2.6 的用户不受影响。
+- **桌面版需要手动下载安装**：应用内「检查更新」走 `/releases/latest`，该端点不包含预发布版本，所以 0.2.6 用户不会收到本预览版的升级提示。
+- npm 版：`npm i -g workbuddy-shift@next`；想留在 0.2.6 的用户不受影响，`latest` 标签不会移动。
+- 数据目录、默认监听与 Host/Origin 校验口径与 0.2.6 一致。
 
 ## 反馈
 
