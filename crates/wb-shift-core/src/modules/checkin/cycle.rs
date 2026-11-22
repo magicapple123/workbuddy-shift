@@ -196,9 +196,21 @@ pub(super) fn account_key(account: &Value) -> String {
 /// 只遍历支持签到且允许自动签到的账号。并发锁防止与
 /// 手动签到/上一轮重复运行。
 ///
-/// 时间段生效时只处理「到点未办」的账号：未到点整轮不发任何请求，返回
+/// 时间段（`checkin_start` / `checkin_end`）按 `schedule_window` 取，窗口与「到点」
+/// 口径成对给出，避免两边不一致：
+///
+/// - 用户配置了合法窗口：沿用既有口径（允许跨日补签），行为不变；
+/// - 未配置或非法：退化为默认窗口 8:00–22:00，并改用「只看今日」口径——窗口内今天还没
+///   到点的账号一律不处理；窗口外每轮限量补签（`OUTSIDE_WINDOW_BATCH`），只在夜间开机的
+///   用户不会被整天漏签，也不会一轮打完全部。
+///
+/// 只有「到点未办」的账号才处理：整轮没有账号到点时返回
 /// `{"status":"skipped","reason":"before_checkin_time","accounts":[]}`。
-/// 时间段未生效时，每轮处理全部允许自动签到的账号。
+///
+/// 「未配置时间段」不再等于「一轮签完所有账号」：那样 34 个账号会在 1 分钟内串行提交，
+/// 是最像脚本的行为指纹；默认窗口让每个账号落到自己那一天的目标分钟。跨日补签若也
+/// 套在默认窗口上，会把这个分散效果抵消掉（昨天的目标在今天 14:00 就顶成到点），
+/// 所以默认兜底必须用 `DueScope::TodayOnly`。
 pub async fn run_checkin_cycle(_mode: CheckinCycleMode) -> Value {
     let Some(_guard) = RunFlagGuard::try_acquire(&CHECKIN_RUNNING) else {
         return json!({"status": "skipped", "reason": "already_running"});
@@ -211,14 +223,19 @@ pub async fn run_checkin_cycle(_mode: CheckinCycleMode) -> Value {
     if accounts.is_empty() {
         return json!({"status": "no_accounts"});
     }
-    let window = window_minutes(&cfg);
-    // 窗口未生效时，不再按时间过滤允许自动签到的账号。
-    let accounts = match window {
-        Some(win) => due_accounts(accounts, now_ms(), Some(win), &load_checkin_logs()),
-        None => accounts,
-    };
+    // 未配置时间段时用默认窗口，而不是退化成「不限时间、全部账号」。
+    // 口径必须跟着来源走：配置窗口保留跨日补签；默认窗口只看今日，否则补签会在
+    // 今天第一轮就把「今天晚点才轮到」的账号全部顶成到点，分散能力归零。
+    let ScheduleWindow { window, scope } = schedule_window(&cfg);
+    let accounts = due_accounts(
+        accounts,
+        now_ms(),
+        Some(window),
+        &load_checkin_logs(),
+        scope,
+    );
     if accounts.is_empty() {
-        // 只有时间段生效时才可能为空：整轮没有任何账号到点，不发任何请求。
+        // 整轮没有任何账号到点（含默认窗口），不发任何请求。
         record_cycle_health(false);
         return json!({"status": "skipped", "reason": "before_checkin_time", "accounts": []});
     }
@@ -232,9 +249,7 @@ pub async fn run_checkin_cycle(_mode: CheckinCycleMode) -> Value {
         }
         if outcome == Some("already") {
             // 到点复核发现服务端已签（例如用户白天手动签过）→ 补一条窗口回执。
-            if let Some(win) = window {
-                write_window_receipt(win, &acc);
-            }
+            write_window_receipt(window, &acc);
         }
         let mut row = json!({
             "email": account_display_name(&acc),

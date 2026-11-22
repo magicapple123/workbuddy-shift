@@ -33,8 +33,16 @@
         let (account, target) = due_fixture();
         let cfg = json!({"excluded_account_ids": [account["id"]]});
         let accounts = auto_checkin_accounts(vec![account], &cfg);
-        assert!(due_accounts(accounts.clone(), target, Some(TEST_WINDOW), &[]).is_empty());
-        assert!(due_accounts(accounts.clone(), target, None, &[]).is_empty());
+        assert!(due_accounts(
+            accounts.clone(),
+            target,
+            Some(TEST_WINDOW),
+            &[],
+            DueScope::CatchUpAcrossDays
+        )
+        .is_empty());
+        assert!(due_accounts(accounts.clone(), target, None, &[], DueScope::CatchUpAcrossDays)
+            .is_empty());
         // 全部排除时不再为它们的目标时刻安排唤醒。
         assert_eq!(
             plan_next_delay(

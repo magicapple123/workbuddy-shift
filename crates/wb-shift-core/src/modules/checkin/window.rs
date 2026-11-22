@@ -4,9 +4,39 @@ use super::cycle::*;
 use super::logs::*;
 use super::*;
 
+/// 默认时间段 8:00–22:00，用于用户没有配置 `checkin_start` / `checkin_end` 的情况。
+///
+/// 为什么不保留「不限制」：不限制等于一轮把所有账号串行签完（实测 34 个账号 61 秒内
+/// 提交 34 次、间隔 1.8s），这是最像脚本的行为指纹。退化成默认窗口后，账号会被
+/// `due_accounts` 的确定性抽签分散到 8:00–22:00，签到时刻自然错峰。
+pub(super) const DEFAULT_CHECKIN_WINDOW: (u32, u32) = (8 * 60, 22 * 60);
+
+/// 「到点未办」的判定范围，决定是否允许跨日补签。
+///
+/// 两种口径的分歧只在「今天的目标还没到」的账号上：默认兜底窗口若沿用跨日补签，
+/// 它会在今天 14:00 就顶替昨天那个 20:00 被判成到点未办，于是分散能力被完全抵消，
+/// 又回到「一轮打完」。所以两种来源必须用不同口径。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DueScope {
+    /// 用户显式配置的窗口：允许跨日补签（昨日目标未回应 → 立即补一轮，既有能力）。
+    CatchUpAcrossDays,
+    /// 默认兜底窗口：只认今日目标。窗口内按各自的今日 target 到点处理；窗口外限量补签
+    /// （每轮最多 `OUTSIDE_WINDOW_BATCH` 个），避免只在夜间开机的用户整天漏签。
+    TodayOnly,
+}
+
+/// 自动调度本轮使用的窗口与到期口径。
+pub(super) struct ScheduleWindow {
+    pub(super) window: (u32, u32),
+    pub(super) scope: DueScope,
+}
+
 /// 窗口生效条件：两个字段都能解析成 `"HH:MM"` 且 `start < end`（不支持跨午夜）。
 ///
-/// 返回当日窗口的 `[start_minute, end_minute)`；否则 `None`（= 不限制，行为与改动前一致）。
+/// 返回当日窗口的 `[start_minute, end_minute)`；否则 `None`（= 未配置/非法）。
+/// `None` 只表示「用户没有给出可用的时间段」，调用方必须自己决定默认值：
+/// 自动调度用 `schedule_window` 退化为 `DEFAULT_CHECKIN_WINDOW`，手动入口
+/// （`manual_window_skip_rows`）仍按「未配置 = 不限制立即签」处理。
 pub(super) fn window_minutes(cfg: &Value) -> Option<(u32, u32)> {
     let (start_hour, start_minute) = cfg
         .get("checkin_start")
@@ -19,6 +49,23 @@ pub(super) fn window_minutes(cfg: &Value) -> Option<(u32, u32)> {
     let start = start_hour * 60 + start_minute;
     let end = end_hour * 60 + end_minute;
     (start < end).then_some((start, end))
+}
+
+/// 自动调度实际使用的窗口与口径：一次给出，避免两个调用点各判一次 `window_minutes`
+/// 而出现「窗口用默认、口径用配置」的不一致。
+///
+/// 用户配置了合法窗口 → 沿用既有跨日补签；走到默认兜底窗口 → 只看今日。
+pub(super) fn schedule_window(cfg: &Value) -> ScheduleWindow {
+    match window_minutes(cfg) {
+        Some(window) => ScheduleWindow {
+            window,
+            scope: DueScope::CatchUpAcrossDays,
+        },
+        None => ScheduleWindow {
+            window: DEFAULT_CHECKIN_WINDOW,
+            scope: DueScope::TodayOnly,
+        },
+    }
 }
 
 /// `now`（ms）的本地分钟是否落在窗口 `[start, end)` 内。
@@ -160,6 +207,9 @@ pub(super) fn logs_answered_window(logs: &[Value], account: &Value, since: i64) 
 }
 
 /// 窗口模式下该账号是否「到点未办」：最近一次目标时刻之后没有任何 success/already。
+///
+/// 「最近一次目标时刻」会跨日回退（今天还没到点 → 取昨天的目标），所以这是**允许跨日
+/// 补签**的口径，只用于用户显式配置的窗口。
 pub(super) fn account_due(now: i64, account: &Value, win: (u32, u32), logs: &[Value]) -> bool {
     match latest_target_ms(now, account, win) {
         Some(latest) => !logs_answered_window(logs, account, latest),
@@ -168,19 +218,106 @@ pub(super) fn account_due(now: i64, account: &Value, win: (u32, u32), logs: &[Va
     }
 }
 
-/// 窗口生效时只保留「到点未办」的账号；`win` 为 `None`（未生效）时原样返回全部账号。
+/// 只看今日目标的到点判据（默认兜底窗口用），不跨日补签。
+///
+/// 与 `account_due` 的区别正是关键：今天的目标还没到的账号一律不 due——否则「今天
+/// 20:00 才轮到我」的账号在 14:00 就会被昨天那轮顶替掉，默认窗口的分散能力归零。
+///
+/// 窗口内/外的分流在 `due_accounts` 里做（窗口外走限量补签），本函数只负责「今日、
+/// 已到点、未回应」这一件事。
+pub(super) fn account_due_today_only(
+    now: i64,
+    account: &Value,
+    win: (u32, u32),
+    logs: &[Value],
+) -> bool {
+    let today = date_str(Some(now));
+    let Some(target) = target_ms_for_day(&today, account, win) else {
+        // 日期无法解释（极端时区 / DST 缺口）：与 account_due 同口径，保守当作到点未办。
+        return true;
+    };
+    if now < target {
+        return false;
+    }
+    !logs_answered_window(logs, account, target)
+}
+
+/// 窗口外的限量补签上限（默认兜底口径专用）。
+///
+/// 为什么是 3：默认兜底下宿主是 30 分钟一轮（`next_cycle_delay` 未配置时保持既有节奏），
+/// 3 × 2 = 每小时最多 6 个账号；22:00–次日 08:00 共 10 小时 → 最多 60 次提交，足够把
+/// 30+ 账号的账号库补完，只在夜间开机的用户不再整天漏签。同时单轮上限把「批量提交」
+/// 压得很低，不会回到 61 秒 34 次的脚本指纹。
+pub(super) const OUTSIDE_WINDOW_BATCH: usize = 3;
+
+/// 窗口外的补签候选：今日尚无 success/already 的账号，按今日 target 升序取前
+/// `OUTSIDE_WINDOW_BATCH` 个。
+///
+/// 候选口径是「今日未回应」而不是「今日 target 已过」：跨零点后（例如 02:00）今日
+/// 所有 target 都在未来，按「已过」筛会一个候补都没有，夜间补签退化成什么都不做。
+/// 排序按今日 target 升序，保证补的顺序仍是「今天本该最早签的那几个」。
+///
+/// 无法解释本地日期（极端时区 / DST 缺口）时返回空：宁可这一轮不补，也不猜时间。
+fn outside_window_batch(
+    accounts: Vec<Value>,
+    now: i64,
+    win: (u32, u32),
+    logs: &[Value],
+) -> Vec<Value> {
+    let today = date_str(Some(now));
+    let Some(today_start) = target_at(&today, 0) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(i64, Value)> = accounts
+        .into_iter()
+        .filter_map(|acc| {
+            if logs_answered_window(logs, &acc, today_start) {
+                return None;
+            }
+            let target = target_ms_for_day(&today, &acc, win)?;
+            Some((target, acc))
+        })
+        .collect();
+    // 稳定排序：同一分钟的目标按账号库顺序，结果可复现。
+    candidates.sort_by_key(|(target, _)| *target);
+    candidates
+        .into_iter()
+        .take(OUTSIDE_WINDOW_BATCH)
+        .map(|(_, acc)| acc)
+        .collect()
+}
+
+/// 窗口生效时只保留「到点未办」的账号；`win` 为 `None`（不限制）时原样返回全部账号。
+///
+/// `scope` 决定是否跨日补签（见 `DueScope`）：用户配置窗口用 `CatchUpAcrossDays`，
+/// 默认兜底窗口用 `TodayOnly`，否则补签会抵消默认窗口的错峰效果。
+///
+/// 默认兜底的窗口外分支在这里分派（而不是在 `DueScope` 里多开一档）：窗口内/外是**运行时
+/// 时刻**决定的，不是配置属性；多开一档就要调用方自己算一次 `now_in_window`，两处判断
+/// 迟早分叉。限量补签只作用于这一支，配置窗口（`CatchUpAcrossDays`）完全不受影响。
 pub(super) fn due_accounts(
     accounts: Vec<Value>,
     now: i64,
     win: Option<(u32, u32)>,
     logs: &[Value],
+    scope: DueScope,
 ) -> Vec<Value> {
-    match win {
-        Some(win) => accounts
+    let Some(win) = win else {
+        return accounts;
+    };
+    match scope {
+        DueScope::CatchUpAcrossDays => accounts
             .into_iter()
             .filter(|acc| account_due(now, acc, win, logs))
             .collect(),
-        None => accounts,
+        // 窗口内：只处理今日已到点未回应的账号，不加数量上限（抽签本身已把它们分散到
+        // 全天，同一分钟到点的账号本就不多）。
+        DueScope::TodayOnly if now_in_window(now, win) => accounts
+            .into_iter()
+            .filter(|acc| account_due_today_only(now, acc, win, logs))
+            .collect(),
+        // 窗口外：限量补签，避免夜间开机的用户整天漏签，也不制造批量提交。
+        DueScope::TodayOnly => outside_window_batch(accounts, now, win, logs),
     }
 }
 
@@ -226,6 +363,14 @@ pub(super) fn plan_next_delay(
 /// 宿主下一轮睡眠时长。策略全在 core，宿主只读这个时长，不解释 payload。
 pub fn next_cycle_delay() -> Duration {
     let cfg = load_checkin_config();
+    // 唤醒节奏仍只看用户配置的时间段：未配置时保持既有 30 分钟一轮，不因为
+    // `run_checkin_cycle` 退化了默认窗口就把轮询提到分钟级——每次唤醒都要读账号库与
+    // 签到日志，默认配置下没有理由加密唤醒。
+    //
+    // 与默认兜底口径配合后的实际效果：窗口内每轮只处理「过去 30 分钟内到点」的那批
+    // 账号（TodayOnly 不补昨天的），34 个账号铺在 14 小时窗口里约每人 25 分钟一个；
+    // 窗口外每轮再压到 `OUTSIDE_WINDOW_BATCH` 个。两种情况下单轮都是个位数量级，
+    // 而不是一轮打完全部。
     let window = window_minutes(&cfg);
     // 窗口未生效时不必读账号库/日志：直接走既有 30 分钟节奏。
     let accounts = if window.is_some() {
