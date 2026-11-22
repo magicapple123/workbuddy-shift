@@ -83,7 +83,23 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
   `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]` 把宿主层的
   “零 panic”变成编译门禁；其它 crate 的历史 `Option::unwrap` 尚未清零，新增代码不得扩大债务。
 - **共享可变状态**：只允许有文档说明的缓存/锁；跨进程用 fs2 文件锁并遵守既有锁顺序
-  （见 `session_link` 注释）。任务级运行标记用 `AtomicBool` 抢占，清理由**任务自身**的 Drop
+  （见 `session_link` 注释）。凭据写入（切号写回 ↔ 令牌刷新回写）另有一把
+  `locks/credentials.lock`：顺序为 `credentials.lock → session-ops-{variant} → session-links`，
+  且**持锁期间不得再获取任何其它锁**；抢不到一律立即失败、不写入凭据（见
+  `crates/wb-shift-core/src/modules/auth_file/sync.rs` 文件头）。该锁**两侧覆盖范围不同，报时长
+  前先分清是哪一侧**：
+  - **切号侧**只覆盖「重读 + 校验 + 写回」那几毫秒，不覆盖整个切号流程：关进程 + 恢复/复制
+    会话可能持续数分钟（有用户单账号 988MB），全程持锁会让积分页与保活在这段时间里全部报
+    「稍后重试」，代价大于收益；「手里的快照已经过时」由写回前的新鲜度校验兜住，最坏结果是
+    走到最后一步放弃写回并提示重切；
+  - **刷新侧**覆盖「打接口 + 写回账号库」全程，**最长可到 30s**（reqwest 客户端总超时，见
+    `crates/wb-shift-core/src/modules/config/http.rs`）；保活串行刷新多账号时，前一个账号持锁的
+    时间会顺延到后一个账号身上，实际窗口更宽；
+  - **后果与取舍**：用户在刷新窗口内点切号，会在关进程、复制会话都**做完之后**才拿到 busy，
+    整次切换白做。仍然这样选，是因为反过来「先请求后抢锁」会让服务端已轮换的旧令牌留在盘上，
+    账号直接变成 `needs_relogin` —— 比切号最后一步失败严重得多。这是**明确取舍，不是漏写**，
+    改锁范围/超时前先论证刷新侧被缩短的持锁窗口会不会把这条竞态放回来。
+  任务级运行标记用 `AtomicBool` 抢占，清理由**任务自身**的 Drop
   负责，不依赖 HTTP 请求 future 是否存活（见 `api/state.rs` 的 `SwitchRunGuard`）。
 - **文件规模**：目标 ~300 行，>500 行必须拆分或在 `docs/ARCHITECTURE.md` 的豁免表登记理由与
   后续计划。阈值用于触发**职责审查**，不是拆文件指标；强内聚状态所有者（如
@@ -95,7 +111,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 ## 5. Tauri 2 权限边界
 
 - 权限按窗口最小化：主窗口见 `src-tauri/capabilities/default.json`（目前只有 event/window 少量
-  allow + opener + dialog save），悬浮窗见 `src-tauri/capabilities/companion.json`。
+  allow + opener + dialog save/open），悬浮窗见 `src-tauri/capabilities/companion.json`。
 - 不新增 fs/shell/process 等宽泛 capability；若确实需要，先说明用途、scope 与运行路径，并同步文档
   与手动验证。CSP 在 `src-tauri/tauri.conf.json` 的 `app.security.csp`；开发专用放宽只允许放
   `devCsp`，生产 CSP 不得放宽。
@@ -106,8 +122,8 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 
 - TypeScript strict + `noUnusedLocals/noUnusedParameters`；禁止 `any`、`@ts-ignore`、
   `@ts-expect-error` 掩盖真实问题、禁止关闭检查。
-- ESLint：`pnpm run lint`（`eslint src companion-ui/src --max-warnings=10`）。`react-hooks` 的
-  `rules-of-hooks` 为 error，`exhaustive-deps` 为 warn；warnings 上限是**棘轮**（当前 10 条历史
+- ESLint：`pnpm run lint`（`eslint src companion-ui/src --max-warnings=9`）。`react-hooks` 的
+  `rules-of-hooks` 为 error，`exhaustive-deps` 为 warn；warnings 上限是**棘轮**（当前 9 条历史
   债），新增即失败，修掉后把上限调低，不要用文件级 disable 压下去。
 - 按业务域组织：页面在 `src/pages/<domain>/`，跨页组件在 `src/components/`，纯逻辑在 `src/lib/`；
   不新增无限膨胀的 utils/helpers/common。共享逻辑只在“调用方与变化原因相同”时抽取。
