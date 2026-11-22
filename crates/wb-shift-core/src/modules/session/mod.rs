@@ -60,7 +60,10 @@ mod recovery;
 mod run;
 mod sync;
 
-pub use copy::{copy_sessions_cross, copy_sessions_for_switch};
+pub use copy::{
+    copy_sessions_cross, copy_sessions_cross_opts, copy_sessions_for_switch,
+    copy_sessions_for_switch_opts, CopyOptions,
+};
 pub use paths::{workbuddy_db_path, LinkNamespace, SessionPaths};
 use query::*;
 pub use query::{
@@ -115,10 +118,15 @@ const UNPARSEABLE_OPERATION_REASON: &str = "操作记录无法解析";
 const SESSION_STATUS_ARCHIVED: &str = "archived";
 /// 允许被传导为归档的**目标终态**白名单。
 ///
-/// 只列非活跃终态：`active`（当前激活）与 `working`（生成中）必须排除，避免把正在
-/// 使用的会话收进归档。精确匹配而非「非 active/working 即允许」——NULL、未知值与
-/// 缺列都不授予归档权限（真实库存在 `Pending` 这类合法但语义未定的默认值）。
-const ARCHIVE_TARGET_TERMINAL_STATUSES: [&str; 3] = ["completed", "error", "terminated"];
+/// `completed` / `error` / `terminated` 是明确的终态；`active` 也在内是**有意**的：
+/// 跨账号关联会话在目标侧常因历史中断停在 `active`（进程早已不在），来源侧归档后
+/// 这类会话会**永远**同步不过去。目标侧分不出「真的在用」与「中断残留」，而归档
+/// 本身可逆且用户可见，因此选择跟随来源的归档意图，而不是让副本永久失同步。
+///
+/// `working`（生成中）必须排除：那是正在产出的会话，收进归档会打断使用。精确匹配
+/// 而非「非 working 即允许」——NULL、未知值与缺列都不授予归档权限（真实库存在
+/// `Pending` 这类合法但语义未定的默认值）。
+const ARCHIVE_TARGET_TERMINAL_STATUSES: [&str; 4] = ["completed", "error", "terminated", "active"];
 /// 会话「已经结束」的 `sessions.status` 取值集合：终态（会话的最终结果）与归档态
 /// （用户显式做过的整理动作）。
 ///

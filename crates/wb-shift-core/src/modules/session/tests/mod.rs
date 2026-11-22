@@ -288,6 +288,47 @@ fn copy(env: &Env, target_uid: &str, ids: &[&str]) -> Value {
     .unwrap()
 }
 
+// ---- 旧签名 shim（测试专用） ----
+
+/// `copy_sessions_for_switch_at` 的旧签名（`ignore_aux: bool`）包装：多数用例只关心
+/// 「不忽略账本」，不必每处都写 `CopyOptions`（生产侧统一走 `*_with_options`）。
+fn copy_sessions_for_switch_at(
+    paths: &SessionPaths,
+    variant: WbVariant,
+    target_acc: &Value,
+    session_ids: &[String],
+    ignore_aux: bool,
+    is_app_running: impl Fn(WbVariant) -> bool,
+) -> Result<Value, String> {
+    copy_sessions_for_switch_at_with_options(
+        paths,
+        variant,
+        target_acc,
+        session_ids,
+        CopyOptions::new(ignore_aux, false),
+        is_app_running,
+    )
+}
+
+/// `copy_sessions_cross_at` 的旧签名包装（同上）。
+fn copy_sessions_cross_at(
+    source: CopySide<'_>,
+    target: CopySide<'_>,
+    session_ids: &[String],
+    ignore_aux: bool,
+    is_app_running: impl Fn(WbVariant) -> bool,
+    resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
+) -> Result<Value, String> {
+    copy_sessions_cross_at_with_options(
+        source,
+        target,
+        session_ids,
+        CopyOptions::new(ignore_aux, false),
+        is_app_running,
+        resolve_source_paths,
+    )
+}
+
 // ---- 主题片段（按原文件顺序拼回，测试名与排序均不变） ----
 
 include!("query.rs");
@@ -295,6 +336,8 @@ include!("query.rs");
 include!("query_spaces.rs");
 
 include!("copy.rs");
+
+include!("pinned.rs");
 
 include!("run.rs");
 
@@ -307,3 +350,5 @@ include!("recovery.rs");
 include!("copy_repair_qa.rs");
 
 include!("copy_repair_qa3.rs");
+
+include!("memory.rs");

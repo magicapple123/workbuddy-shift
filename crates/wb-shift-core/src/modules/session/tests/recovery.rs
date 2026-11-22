@@ -162,10 +162,14 @@ fn status_sync_archives_target_without_touching_body() {
     assert_eq!(env.body_files().len(), 2, "不得产生第二份正文");
 }
 
-/// 终态白名单：completed / error / terminated 可归档；活跃态与未知值一律不授权。
+/// 终态白名单：completed / error / terminated 与**陈旧 active** 可归档；
+/// `working`（生成中）与语义未定的值一律不授权。
+///
+/// `active` 放行是实测缺口：跨账号副本在目标侧常因历史中断停在 `active`（进程早已
+/// 不在），来源侧归档后永远同步不过去。
 #[test]
 fn status_sync_accepts_only_terminal_target_statuses() {
-    for allowed in ["completed", "error", "terminated"] {
+    for allowed in ["completed", "error", "terminated", "active"] {
         let env = ready_env_with_status(&format!("status-allow-{allowed}"));
         let (group_id, token, target_id) = archive_scene(&env, allowed);
         let report = sync(
@@ -184,7 +188,7 @@ fn status_sync_accepts_only_terminal_target_statuses() {
             "{allowed}"
         );
     }
-    for denied in ["active", "working", "Pending", "unknown-value"] {
+    for denied in ["working", "Pending", "unknown-value"] {
         let env = ready_env_with_status(&format!("status-deny-{denied}"));
         let (_, target_id) = archive_row_scene(&env, denied);
         let preview_report = preview(&env, "uid-b");
@@ -200,6 +204,89 @@ fn status_sync_accepts_only_terminal_target_statuses() {
             "{denied}: 不得写入状态"
         );
     }
+}
+
+/// 把会话行的 `status` 显式写成 NULL（列存在但没值——真实库的旧行会这样）。
+fn set_status_null(env: &Env, id: &str) {
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.execute("UPDATE sessions SET status = NULL WHERE id = ?1", [id])
+        .unwrap();
+}
+
+/// 可写 NULL 的 status 库。
+///
+/// 共享夹具 `create_db_with_status` 把该列声明成 `NOT NULL`，写不进 NULL；生产侧的
+/// `read_member_status` 却按 `Option<String>` 读、并为 `Present(None)` 单独留了分支，
+/// 说明 NULL 行要当成可能存在的现场。要覆盖那条分支只能另建一份 schema。
+fn ready_env_with_nullable_status(name: &str) -> Env {
+    let env = Env::new(name);
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT,
+            custom_title TEXT,
+            status TEXT,
+            cwd TEXT,
+            created_at INTEGER,
+            updated_at INTEGER,
+            deleted_at INTEGER,
+            is_playground INTEGER
+        );",
+    )
+    .unwrap();
+    drop(conn);
+    env.create_edge_db(WbVariant::Cn);
+    env.set_login("uid-a");
+    env.add_session("sess-1", "uid-a", "标题一");
+    env.add_body("sess-1", &body_text("sess-1"));
+    env
+}
+
+/// 目标 `status` 为 NULL：白名单只认精确文本，NULL 不授予归档权限。
+///
+/// 这是「NULL 仍必须拒绝」的守护用例：`archive_qualifies` 用 `Present(Some(..))`
+/// 解构目标状态，NULL 落进 `Present(None)` 分支被拒——行为对了，但没有用例它就会
+/// 被人顺手改成「None 视为可归档」而无人发现。
+#[test]
+fn status_sync_rejects_null_target_status() {
+    let env = ready_env_with_nullable_status("status-target-null");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    env.set_status("sess-1", "archived");
+    set_status_null(&env, &target_id);
+
+    let preview_report = preview(&env, "uid-b");
+    let group = &preview_report["groups"][0];
+    assert_eq!(group["verdict"], "identical", "{preview_report}");
+    assert!(
+        group["archiveAction"].is_null(),
+        "目标状态为 NULL 时不得授权归档：{group}"
+    );
+    assert!(group["previewToken"].is_null(), "无动作即无凭据：{group}");
+    assert_eq!(env.status_of(&target_id), None, "不得把状态写进目标行");
+}
+
+/// 来源 `status` 为 NULL：不是精确的 `archived`，同样不授权（不猜、不外推）。
+#[test]
+fn status_sync_rejects_null_source_status() {
+    let env = ready_env_with_nullable_status("status-source-null");
+    let (_, target_id) = archive_row_scene(&env, "completed");
+    set_status_null(&env, "sess-1");
+
+    let preview_report = preview(&env, "uid-b");
+    let group = &preview_report["groups"][0];
+    assert!(
+        group["archiveAction"].is_null(),
+        "来源状态为 NULL 时不得授权归档：{group}"
+    );
+    assert!(group["previewToken"].is_null(), "无动作即无凭据：{group}");
+    assert_eq!(
+        env.status_of(&target_id).as_deref(),
+        Some("completed"),
+        "不得写入状态"
+    );
 }
 
 /// 单向粘滞：来源未归档、目标已归档时，绝不反向取消归档。

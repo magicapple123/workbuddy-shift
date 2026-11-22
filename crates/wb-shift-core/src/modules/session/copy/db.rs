@@ -369,7 +369,16 @@ pub(in crate::modules::session) fn insert_session_copy(
             },
             // 防御性处理：project_id 在跨账号复制后一定指向不存在的项目。
             "project_id" => rusqlite::types::Value::Null,
-            "created_at" | "updated_at" => rusqlite::types::Value::Integer(copy_now),
+            // 创建时间保留源行原值：批量复制上百条历史会话后，若全部写成本次切号时刻，
+            // 目标账号里所有副本都挤在同一分钟，按时间排序与统计全部失真。源值为 NULL
+            // 时没有可保留的语义（旧库可能没写过），回退成本次时间戳，不写 NULL。
+            "created_at" => match value {
+                rusqlite::types::Value::Null => rusqlite::types::Value::Integer(copy_now),
+                original => original,
+            },
+            // 更新时间仍写本次：这一列驱动客户端「最近更新」排序，副本沿用源的旧值会
+            // 沉到列表底部，用户切号后看不到刚复制过来的会话。
+            "updated_at" => rusqlite::types::Value::Integer(copy_now),
             "deleted_at" => rusqlite::types::Value::Null,
             // 行状态与正文口径必须一致：正文末条已归一到 completed（见
             // [`normalize_copy_tail`]），行还写着 working/active 客户端照样显示思考中。

@@ -741,8 +741,10 @@ pub(in crate::modules::session) fn preview_group_item(
         .iter()
         .map(|mode| mode.as_str())
         .collect();
-    // 归档资格：独立于正文判定，只看双方会话行的状态。来源已归档 + 目标处于非活跃
-    // 终态才授权；缺列/NULL/活跃态一律不授权，也不因此影响既有正文判定的结果。
+    // 归档资格：独立于正文判定，只看双方会话行的状态。来源已归档 + 目标处于
+    // [`ARCHIVE_TARGET_TERMINAL_STATUSES`]（`working` 之外的终态，含历史中断残留的
+    // `active`）才授权；缺列/NULL/`working`/未知值一律不授权，也不因此影响既有正文
+    // 判定的结果。
     // 不可验证的判定不提供任何动作：此时既没有正文模式也不会下发凭据，若仍写出
     // archiveAction，前端摘要会显示「仅同步归档」而用户实际勾不了，等于误导。
     let mut archive = preview_archive_state(

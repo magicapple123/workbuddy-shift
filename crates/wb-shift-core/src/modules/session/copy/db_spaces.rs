@@ -18,6 +18,11 @@ pub(in crate::modules::session) struct SpaceMeta {
     ///
     /// 只用于**匹配**目标账号的空间，不搬到目标账号（目标机器可能没有这些目录）。
     pub(in crate::modules::session) folder_paths: Vec<String>,
+    /// 源空间的置顶标记（`spaces.pinned`）。老库没有该列、或该行为 NULL 时为 None。
+    ///
+    /// 新建 space 时透传：源项目已置顶却不在目标账号里置顶，等于悄悄丢掉用户的整理
+    /// 结果。`None` 不能原样写库——该列 NOT NULL，调用方回落到 0。
+    pub(in crate::modules::session) pinned: Option<i64>,
 }
 
 /// 路径比较键：分隔符统一为 `/`、转小写、去尾分隔符。
@@ -80,6 +85,19 @@ pub(in crate::modules::session) fn row_text(
     }
 }
 
+/// 取行里的整数列；NULL 与非整数一律视为缺失（`pinned` 只可能是 0/1）。
+///
+/// 「缺列」与「NULL」都返回 None：行由 `SELECT *` 读出，老库没有 `pinned` 列时行里
+/// 根本没有这个键——与 `column_exists` 判定等价，而且跨档复制读的是**源库**的行，
+/// 不能拿目标库的 schema 去判断源行有没有这一列。
+fn row_int(row: &[(String, rusqlite::types::Value)], column: &str) -> Option<i64> {
+    let (_, value) = row.iter().find(|(name, _)| name == column)?;
+    match value {
+        rusqlite::types::Value::Integer(number) => Some(*number),
+        _ => None,
+    }
+}
+
 /// 从 space 行提取匹配所需的元信息；没有 `name` 的行不可用于同名匹配。
 pub(in crate::modules::session) fn space_meta_from_row(
     row: &[(String, rusqlite::types::Value)],
@@ -90,6 +108,7 @@ pub(in crate::modules::session) fn space_meta_from_row(
         source_kind: row_text(row, "source_kind"),
         create_folder_path: row_text(row, "create_folder_path"),
         folder_paths: Vec::new(),
+        pinned: row_int(row, "pinned"),
     })
 }
 
@@ -369,7 +388,12 @@ pub(in crate::modules::session) fn insert_target_space(
             "transport",
             rusqlite::types::Value::Text("local".to_string()),
         ),
-        ("pinned", rusqlite::types::Value::Integer(0)),
+        // 置顶状态透传源 space：源项目已置顶时目标也必须置顶。列 NOT NULL，
+        // 源行没有可用值（缺列 / NULL）时写 0，不能写 NULL。
+        (
+            "pinned",
+            rusqlite::types::Value::Integer(meta.pinned.unwrap_or(0)),
+        ),
         ("deleted_at", rusqlite::types::Value::Integer(-1)),
         ("created_at", rusqlite::types::Value::Integer(now)),
         ("updated_at", rusqlite::types::Value::Integer(now)),

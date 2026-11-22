@@ -42,9 +42,12 @@ pub(in crate::modules::session) fn read_member_status(
     }
 }
 
-/// 单向粘滞归档资格：来源已归档，且目标处于允许被归档的终态。
+/// 单向粘滞归档资格：来源已归档，且目标处于允许被归档的[终态白名单]
+/// [`ARCHIVE_TARGET_TERMINAL_STATUSES`]。
 ///
-/// 不反向传导取消归档；缺列、NULL、未知值与活跃态一律不授权。
+/// 不反向传导取消归档；缺列、NULL、`working` 与未知值一律不授权。目标停在 `active`
+/// 时授权（历史中断残留的副本进程早已不在），代价是无法区分「真的在用」——见常量
+/// 注释里的取舍说明。
 pub(in crate::modules::session) fn archive_qualifies(
     source: &SessionStatus,
     target: &SessionStatus,

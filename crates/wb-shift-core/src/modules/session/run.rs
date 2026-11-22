@@ -157,6 +157,27 @@ pub(super) fn sync_sessions_for_switch_at(
     if let Some(items) = report.get_mut("synced").and_then(Value::as_array_mut) {
         reconcile_reported_cleanup(items);
     }
+    // 置顶传导：组内源成员被置顶时，其它成员的副本也应置顶（见 `copy/pinned.rs`）。
+    // 只对本次真正同步成功的组做；失败只落报告字段，不影响同步结果。
+    if let Some(store) = store.as_ref() {
+        let group_ids: Vec<String> = report
+            .get("synced")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("groupId")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !group_ids.is_empty() {
+            report["pinned"] = sync_pinned_for_groups(store, &source_uid, &group_ids).to_json();
+        }
+    }
     Ok(report)
 }
 
@@ -344,6 +365,26 @@ pub(super) fn sync_sessions_cross_at(
     report["temporaryFiles"] = json!(session_backup::maintain(target.paths, variant));
     if let Some(items) = report.get_mut("synced").and_then(Value::as_array_mut) {
         reconcile_reported_cleanup(items);
+    }
+    // 与 `sync_sessions_for_switch_at` 同口径：显式来源账号的置顶跟到组内其它成员。
+    if let Some(store) = store.as_ref() {
+        let group_ids: Vec<String> = report
+            .get("synced")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("groupId")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !group_ids.is_empty() {
+            report["pinned"] = sync_pinned_for_groups(store, &source.uid, &group_ids).to_json();
+        }
     }
     Ok(report)
 }

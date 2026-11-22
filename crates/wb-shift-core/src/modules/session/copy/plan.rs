@@ -1,171 +1,10 @@
-//! 复制流程编排：公开入口、锁与恢复顺序、逐会话循环与结果报告。
+//! 复制流程编排：锁与恢复顺序、逐会话循环与结果报告。
+//!
+//! 对外入口与开关参数在 `entry.rs`；这里只做「拿锁 → 恢复 → 逐会话复制 → 组装报告」，
+//! 末尾按需挂接增强数据（置顶、工作记忆）。
 use super::super::recovery::recover_pending_session_operations_at_with;
+use super::entry::{CopyOptions, CopySide};
 use super::*;
-/// 云端映射登记结果：失败必须上报，不能静默降级成成功。
-/// 把勾选的会话复制到目标账号（路径 B）。返回复制报告。
-///
-/// 档位以**目标账号**自身为准：数据根、数据库、备份目录、认证文件都取该档位。
-/// 国际版能力不满足时直接返回明确错误，绝不写半成品（design D6）。
-/// App 正在运行时拒绝写入：独立复制 API 与桌面端共用同一条生命周期保护。
-pub fn copy_sessions_for_switch(
-    target_acc: &Value,
-    session_ids: &[String],
-    ignore_aux: bool,
-) -> Result<Value, String> {
-    let variant = account::variant_of(target_acc);
-    let paths = SessionPaths::for_variant(variant);
-    copy_sessions_for_switch_at(
-        &paths,
-        variant,
-        target_acc,
-        session_ids,
-        ignore_aux,
-        process::is_workbuddy_running,
-    )
-}
-
-/// 把勾选的会话从**显式源账号**复制到**显式目标账号**（跨档复制入口，design §2.1）。
-///
-/// 与 [`copy_sessions_for_switch`] 的差异只在来源判定：源 uid 取自 `source_acc`，
-/// 不再从目标档登录态读取；源档与目标档可为不同档位。写入侧仍以目标账号为准
-/// （数据根、数据库、映射库、备份目录），源档只读。
-pub fn copy_sessions_cross(
-    source_acc: &Value,
-    target_acc: &Value,
-    session_ids: &[String],
-    ignore_aux: bool,
-) -> Result<Value, String> {
-    let source_variant = account::variant_of(source_acc);
-    let target_variant = account::variant_of(target_acc);
-    let source_paths = SessionPaths::for_variant(source_variant);
-    let target_paths = SessionPaths::for_variant(target_variant);
-    let source_uid = account_uid(source_acc);
-    if source_uid.is_empty() {
-        return Err("源账号缺少 uid，无法复制会话".to_string());
-    }
-    let target_uid = account_uid(target_acc);
-    if target_uid.is_empty() {
-        return Err("目标账号缺少 uid，无法复制会话".to_string());
-    }
-    let source = CopySide {
-        paths: &source_paths,
-        variant: source_variant,
-        uid: source_uid,
-        account_id: nonempty_text(
-            source_acc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-        ),
-    };
-    let target = CopySide {
-        paths: &target_paths,
-        variant: target_variant,
-        uid: target_uid,
-        account_id: nonempty_text(
-            target_acc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-        ),
-    };
-    copy_sessions_cross_at(
-        source,
-        target,
-        session_ids,
-        ignore_aux,
-        process::is_workbuddy_running,
-        SessionPaths::for_variant,
-    )
-}
-
-/// 可注入路径与「App 是否运行」探针的跨档复制入口（单测注入临时双档目录与假探针，
-/// 不触碰真实路径、不探测真实进程）。
-pub(in crate::modules::session) fn copy_sessions_cross_at(
-    source: CopySide<'_>,
-    target: CopySide<'_>,
-    session_ids: &[String],
-    ignore_aux: bool,
-    is_app_running: impl Fn(WbVariant) -> bool,
-    resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
-) -> Result<Value, String> {
-    // 快拒只针对**目标档**（写侧）：源档只读，运行中的源客户端不影响读取安全；
-    // 目标账号不是当前登录账号时免关直接写（实测，见门禁函数注释）。
-    if app_running_blocks_target_write(target.paths, target.variant, &target.uid, &is_app_running) {
-        return Err(SESSION_COPY_APP_RUNNING.to_string());
-    }
-    // 源档也要读（正文与源行），国际版数据根不同构时同样不支持（design D6）。
-    ensure_session_copy_supported(source.paths, source.variant)?;
-    ensure_session_copy_supported(target.paths, target.variant)?;
-    if source.variant == target.variant && source.uid == target.uid {
-        return Err("源账号与目标账号相同，无需复制会话".to_string());
-    }
-    run_copy(
-        &source,
-        &target,
-        session_ids,
-        ignore_aux,
-        is_app_running,
-        resolve_source_paths,
-    )
-}
-
-/// 可注入路径与「App 是否运行」探针的同档复制入口（单测注入临时目录与假探针，不触碰
-/// 真实路径、不探测真实进程）。
-///
-/// App 运行检查做两次：拿档位操作锁之前先快速拒绝；拿锁之后再复查——锁前到拿锁之间
-/// App 可能被启动，只有锁后复查才能保证会话写入发生在 App 停止写入之后（design §4.1）。
-pub(in crate::modules::session) fn copy_sessions_for_switch_at(
-    paths: &SessionPaths,
-    variant: WbVariant,
-    target_acc: &Value,
-    session_ids: &[String],
-    ignore_aux: bool,
-    is_app_running: impl Fn(WbVariant) -> bool,
-) -> Result<Value, String> {
-    // 探测只对国际版生效（design D6 针对的是国际版数据根不同构）。国内版数据根与
-    // 改造前同构，保留改造前的路径与返回结构，不让国内版看到「暂不支持」类新文案。
-    ensure_session_copy_supported(paths, variant)?;
-    let target_uid = account_uid(target_acc);
-    if target_uid.is_empty() {
-        return Err("目标账号缺少 uid，无法复制会话".to_string());
-    }
-    let source_uid = current_user_uid_at(&paths.auth_file)
-        .ok_or_else(|| "未读取到本机登录态，无法确定来源账号".to_string())?;
-    if source_uid == target_uid {
-        return Err("当前账号与目标账号相同，无需复制会话".to_string());
-    }
-    // 同档路径的源恒为当前登录账号、且上面已拦同账号，因此这里对"目标=当前登录"
-    // 恒为放行；保留统一门禁只为与其他写入入口共用同一条规则。
-    if app_running_blocks_target_write(paths, variant, &target_uid, &is_app_running) {
-        return Err(SESSION_COPY_APP_RUNNING.to_string());
-    }
-    let source = CopySide {
-        paths,
-        variant,
-        account_id: account_id_for_uid(paths, &source_uid),
-        uid: source_uid,
-    };
-    let target = CopySide {
-        paths,
-        variant,
-        account_id: nonempty_text(
-            target_acc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-        ),
-        uid: target_uid,
-    };
-    run_copy(
-        &source,
-        &target,
-        session_ids,
-        ignore_aux,
-        is_app_running,
-        SessionPaths::for_variant,
-    )
-}
 
 /// 国际版支持性探测的统一封装：只有国际版需要数据根同构检查（design D6）。
 pub(in crate::modules::session) fn ensure_session_copy_supported(
@@ -181,15 +20,6 @@ pub(in crate::modules::session) fn ensure_session_copy_supported(
     Ok(())
 }
 
-/// 复制的一方：档位数据根、档位名与账号身份（源侧只读、目标侧写入）。
-pub(in crate::modules::session) struct CopySide<'a> {
-    pub(in crate::modules::session) paths: &'a SessionPaths,
-    pub(in crate::modules::session) variant: WbVariant,
-    pub(in crate::modules::session) uid: String,
-    /// 账号库中的账号 id（仅作展示，身份判定以 uid 为准）。
-    pub(in crate::modules::session) account_id: Option<String>,
-}
-
 /// 同档与跨档复制的统一流程：双档锁 → 恢复 → 逐会话复制 → 报告。
 ///
 /// `resolve_source_paths` 用于恢复未完成的**跨档**操作时解析其源档数据根；
@@ -199,7 +29,7 @@ pub(in crate::modules::session) fn run_copy(
     source: &CopySide<'_>,
     target: &CopySide<'_>,
     session_ids: &[String],
-    ignore_aux: bool,
+    options: CopyOptions,
     is_app_running: impl Fn(WbVariant) -> bool,
     resolve_source_paths: impl Fn(WbVariant) -> SessionPaths,
 ) -> Result<Value, String> {
@@ -227,7 +57,7 @@ pub(in crate::modules::session) fn run_copy(
     }
     // 「仍然复制（不带用量）」的重试：上一次失败时操作停在 BodyWritten，本次请求要把
     // 忽略标记**先落到操作记录**，随后的恢复重放才会跳过账本并补完同一条会话。
-    if ignore_aux {
+    if options.ignore_aux {
         mark_aux_skipped_for_requests(target, source, session_ids);
     }
     let recovery = recover_pending_session_operations_at_with(
@@ -247,7 +77,7 @@ pub(in crate::modules::session) fn run_copy(
         target_uid: &target.uid,
         target_account_id: target.account_id.clone(),
         pending: &pending,
-        ignore_aux,
+        ignore_aux: options.ignore_aux,
     };
 
     let mut copied: Vec<Value> = Vec::new();
@@ -355,7 +185,7 @@ pub(in crate::modules::session) fn run_copy(
         report["auxFailed"] = json!(aux_failed);
     }
     // 本次请求本身带了忽略标记：让前端能把「已按忽略处理」如实提示出来。
-    if ignore_aux {
+    if options.ignore_aux {
         report["auxSkipped"] = json!(true);
     }
     // 恢复重放补完的会话：重试「仍然复制」时它们不会出现在 copied 里（已是既有副本），
@@ -372,6 +202,45 @@ pub(in crate::modules::session) fn run_copy(
     report["temporaryFiles"] = json!(session_backup::maintain(target.paths, target.variant));
     if let Some(items) = report.get_mut("copied").and_then(Value::as_array_mut) {
         reconcile_reported_cleanup(items);
+    }
+    // 置顶状态不在 `sessions` 表里，得单独同步（见 `copy/pinned.rs`）。复制与「已关联」
+    // 两种结果都提供 source→target 的 id 映射；置顶是增强数据，失败只落报告字段，
+    // 绝不影响正文/DB 结果，所以放在所有关键写入之后。
+    let mut pinned_pairs: Vec<(String, String)> = Vec::new();
+    if let Some(items) = report.get("copied").and_then(Value::as_array) {
+        for item in items {
+            if let (Some(from), Some(to)) = (
+                item.get("id").and_then(Value::as_str),
+                item.get("newId").and_then(Value::as_str),
+            ) {
+                pinned_pairs.push((from.to_string(), to.to_string()));
+            }
+        }
+    }
+    if let Some(items) = report.get("alreadyLinked").and_then(Value::as_array) {
+        for item in items {
+            if let (Some(from), Some(to)) = (
+                item.get("id").and_then(Value::as_str),
+                item.get("sessionId").and_then(Value::as_str),
+            ) {
+                pinned_pairs.push((from.to_string(), to.to_string()));
+            }
+        }
+    }
+    report["pinned"] = sync_pinned(
+        source.paths,
+        &source.uid,
+        target.paths,
+        &target.uid,
+        &pinned_pairs,
+    )
+    .to_json();
+    // 工作记忆（`MEMORY.md`）按操作勾选：用户没勾就**完全不执行**——连源文件都不读，
+    // 报告里也不出现 `memory` 字段（见 `copy/memory.rs`）。同样放在所有关键写入之后：
+    // 失败只落 `skippedReason`，不影响正文 / DB / 复制结果。
+    if options.copy_memory {
+        report["memory"] =
+            sync_memory(source.paths, &source.uid, target.paths, &target.uid).to_json();
     }
     Ok(report)
 }

@@ -113,7 +113,9 @@ pub(in crate::modules::session) fn update_target_session_row(
     // 事务外的一次读取不能替代事务内的条件。
     let affected = match status_change {
         // `status = after` 这一支是幂等重放：数据库已提交但阶段标记未推进时，恢复会
-        // 再跑一次本函数。前置值不匹配就不写——活跃态、未知值均被排除在外。
+        // 再跑一次本函数。前置值不匹配就不写——现场漂移出来的活跃态、未知值都不会
+        // 命中这两个条件（`active` 作为**记录在案**的前置值可以写，那是可归档的
+        // 历史残留态，见 `ARCHIVE_TARGET_TERMINAL_STATUSES`）。
         Some(change) => tx.execute(
             "UPDATE sessions SET updated_at = ?1, status = ?2 \
              WHERE id = ?3 AND user_id = ?4 AND deleted_at IS NULL \

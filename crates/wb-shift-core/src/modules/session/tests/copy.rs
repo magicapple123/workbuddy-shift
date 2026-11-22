@@ -1782,6 +1782,102 @@ fn copy_creates_space_for_target_when_missing() {
     assert!(created_at > 0, "时间戳必须写入当前时间，不能是 0");
 }
 
+/// 源 space 的置顶标记（`spaces.pinned`）；列不存在或值为 NULL 时为 None。
+fn pinned_of(env: &Env, space_id: &str) -> Option<i64> {
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.query_row("SELECT pinned FROM spaces WHERE id = ?1", [space_id], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .ok()
+    .flatten()
+}
+
+/// 源 space 已置顶 → 目标账号新建的同构 space 也必须置顶。
+///
+/// 置顶是用户显式做的整理动作；复制过去的新项目若丢掉它，用户会以为置顶被重置了。
+#[test]
+fn copy_passes_source_space_pinned_to_new_space() {
+    let env = Env::new("space-pinned");
+    create_db_with_spaces(&env);
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.execute_batch(
+        "INSERT INTO spaces (id, user_id, device_id, name, source_kind, pinned, created_at, updated_at)
+         VALUES ('space-a', 'uid-a', 'dev-src', 'ResumeForge', 'seed', 1, 1, 2);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, user_id, title, cwd, space_id, created_at, updated_at, deleted_at, is_playground)
+         VALUES ('src-1', 'uid-a', '会话', 'D:/ResumeForge', 'space-a', 1000, 2000, NULL, 0)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    insert_session_copy(
+        &env.paths(),
+        &env.paths(),
+        "new-1",
+        "src-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap();
+
+    let (space_id, _) = space_of(&env, "new-1");
+    let space_id = space_id.expect("目标账号没有同名 space 时应当新建");
+    assert_ne!(space_id, "space-a", "不得复用源账号的 space");
+    assert_eq!(
+        pinned_of(&env, &space_id),
+        Some(1),
+        "源 space 已置顶，新建的 space 必须同样置顶"
+    );
+}
+
+/// 源 space 取不到置顶值（老库缺列 / 值为 NULL）时仍写 0：该列 NOT NULL，不能写 NULL。
+#[test]
+fn copy_writes_zero_pinned_when_source_space_has_no_pin() {
+    let env = Env::new("space-pinned-none");
+    create_db_with_spaces(&env);
+    // 缺列：`SELECT *` 读出的行里根本没有这个键。
+    let without_column = vec![(
+        "name".to_string(),
+        rusqlite::types::Value::Text("ResumeForge".to_string()),
+    )];
+    assert_eq!(
+        space_meta_from_row(&without_column).unwrap().pinned,
+        None,
+        "缺列必须读成 None，而不是 0"
+    );
+    // 有列但值为 NULL。
+    let mut with_null = without_column.clone();
+    with_null.push(("pinned".to_string(), rusqlite::types::Value::Null));
+    assert_eq!(
+        space_meta_from_row(&with_null).unwrap().pinned,
+        None,
+        "NULL 必须读成 None"
+    );
+
+    let meta = SpaceMeta {
+        name: "ResumeForge".to_string(),
+        device_id: Some("dev-1".to_string()),
+        source_kind: Some("seed".to_string()),
+        create_folder_path: None,
+        folder_paths: Vec::new(),
+        pinned: None,
+    };
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    let new_id = insert_target_space(&conn, &env.paths(), "uid-b", &meta, "D:/ResumeForge")
+        .unwrap()
+        .expect("设备标识齐全时应当新建 space");
+    let pinned: i64 = conn
+        .query_row("SELECT pinned FROM spaces WHERE id = ?1", [&new_id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(pinned, 0, "取不到置顶值时写 0（列 NOT NULL）");
+}
+
 /// c) 源 `space_id` 为 NULL → 目标仍为 NULL，且不新建任何 spaces 行。
 #[test]
 fn copy_keeps_null_space_id_without_creating_space() {
@@ -2922,4 +3018,62 @@ fn copy_keeps_expert_columns_untouched_when_available() {
         .unwrap();
     assert_eq!(expert_id, "SoftwareCompany");
     assert_eq!(copied_identity, identity);
+}
+
+// ---------------------------------------------------------------------------
+// 复制保留源创建时间（批量复制后目标账号的时间排序与统计不失真）
+// ---------------------------------------------------------------------------
+
+/// 目标会话行的 (created_at, updated_at)。
+fn copied_times(env: &Env, cid: &str) -> (Option<i64>, Option<i64>) {
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.query_row(
+        "SELECT created_at, updated_at FROM sessions WHERE id = ?1",
+        [cid],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// 副本沿用源的 `created_at`（源行是 1000/2000），`updated_at` 必须是本次复制时刻。
+///
+/// 一处放宽会连带两件事：创建时间全挤在切号那一分钟（排序/统计失真），或更新时间
+/// 沿用旧值让副本在客户端「最近更新」里沉底。两个断言合在一个用例里，防止有人
+/// 顺手把两列一起改成「保留源值」。
+#[test]
+fn copy_preserves_source_created_at() {
+    let env = ready_env("copy-created-at");
+    let before = crate::modules::config::now_ms();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    let (created_at, updated_at) = copied_times(&env, &target_id);
+    assert_eq!(created_at, Some(1000), "必须保留源创建时间");
+    let updated_at = updated_at.expect("更新时间必须有值");
+    assert!(
+        updated_at >= before,
+        "更新时间必须落在本次复制之后：{updated_at} < {before}"
+    );
+    assert_ne!(updated_at, 2000, "更新时间不得沿用源的旧值");
+}
+
+/// 源 `created_at` 为 NULL（旧库可能没写过）时回退成本次时间戳，不写 NULL。
+#[test]
+fn copy_falls_back_to_copy_time_when_source_created_at_is_null() {
+    let env = ready_env("copy-created-at-null");
+    let conn = Connection::open(env.paths.workbuddy_db()).unwrap();
+    conn.execute("UPDATE sessions SET created_at = NULL WHERE id = 'sess-1'", [])
+        .unwrap();
+    drop(conn);
+
+    let before = crate::modules::config::now_ms();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    let (created_at, _) = copied_times(&env, &target_id);
+    let created_at = created_at.expect("没有可保留的值时必须回退成时间戳，不能写 NULL");
+    assert!(
+        created_at >= before,
+        "回退值必须落在本次复制之后：{created_at} < {before}"
+    );
 }
