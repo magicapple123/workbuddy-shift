@@ -262,9 +262,13 @@ NODEJS
 # `npm pack workbuddy-shift@X` 会报 `ETARGET / notarget`（v0.2.6 首次踩到，整个
 # mirror job 变红）。这属于**时间差**而不是包缺失，所以对 ETARGET 做有界重试；
 # 其它错误（404 之外的鉴权/网络）仍立刻失败，不要用重试掩盖真实问题。
+#
+# 窗口给到 5 分钟（20×15s）：npm 在 publish 成功后会提示「may take a few minutes」，
+# 0.3.0-rc.1 实测在网络正常的情况下仍用了 2 分钟以上才可解析，8×15s 不够。
+# 只在备用渠道上多等几分钟，好过让整个 build run 变红。
 pack() { # $1 = 包 spec 或本地目录, $2 = 目的目录
   attempt=1
-  max_attempts=8
+  max_attempts=20
   while :; do
     if npm pack "$1" --pack-destination "$2" --registry="$NPM_REGISTRY" \
       --json >"$TMP/pack.json" 2>"$TMP/pack.log"; then
