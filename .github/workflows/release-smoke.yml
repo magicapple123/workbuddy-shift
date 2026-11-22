@@ -247,7 +247,10 @@ jobs:
     name: container-docker
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # 镜像由 docker.yml 用同一个 tag **并行**构建：冷缓存下多架构 buildx 接近 1 小时，
+    # 正式版刚发布时镜像通常还在推。driver 会先等该 tag 的 docker.yml 收敛（默认上限 45 min），
+    # 这里必须留出同等预算，否则等待会被 job 超时掐断、又变回「容器不可用」。
+    timeout-minutes: 55
     if: ${{ needs.preflight.outputs.ok == 'true' }}
     steps:
       - uses: actions/checkout@v4

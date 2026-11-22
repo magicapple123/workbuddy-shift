@@ -148,37 +148,103 @@ smoke_endgroup
 # K1：pull `:<version>` 与 `:latest`，digest 必须相同
 # ---------------------------------------------------------------------------
 smoke_group "K1 docker pull"
-# 镜像刚推上去时 registry 传播 + 网络抖动都可能让首次 pull 404/超时。
-# 给一个短重试窗口（6×20s）：既不会把「还差几十秒」记成 C 类并白烧一次处置，
-# 也不会把真正缺失的镜像无休止地等下去（3 分钟后再失败，证据里能看到 6 次尝试）。
+# 镜像由独立的 `docker.yml` 用同一个 tag 触发构建，和本验收是**并行**的两条流水线：
+# 正式版刚发布时镜像常常还在推。多架构 buildx 首次构建实测接近 1 小时（之后走 GHA 层缓存），
+# 因此「短重试」盖不住这个窗口——先等工作流收敛再拉，才不会把「还差二十分钟」记成 C 类
+# 并白烧一次处置。查不到工作流时（手动验收老 tag / 本地跑 / 无 gh）退回短重试，语义不变。
+TAG="v${VERSION}"
+BUILD_WAIT_SECONDS="${SMOKE_DOCKER_BUILD_WAIT_SECONDS:-2700}"
+PULL_ATTEMPTS="${SMOKE_DOCKER_PULL_ATTEMPTS:-6}"
+PULL_INTERVAL_SECONDS="${SMOKE_DOCKER_PULL_INTERVAL_SECONDS:-20}"
+
+# 该 tag 上最近一次 push 触发的 `docker.yml` 结论，形如 `in_progress/-`、`completed/success`。
+# 查不到（无仓库上下文 / 无 gh / 无对应 run）时输出空串，调用方据此退回短重试。
+docker_build_state() {
+  [ -n "${GITHUB_REPOSITORY:-}" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  # `// empty` 是必须的：没有对应 run 时 `.workflow_runs[0]` 是 null，直接取值会渲染成
+  # `null/-`，让上游误以为「有个处于未知状态的构建」而一直等到上限。
+  _raw=$(gh api \
+    "repos/${GITHUB_REPOSITORY}/actions/workflows/docker.yml/runs?event=push&branch=${TAG}&per_page=1" \
+    --jq '.workflow_runs[0] // empty | "\(.status)/\(.conclusion // "-")"' 2>/dev/null) || _raw=""
+  case "${_raw}" in
+    ""|null/*|/*) return 0 ;;
+    *) printf '%s' "${_raw}" ;;
+  esac
+}
+
+# 等镜像工作流收敛：`ok`（可拉）/ `no-workflow`（查不到，去短重试）/
+# `build-<conclusion>`（构建真的失败）/ `timeout`（等到上限还没完）。
+wait_for_docker_build() {
+  [ "${SMOKE_DOCKER_WAIT_BUILD:-1}" = "1" ] || { printf 'no-workflow'; return 0; }
+  _start=${SECONDS}
+  _last_log=${SECONDS}
+  while :; do
+    _state=$(docker_build_state)
+    case "${_state}" in
+      "") printf 'no-workflow'; return 0 ;;
+      completed/success) printf 'ok'; return 0 ;;
+      completed/*) printf 'build-%s' "${_state#completed/}"; return 0 ;;
+    esac
+    if [ $((SECONDS - _start)) -ge "${BUILD_WAIT_SECONDS}" ]; then
+      printf 'timeout'
+      return 0
+    fi
+    if [ $((SECONDS - _last_log)) -ge 60 ]; then
+      smoke_log "等待 docker 镜像构建（${_state}，已等 $((SECONDS - _start))s，上限 ${BUILD_WAIT_SECONDS}s）"
+      _last_log=${SECONDS}
+    fi
+    sleep 20
+  done
+}
+
 pull_with_retry() { # $1=image $2=log
   _attempt=1
-  while [ "${_attempt}" -le 6 ]; do
+  while [ "${_attempt}" -le "${PULL_ATTEMPTS}" ]; do
     if docker pull "$1" >"$2" 2>&1; then
       return 0
     fi
-    if [ "${_attempt}" -lt 6 ]; then
-      printf '[smoke] pull %s 失败（第 %s/6 次），20s 后重试\n' "$1" "${_attempt}" >>"$2"
-      sleep 20
+    if [ "${_attempt}" -lt "${PULL_ATTEMPTS}" ]; then
+      printf '[smoke] pull %s 失败（第 %s/%s 次），%ss 后重试\n' \
+        "$1" "${_attempt}" "${PULL_ATTEMPTS}" "${PULL_INTERVAL_SECONDS}" >>"$2"
+      sleep "${PULL_INTERVAL_SECONDS}"
       _attempt=$((_attempt + 1))
       continue
     fi
     return 1
   done
 }
+
+WAIT_RESULT=$(wait_for_docker_build)
+WAIT_STATE=$(docker_build_state)
+case "${WAIT_RESULT}" in
+  ok|no-workflow) ;;
+  timeout)
+    smoke_fail pull C "docker 镜像在验收窗口内构建完成" \
+      "等了 ${BUILD_WAIT_SECONDS}s，docker.yml 仍未结束（${WAIT_STATE:-无记录}）；如需放宽用 SMOKE_DOCKER_BUILD_WAIT_SECONDS"
+    ;;
+  build-*)
+    smoke_fail pull C "docker 镜像构建成功" \
+      "docker.yml 未成功（${WAIT_RESULT#build-}），镜像不会出现；先修镜像构建，不必改验收"
+    ;;
+esac
 PULL_VERSIONED_OK="no"
 PULL_LATEST_OK="no"
-if pull_with_retry "${VERSIONED}" "${EVID}/pull-versioned.log"; then
-  PULL_VERSIONED_OK="yes"
-  smoke_pass pull "docker pull ${VERSIONED}"
-else
-  smoke_fail pull C "docker pull ${VERSIONED}" "manifest 缺失或网络失败（已重试 6 次），见 pull-versioned.log"
-fi
-if pull_with_retry "${LATEST}" "${EVID}/pull-latest.log"; then
-  PULL_LATEST_OK="yes"
-  smoke_pass pull "docker pull ${LATEST}"
-else
-  smoke_fail pull C "docker pull ${LATEST}" "manifest 缺失或网络失败（已重试 6 次），见 pull-latest.log"
+if [ "${WAIT_RESULT}" = "ok" ] || [ "${WAIT_RESULT}" = "no-workflow" ]; then
+  if pull_with_retry "${VERSIONED}" "${EVID}/pull-versioned.log"; then
+    PULL_VERSIONED_OK="yes"
+    smoke_pass pull "docker pull ${VERSIONED}"
+  else
+    smoke_fail pull C "docker pull ${VERSIONED}" \
+      "manifest 缺失或网络失败（已重试 ${PULL_ATTEMPTS} 次），见 pull-versioned.log"
+  fi
+  if pull_with_retry "${LATEST}" "${EVID}/pull-latest.log"; then
+    PULL_LATEST_OK="yes"
+    smoke_pass pull "docker pull ${LATEST}"
+  else
+    smoke_fail pull C "docker pull ${LATEST}" \
+      "manifest 缺失或网络失败（已重试 ${PULL_ATTEMPTS} 次），见 pull-latest.log"
+  fi
 fi
 
 if [ "${PULL_VERSIONED_OK}" = "yes" ] && [ "${PULL_LATEST_OK}" = "yes" ]; then

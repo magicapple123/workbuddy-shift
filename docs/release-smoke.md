@@ -25,10 +25,13 @@
 | `desktop-macos` | macos-latest | 12 min | dmg 覆盖 `/Applications`（`pkg-upgrade`）→ 版本 → 启动 + 单实例 + 落盘 |
 | `desktop-linux` | ubuntu-latest | 15 min | `dpkg -i` 升级（`pkg-upgrade`）+ AppImage 同路径替换（`appimage-replace`，sha256 断言）→ `xvfb` 下启动 |
 | `npm-cli` | ubuntu-latest | 8 min | 平台分包齐全 → `npm i -g` 升级（`npm-upgrade`）→ `version` / `serve` / `/api/status` |
-| `container-docker` | ubuntu-latest | 12 min | `ghcr.io` 拉 `:<ver>` 与 `:latest`（digest 相同）→ `healthy` / `/api/status` / `uid=1000` / 卷可写 |
+| `container-docker` | ubuntu-latest | 55 min | `ghcr.io` 拉 `:<ver>` 与 `:latest`（digest 相同）→ `healthy` / `/api/status` / `uid=1000` / 卷可写；镜像仍在构建时先等 `docker.yml` 收敛（上限 45 min） |
 | `triage` | ubuntu-latest | 6 min | 归类 A–J → 次数受限的一次性处置 → 结论写回 Release 正文 → 开 issue |
 
 墙上时间预算 ≈ 24 分钟（`preflight` + 最慢的 `desktop-windows` + `triage`），压住 25 分钟红线。
+**例外：镜像还没构建完时**，`container-docker` 会先等 `docker.yml` 收敛（默认上限 45 分钟），
+这一段最长可达 ≈ 51 分钟——多架构 buildx 冷缓存实测接近 1 小时，而这个等待换来的是
+「不再把还在构建的镜像记成 C 类」。等不到上限时按 C 类失败并写明「是构建没结束，不是镜像缺失」。
 
 **落地状态**：全部 job 已接线。`triage` 的 `if` 是 `always()`（任何验收 job 红/被跳过都要出结论），
 但它的业务步骤要求 `preflight` 通过——预检自己红掉时（版本漂移 / 资产缺失）没有可比的结果，
@@ -222,7 +225,13 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
 - `preflight` 自己红掉（版本漂移 / 资产缺失）时，`triage` 的业务步骤不执行（没有可比结果），
   **不会**自动去重跑 `build.yml`——这种情况按 `preflight` 的 summary 人工处理。
 
-两条「驱动口径」约定（看起来像失败，其实不是）：
+三条「驱动口径」约定（看起来像失败，其实不是）：
+
+- **Docker 镜像还在构建**：镜像由 `docker.yml` 用同一个 tag 并行构建，冷缓存下多架构 buildx
+  接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
+  `SMOKE_DOCKER_BUILD_WAIT_SECONDS`，默认 2700s），成功后才拉镜像；构建失败直接判 C 类并写明
+  「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）退回 6×20s 短重试。
+  只有在等待超限时才判 C，且 detail 明确写「是构建没结束，不是镜像缺失」。
 
 - **Linux 主程序怎么选**：deb 里除桌面壳 `/usr/bin/workbuddy-shift-desktop` 外还有
   `/usr/bin/companion-runtime`（悬浮窗 sidecar），`dpkg -L` 按字典序把它排在前面。driver 的
