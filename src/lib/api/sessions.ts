@@ -140,17 +140,33 @@ export function addSessionGroupMember(args: {
   return call("add_session_group_member", args as unknown as Record<string, unknown>);
 }
 
-/** 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。 */
+/**
+ * 编辑器 / IDE：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
+ *
+ * `variantScope` 只有 CodeBuddy IDE 需要（`cn` / `ai` 决定运行态判定与关联组的档位）；
+ * **其余客户端不传该字段**（与 `listAccountSessions` 的 `client` 同一写法）：桌面端 invoke
+ * 与 HTTP 请求体的「缺省」必须逐字一致，值一律不靠序列化阶段的 `undefined` 丢弃来保证。
+ */
 export function copyLinkedSessions(args: {
   client: SessionGroupClient;
   sourceAccountId: string;
   targetAccountId: string;
   sessionIds: string[];
-  /** 已获用户授权（确认框）时传 `true`：运行中允许关闭并重开 VS Code。 */
+  /** 仅 CodeBuddy IDE：当前页面选中的档位。 */
+  variantScope?: WbVariant;
+  /** 已获用户授权（确认框）时传 `true`：运行中允许关闭并重开 VS Code / JetBrains IDE。 */
   restart?: boolean;
 }): Promise<{ status: "linked" | "alreadyLinked" | "copiedUnlinked" | "failed"; editorError?: string; restartedEditor?: boolean; [key: string]: unknown }> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
-  return call("copy_linked_sessions", args as unknown as Record<string, unknown>);
+  const { client, sourceAccountId, targetAccountId, sessionIds, variantScope, restart } = args;
+  return call("copy_linked_sessions", {
+    client,
+    sourceAccountId,
+    targetAccountId,
+    sessionIds,
+    ...(variantScope ? { variantScope } : {}),
+    restart: restart === true,
+  });
 }
 
 /**

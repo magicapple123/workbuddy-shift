@@ -153,22 +153,27 @@ pub async fn add_session_group_member(
     .map_err(|error| error.to_string())?
 }
 
-/// 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
+/// 编辑器 / IDE：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
 ///
 /// `restart` 缺省 false：VS Code 运行中需用户确认（确认框授权）后传 true，由后端关闭并重开。
+/// `variantScope` 只有 CodeBuddy IDE 需要（`cn` / `ai` 决定运行态判定与关联组的档位）：
+/// 缺省时后端直接拒绝，不会替用户猜一个档位。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn copy_linked_sessions(
     client: String,
+    variant_scope: Option<String>,
     source_account_id: String,
     target_account_id: String,
     session_ids: Vec<String>,
     restart: Option<bool>,
 ) -> Result<Value, String> {
     let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
     let restart = restart.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         session_groups::copy_linked_sessions(
             client,
+            scope,
             &source_account_id,
             &target_account_id,
             &session_ids,

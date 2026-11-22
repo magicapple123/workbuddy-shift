@@ -189,12 +189,15 @@ pub(crate) async fn api_copy_linked_sessions(
         Ok(request) => request,
         Err(rejection) => return invalid_body(rejection),
     };
-    let (client, _scope) = match client_scope(&request.client, None) {
+    // 档位由请求显式给出：只有 CodeBuddy IDE 需要（`cn` / `ai`），其余客户端必须留空
+    // （多传会被 `parse_variant_scope` + `validate_scope` 拒绝，不静默忽略）。
+    let (client, scope) = match client_scope(&request.client, request.variant_scope.as_deref()) {
         Ok(value) => value,
         Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
     };
     match session_groups::copy_linked_sessions(
         client,
+        scope,
         &request.source_account_id,
         &request.target_account_id,
         &request.session_ids,

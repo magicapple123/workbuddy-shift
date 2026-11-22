@@ -144,6 +144,13 @@ pub(super) const JETBRAINS_SYNC_RUNNING_HINT: &str =
 pub(super) const JETBRAINS_ADD_MEMBER_RUNNING_HINT: &str =
     "检测到 JetBrains IDE（IDEA / PyCharm）正在运行，请先完全退出后再添加关联账号。";
 
+/// CodeBuddy IDE 侧「新增关联会话」运行中的报错文案。
+///
+/// IDE 不参与「关闭并重开」生命周期（见 `sync::prepare_editor_window`）：运行中的 IDE 会用
+/// 内存态覆盖磁盘，因此只能拒绝并要求用户先退出——与 `add_member`、`run_pair_sync` 同口径。
+pub(super) const CODEBUDDY_IDE_ADD_LINKED_RUNNING_HINT: &str =
+    "检测到 CodeBuddy IDE 正在运行，请先完全退出后再新增关联会话。";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +159,7 @@ mod tests {
     };
 
     include!("tests/editor.rs");
+    include!("tests/ide_linked.rs");
     include!("tests/jetbrains.rs");
     include!("tests/maintenance.rs");
     include!("tests/plugin_liveness.rs");

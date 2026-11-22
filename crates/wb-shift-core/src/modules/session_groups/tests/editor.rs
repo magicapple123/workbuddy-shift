@@ -153,9 +153,10 @@
 
     #[test]
     fn copy_linked_sessions_rejects_invalid_requests_before_touching_editor() {
-        // 非插件客户端：直接拒绝（该入口尚未接入）。
+        // WorkBuddy：走 `copy_sessions_cross`，本入口一律拒绝（不关任何宿主）。
         let error = copy_linked_sessions(
             SessionClient::Workbuddy,
+            None,
             "source",
             "target",
             &["conv".to_string()],
@@ -164,14 +165,28 @@
         .unwrap_err();
         assert!(error.contains("暂不支持新增关联会话"), "{error}");
 
+        // CodeBuddy IDE 缺档位：明确要求 `cn` / `ai`，不能在无档位时猜。
+        let error = copy_linked_sessions(
+            SessionClient::CodebuddyIde,
+            None,
+            "source",
+            "target",
+            &["conv".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("必须指定 cn 或 ai 档位"), "{error}");
+
         // 空勾选：直接拒绝。
-        let error = copy_linked_sessions(SessionClient::VscodeExt, "source", "target", &[], false)
-            .unwrap_err();
+        let error =
+            copy_linked_sessions(SessionClient::VscodeExt, None, "source", "target", &[], false)
+                .unwrap_err();
         assert!(error.contains("缺少要复制的会话"), "{error}");
 
         // 账号不存在：直接拒绝（不会走到编辑器生命周期窗口）。
         let error = copy_linked_sessions(
             SessionClient::VscodeExt,
+            None,
             "no-such-source",
             "no-such-target",
             &["conv".to_string()],

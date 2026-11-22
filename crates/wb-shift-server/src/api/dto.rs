@@ -335,12 +335,14 @@ pub(crate) struct SessionGroupPruneRequest {
 
 /// `POST /api/session-groups/copy-linked`。
 ///
-/// 不带 `variantScope`：复制由显式来源/目标账号决定，档位取自账号本身；
-/// 桌面端 command 也没有这个参数（WebUI 多传的旧字段会被 serde 忽略）。
+/// 复制由显式来源 / 目标账号决定，WorkBuddy 与两个插件侧的档位取自账号本身；只有
+/// CodeBuddy IDE 需要 `variantScope`（`cn` / `ai` 决定运行态判定与关联组的档位），
+/// 缺省时 core 直接拒绝而不是替用户猜。桌面端 command 与这里字段逐字一致。
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct CopyLinkedSessionsRequest {
     pub(crate) client: String,
+    pub(crate) variant_scope: Option<String>,
     pub(crate) source_account_id: String,
     pub(crate) target_account_id: String,
     pub(crate) session_ids: Vec<String>,

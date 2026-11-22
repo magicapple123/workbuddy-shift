@@ -14,20 +14,39 @@ import type {
   AccountMeta,
   Session,
   SessionGroupClient,
+  WbVariant,
 } from "@/lib/types";
 import { accountVariant, variantLabel } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 import { LINKED_TREE_MIN_H } from "./constants";
+import {
+  linkedSessionAccountLabel,
+  linkedSessionCopyFailureToast,
+  linkedSessionCopyKind,
+  linkedSessionEditorLabel,
+  linkedSessionEmptySessionsHint,
+  linkedSessionNeedsRestartPrecheck,
+  linkedSessionScopesTargets,
+  linkedSessionTargetHint,
+  linkedSessionTargetOptions,
+} from "./linked-session";
 
 /**
  * 右上角「新增关联会话」弹窗（与切号弹窗同构）：来源账号 → 会话树勾选 → 目标账号，
  * 一次提交全部勾选。会话树复用 `SessionTreeList`（任务平铺 / 空间按文件夹分组 / 组头三态勾选）。
  *
- * 本次仅 WorkBuddy 客户端开放；其他客户端入口禁用（其复制 / 关联能力后续再补）。执行沿用
- * `copySessionsCross`：来源会话已属于某关联组则加入该组，未关联则新建关联组。
+ * 四个客户端都开放这个入口，但后端入口分三类（见 `./linked-session`）：
+ * - WorkBuddy 走 `copySessionsCross`（按账号档位选库，源与目标都可跨档）；
+ * - CodeBuddy IDE 走 `copyLinkedSessions` + `variantScope`（两个 IDE 共用一棵会话树，
+ *   档位决定关联命名空间；IDE 运行中直接拒绝，不参与「关闭并重开」）；
+ * - VS Code / JetBrains 插件走 `copyLinkedSessions`，运行中需「关闭并重开宿主」授权。
+ *
+ * 三个入口都会在复制后建立关联：不做「只复制不建关联」的降级——关联断了用户会以为同步成功。
  */
-export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestartConfirm }: {
+export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone, requestRestartConfirm }: {
   client: SessionGroupClient;
+  /** 仅 CodeBuddy IDE 使用：当前页面选中的档位（其余客户端忽略）。 */
+  variantScope?: WbVariant;
   disabled: boolean;
   onDone: () => void;
   /** 插件侧运行中：请求页面统一的「关闭并重开」确认框；用户确认后执行 `run`。 */
@@ -63,17 +82,26 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   const workbuddyAccounts = accounts;
   const sourceAccount = workbuddyAccounts.find((account) => account.id === sourceAccountId) ?? null;
   const targetAccount = workbuddyAccounts.find((account) => account.id === targetAccountId) ?? null;
-  const targetOptions = workbuddyAccounts.filter((account) => account.id !== sourceAccountId);
-  const supported = client === "workbuddy" || client === "vscodeExt" || client === "jetbrains";
-  const unsupportedTitle = "当前客户端暂不支持新增关联会话";
-  /** 宿主名（确认框 / 成功提示里要指名是哪个编辑器）。 */
-  const editorLabel = client === "jetbrains" ? "JetBrains IDE" : "VS Code";
+  // 目标候选：排除来源账号；CodeBuddy IDE 下再按当前档位收窄（跨档登记会建到另一个档位的组里，
+  // 用户在刚刷新的列表里将看不到这个组）。其余客户端不按档位过滤——跨档复制是有意支持的能力。
+  const targetOptions = linkedSessionTargetOptions(workbuddyAccounts, {
+    client,
+    sourceAccountId,
+    variantScope,
+  });
+  /** 目标账号区的说明：没有可用目标账号时必须给原因（选择器此时是禁用的）。 */
+  const targetHint = linkedSessionTargetHint({
+    client,
+    sourceAccountId,
+    targetCount: targetOptions.length,
+    variantScope,
+  });
+  /** 宿主名（成功提示 / 重开失败提示里要指名是哪个客户端）。 */
+  const editorLabel = linkedSessionEditorLabel(client);
   /** 弹窗文案用：来源账号的客户端称呼。 */
-  const clientAccountLabel = client === "workbuddy"
-    ? "WorkBuddy 账号"
-    : client === "jetbrains"
-      ? "JetBrains 插件账号"
-      : "CodeBuddy 插件账号";
+  const clientAccountLabel = linkedSessionAccountLabel(client);
+  /** 本次复制请求要带上的档位：只有 CodeBuddy IDE 需要，其余客户端不传（后端会拒绝多余档位）。 */
+  const copyVariantScope = linkedSessionScopesTargets(client) ? variantScope : undefined;
 
   async function loadSessions(account: AccountMeta) {
     const id = ++requestId.current;
@@ -157,24 +185,36 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
   }
   async function copyAndLink() {
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
-    if (client === "vscodeExt" || client === "jetbrains") {
-      // 运行中的写入会被宿主覆盖：先走页面统一的确认框授权「关闭并重开」。
-      if (await pluginNeedsRestart()) {
-        requestRestartConfirm("关闭并复制", () => copyAndLinkPlugin(true));
-        return;
-      }
-      await copyAndLinkPlugin(false);
+    const kind = linkedSessionCopyKind(client);
+    if (kind === "workbuddy") {
+      await copyAndLinkWorkbuddy();
       return;
     }
-    await copyAndLinkWorkbuddy();
+    if (kind === "codebuddyIde") {
+      // IDE 不参与「关闭并重开」：运行中时后端直接拒绝并给原因，前端不加确认框。
+      await copyAndLinkEditor(false);
+      return;
+    }
+    // 插件侧运行中的写入会被宿主覆盖：先走页面统一的确认框授权「关闭并重开」。
+    if (linkedSessionNeedsRestartPrecheck(client) && (await pluginNeedsRestart())) {
+      requestRestartConfirm("关闭并复制", () => copyAndLinkEditor(true));
+      return;
+    }
+    await copyAndLinkEditor(false);
   }
-  async function copyAndLinkPlugin(restart: boolean) {
+  /**
+   * 编辑器 / IDE 侧的「复制 + 建立关联」（`copyLinkedSessions`）。
+   *
+   * `restart` 只有插件侧会传 true（已获用户授权）；CodeBuddy IDE 忽略该参数。
+   */
+  async function copyAndLinkEditor(restart: boolean) {
     if (!sourceAccount || !targetAccountId || sourceAccount.id === targetAccountId || selected.size === 0 || busy) return;
     const copyId = ++copyRequestId.current;
     setBusy(true);
     try {
       const report = await api.copyLinkedSessions({
         client,
+        variantScope: copyVariantScope,
         sourceAccountId: sourceAccount.id,
         targetAccountId,
         sessionIds: [...selected],
@@ -187,12 +227,14 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
       if (status === "linked") {
         toast.success(`已复制 ${copiedCount} 个会话到「${targetName}」并建立关联`, report.restartedEditor ? { description: `已重新打开 ${editorLabel}` } : undefined);
       } else if (status === "copiedUnlinked") {
+        // 只复制成功、关联没建成：必须说清「要手动处理」，否则用户会以为同步已经生效。
         toast.warning("会话已复制，但没有建立关联", { description: JSON.stringify(report.linkErrors ?? []) });
       } else {
-        toast.error("复制并关联失败");
+        const failure = linkedSessionCopyFailureToast(typeof report.error === "string" ? report.error : "");
+        toast.error(failure.title, failure.description ? { description: failure.description } : undefined);
       }
       if (skipped.length > 0) toast.info(`有 ${skipped.length} 个会话因内容缺失被跳过`, { description: skipped.map((item) => item.error).join("；") });
-      if (report.editorError) toast.warning("VS Code 未能自动重新打开", { description: report.editorError });
+      if (report.editorError) toast.warning(`${editorLabel} 未能自动重新打开`, { description: report.editorError });
       // 关窗换代后，结果已经提示过；不要把新打开的弹窗关掉，也不要清掉新一次执行的 busy。
       if (copyRequestId.current !== copyId) {
         if (status === "linked") onDone();
@@ -206,7 +248,8 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
       }
     } catch (error) {
       // 换代后也要报失败：请求已经发出，静默会让用户以为没执行。
-      toast.error("复制并关联失败", { description: api.asError(error) });
+      const failure = linkedSessionCopyFailureToast(api.asError(error));
+      toast.error(failure.title, failure.description ? { description: failure.description } : undefined);
     } finally {
       if (copyRequestId.current === copyId) setBusy(false);
     }
@@ -279,15 +322,15 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
         ? `复制并关联到「${displayName(targetAccount)}」`
         : `勾选要复制到「${displayName(targetAccount)}」的会话`;
   return <Dialog open={open} onOpenChange={openChange}>
-    <span className="inline-flex" title={supported ? undefined : unsupportedTitle}>
+    <span className="inline-flex">
       <DialogTrigger asChild>
-        <Button size="sm" className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90" disabled={disabled || !supported} title={supported ? "新增关联会话" : unsupportedTitle}><Link2 />新增关联会话</Button>
+        <Button size="sm" className="shrink-0 bg-brand text-brand-foreground hover:bg-brand/90" disabled={disabled} title="新增关联会话"><Link2 />新增关联会话</Button>
       </DialogTrigger>
     </span>
     <DialogContent showCloseButton={!busy} onEscapeKeyDown={blockDismissWhileBusy} onPointerDownOutside={blockDismissWhileBusy} onInteractOutside={blockDismissWhileBusy} className="flex max-h-[min(90vh,calc(100vh-2rem))] min-w-0 flex-col overflow-hidden">
       <DialogHeader className="shrink-0">
         <DialogTitle>新增关联会话</DialogTitle>
-        <DialogDescription>选择一个来源账号的会话，复制到目标账号并建立关联。</DialogDescription>
+        <DialogDescription>选择一个来源账号的会话，复制到目标账号并建立关联。{client === "codebuddyIde" ? "复制前请先完全退出 CodeBuddy IDE。" : ""}</DialogDescription>
       </DialogHeader>
       {busy && <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg bg-background/85 backdrop-blur-sm">
         <Loader2 className="size-8 animate-spin text-primary" />
@@ -310,7 +353,7 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
               : sessionsError
                 ? <div role="alert" className={`flex flex-col items-center justify-center gap-2 px-3 text-center ${LINKED_TREE_MIN_H}`}><p className="text-sm text-danger">{sessionsError}</p><Button variant="outline" size="sm" onClick={() => { if (sourceAccount) void loadSessions(sourceAccount); }}>重试</Button></div>
                 : sessions.length === 0
-                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>{(client === "vscodeExt" || client === "jetbrains") && dataRoot === null ? (client === "jetbrains" ? "未找到插件数据目录：请先打开 IDEA / PyCharm 并登录 CodeBuddy 插件。" : "未找到插件数据目录：请先打开 VS Code 并登录 CodeBuddy 插件。") : "该账号没有可复制的会话。"}</p>
+                  ? <p className={`flex items-center justify-center px-3 text-center text-sm text-muted-foreground ${LINKED_TREE_MIN_H}`}>{linkedSessionEmptySessionsHint({ client, dataRoot })}</p>
                   : <SessionTreeList
                     sessions={sessions}
                     selected={selected}
@@ -331,6 +374,8 @@ export function AddLinkedSessionDialog({ client, disabled, onDone, requestRestar
             <SelectTrigger size="sm" className="w-full min-w-0 bg-background text-xs" aria-label="选择目标账号"><SelectValue placeholder={sourceAccountId ? "选择目标账号" : "先选择来源账号"} /></SelectTrigger>
             <SelectContent>{targetOptions.map((account) => <SelectItem key={account.id} value={account.id} className="text-xs">{displayName(account)} · {variantLabel(accountVariant(account))}</SelectItem>)}</SelectContent>
           </Select>
+          {/* 没有可用目标账号时选择器是禁用的，必须在这里说清原因（否则用户只看到灰掉的控件）。 */}
+          {targetHint && <p className="text-xs text-muted-foreground">{targetHint}</p>}
         </div>
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">附加内容</p>
           <label className="flex min-w-0 items-start gap-2 text-xs">

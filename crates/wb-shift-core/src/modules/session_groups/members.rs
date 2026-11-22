@@ -237,21 +237,30 @@ pub fn add_member(
     }
 }
 
-/// 插件：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
+/// 编辑器 / IDE 客户端：把来源账号的勾选会话复制到目标账号并登记关联（无现成组则新建关联组）。
 ///
-/// 支持 VS Code 插件与 JetBrains 插件（CodeBuddy IDE 走 `add_member` 的加成员路径，
-/// WorkBuddy 走 `copySessionsCross`）。运行门禁与「确认后关闭重开」沿用插件侧统一
-/// 生命周期：全部校验通过后才关闭宿主，失败路径尽力开回。
+/// 三个客户端（VS Code 插件、JetBrains 插件、CodeBuddy IDE）共用「复制 + 登记」内核，差别只有
+/// 数据仓规格与关联命名空间；WorkBuddy 走 `session::copy_sessions_cross`（会话管理页的来源 /
+/// 目标账号视图），本入口对它一律拒绝。
+///
+/// `scope` 只有 CodeBuddy IDE 需要：档位决定运行态判定（关哪个 IDE）与关联组的 `variant`
+/// （两个 IDE 共用同一棵会话树，但关联组按档位隔离）。插件侧的存储与地区无关，`scope` 必须为空
+/// （见 [`SessionClient::validate_scope`]），`variant` 只作关联组标记，取目标账号自身。
+///
+/// 运行门禁与「确认后关闭重开」沿用插件侧统一生命周期：全部校验通过后才关闭宿主，失败路径尽力开回。
 pub fn copy_linked_sessions(
     client: SessionClient,
+    scope: Option<WbVariant>,
     source_account_id: &str,
     target_account_id: &str,
     session_ids: &[String],
     restart: bool,
 ) -> Result<Value, String> {
-    if !client.is_editor_plugin() {
+    if client == SessionClient::Workbuddy {
         return Err("当前客户端暂不支持新增关联会话".to_string());
     }
+    // CodeBuddy IDE 缺档位在此拒绝（`cn` / `ai` 决定复制进哪个关联命名空间）。
+    client.validate_scope(scope)?;
     if session_ids.is_empty() {
         return Err("缺少要复制的会话".to_string());
     }
@@ -281,14 +290,19 @@ pub fn copy_linked_sessions(
     if source_uid == target_uid {
         return Err("来源账号与目标账号相同，无需复制会话".to_string());
     }
-    let root = client.data_root().ok_or_else(|| match client {
-        SessionClient::Jetbrains => "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string(),
-        _ => "未找到 VS Code CodeBuddy 插件数据目录".to_string(),
-    })?;
+    // CodeBuddy IDE 的档位由调用方显式给出（`validate_scope` 已保证非空）；插件侧取目标账号自身。
+    let variant = scope.unwrap_or_else(|| account::variant_of(&target));
+    if client == SessionClient::CodebuddyIde {
+        // 目标账号必须与当前 IDE 档位一致：登记到别的档位会让新组只在另一个档位的列表里出现。
+        // 位置在数据根解析之前：档位不匹配是纯参数错误，不该先被「未找到数据目录」盖住。
+        validate_target_compatibility(client, scope, &target)?;
+    }
+    let root = client
+        .data_root()
+        .ok_or_else(|| missing_data_root_reason(client))?;
     let spec = client
         .store_spec()
-        .ok_or_else(|| "插件数据仓不可用".to_string())?;
-    let variant = account::variant_of(&target);
+        .ok_or_else(|| "客户端数据仓不可用".to_string())?;
     // 逐条校验来源内容：无内容 / 索引缺失的跳过并如实报告；全部无效才拒绝
     // （不为注定失败的请求关编辑器）。
     let mut items = Vec::with_capacity(session_ids.len());
@@ -321,17 +335,44 @@ pub fn copy_linked_sessions(
         return Err("勾选的会话都没有可复制的内容".to_string());
     }
     let _operation_lock = session_link::try_acquire_client_ops_lock(&paths)?;
+    // CodeBuddy IDE 没有「关闭并重开」生命周期（`prepare_editor_window` 对它返回 `None`）：
+    // 运行中的 IDE 会把内存态写回磁盘，覆盖刚复制的会话，因此直接拒绝并说明原因，
+    // 不做「假装写入」（与 `add_member` / `run_pair_sync` 同一口径）。
+    if client == SessionClient::CodebuddyIde && ide_flavor(variant).is_running() {
+        return Err(CODEBUDDY_IDE_ADD_LINKED_RUNNING_HINT.to_string());
+    }
     let guard = prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
     let result = (|| -> Result<Value, String> {
-        let (report, link_errors) = plugin_copy_and_register(
-            spec,
-            &root,
-            &paths,
-            variant,
-            &source_uid,
-            &target_uid,
-            &items,
-        )?;
+        let (report, link_errors) = match client {
+            SessionClient::CodebuddyIde => {
+                // 与 `add_member` 同一条链路：复制内核 + 关联命名空间固定 `for_codebuddy_ide`。
+                let backup_root = paths
+                    .backup_root()
+                    .join(spec.backup_kind)
+                    .join(config::utc_iso());
+                let report = codebuddy_ide_session::copy_codebuddy_ide_sessions_in(
+                    &root,
+                    &backup_root,
+                    &source_uid,
+                    &target_uid,
+                    &items,
+                )?;
+                let link_errors = codebuddy_ide_session_sync::register_copied_sessions(
+                    &root, &paths, variant, &report,
+                );
+                (report, link_errors)
+            }
+            SessionClient::VscodeExt | SessionClient::Jetbrains => plugin_copy_and_register(
+                spec,
+                &root,
+                &paths,
+                variant,
+                &source_uid,
+                &target_uid,
+                &items,
+            )?,
+            SessionClient::Workbuddy => unreachable!("WorkBuddy 已在入口处拒绝"),
+        };
         let copied = report
             .get("copied")
             .and_then(Value::as_array)
@@ -459,10 +500,12 @@ pub(super) fn delete_group_in(
     Ok(removed)
 }
 
-/// 列出某账号在指定客户端下的可复制会话（两个宿主共用同一份实现）。
+/// 列出某账号在指定客户端下的可复制会话（四个宿主共用同一份实现）。
 ///
-/// 三个客户端的数据来源完全不同（数据库 / VS Code 插件仓 / JetBrains 插件仓），但形状一致：
-/// `{ sourceUid, sessions: [...], skipped, dataRoot }`。CodeBuddy IDE 尚未接入该入口。
+/// 四个客户端的数据来源完全不同（数据库 / VS Code 插件仓 / CodeBuddy IDE 仓 / JetBrains
+/// 插件仓），但形状一致：`{ sourceUid, sessions: [...], skipped, dataRoot }`。三个同构客户端
+/// 的会话文件都按数据根解析，`dataRoot` 为 `null` 表示未找到数据目录（据此区分
+/// 「未找到数据目录」与「该账号无会话」）。
 pub fn list_account_sessions(client: SessionClient, account: &Value) -> Result<Value, String> {
     let uid = account::get_str(account, "uid")
         .map(|uid| uid.trim().to_string())
@@ -470,18 +513,32 @@ pub fn list_account_sessions(client: SessionClient, account: &Value) -> Result<V
         .ok_or_else(|| "账号缺少 uid".to_string())?;
     match client {
         SessionClient::Workbuddy => Ok(session::list_sessions_for_account(account)),
+        // 两个 IDE 共用同一棵会话树，按 uid 定位即可，不需要档位。
+        SessionClient::CodebuddyIde => Ok(codebuddy_ide_session::list_codebuddy_ide_sessions(&uid)),
         SessionClient::VscodeExt => Ok(vscode_session::list_vscode_sessions(&uid)),
         SessionClient::Jetbrains => {
             let root = client
                 .data_root()
-                .ok_or_else(|| "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string())?;
+                .ok_or_else(|| missing_data_root_reason(client))?;
             Ok(vscode_session::list_sessions_in_store(
                 JETBRAINS_STORE,
                 &root,
                 &uid,
             ))
         }
-        SessionClient::CodebuddyIde => Err("当前客户端暂不支持列出账号会话".to_string()),
+    }
+}
+
+/// 会话数据根解析失败时的文案：指名「去打开 / 登录哪个客户端」，否则用户只会看到一句无解的话。
+pub(super) fn missing_data_root_reason(client: SessionClient) -> String {
+    match client {
+        SessionClient::Workbuddy => "未找到 WorkBuddy 数据库目录".to_string(),
+        SessionClient::CodebuddyIde => {
+            "未找到 CodeBuddy IDE 的会话数据目录：请先打开 CodeBuddy IDE 并登录一次后重试。"
+                .to_string()
+        }
+        SessionClient::VscodeExt => "未找到 VS Code CodeBuddy 插件数据目录".to_string(),
+        SessionClient::Jetbrains => "未找到 JetBrains CodeBuddy 插件的会话数据目录".to_string(),
     }
 }
 

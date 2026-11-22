@@ -149,7 +149,7 @@ export default function SessionsPage() {
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={list.loading || detail.detailLoading}><RefreshCw className={list.loading ? "animate-spin" : undefined} />刷新</Button>
               {showPruneEntry({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount }) && <span className="shrink-0" title={list.pruneBlocked ?? undefined}><Button variant="outline" size="sm" onClick={() => void actions.requestPrune()} disabled={!canPruneGroups({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount, busy: actions.actionBusy || list.loading, blockedReason: list.pruneBlocked })}><Eraser />清理失效关联组</Button></span>}
-              <AddLinkedSessionDialog client={client} disabled={list.loading} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
+              <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
             </div>
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">
