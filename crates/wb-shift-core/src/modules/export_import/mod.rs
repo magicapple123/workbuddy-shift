@@ -3,6 +3,11 @@
 //! 纯逻辑（`parse_accounts_json` / `merge_import_records` / `select_export_records`）
 //! 不依赖文件系统，便于无 UI 环境单测；`export_accounts` / `import_accounts`
 //! 负责读写账号库（`~/.workbuddy-shift/accounts.json`）。
+//!
+//! `crypto` 是换机迁移用的加密信封（口令 + AES-256-GCM）：只做字节进/字节出，
+//! 明文仍是上面这套导出 payload，解密后照样走 `merge_import_records` 的合并语义。
+//! `encrypted` 把信封接到文件上（`export_accounts_encrypted_at` /
+//! `import_accounts_encrypted_at`），并持有两个宿主共用的口令策略（至少 8 位）。
 
 use std::path::{Path, PathBuf};
 
@@ -21,9 +26,15 @@ pub struct ImportResult {
     pub overwritten: usize,
 }
 
+mod crypto;
+mod encrypted;
 mod export;
 mod import;
 
+pub use crypto::{decrypt_export, encrypt_export};
+pub use encrypted::{
+    export_accounts_encrypted_at, import_accounts_encrypted_at, validate_password, MIN_PASSWORD_LEN,
+};
 pub use export::{
     export_accounts, export_accounts_to_path, select_export_records, write_records_to_file,
 };
@@ -33,6 +44,9 @@ pub use import::{import_accounts, merge_import_records, parse_accounts_json, pre
 mod tests {
     use super::*;
 
+    use super::encrypted::merge_encrypted_bytes;
     use super::export::*;
     include!("tests/import.rs");
+    include!("tests/crypto.rs");
+    include!("tests/encrypted.rs");
 }

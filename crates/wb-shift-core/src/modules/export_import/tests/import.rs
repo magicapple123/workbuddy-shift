@@ -103,6 +103,52 @@
         assert_eq!(accounts[0]["mark"]["expiresAt"], json!(1_800_000_000_000_i64));
     }
 
+    /// issue #184「最近切换」：导入**旧备份**（不含 `lastUsedAt` / `lastUsedClient`）不得抹掉
+    /// 本机记录。
+    ///
+    /// 覆盖分支用导入记录整条替换本地记录，所以这两个键必须在 `LOCAL_ACCOUNT_FIELDS` 里；
+    /// 二者要**成对**保留——前端按「时间戳缺失 = 从未记录」判断，只留下来源端文案会让卡片
+    /// 显示不出徽标，用户以为这次切换没生效。
+    #[test]
+    fn merge_keeps_local_last_used_pair_from_old_backup() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["lastUsedAt"] = json!(1_763_654_321_000_i64);
+        local["lastUsedClient"] = json!("vscode");
+        let mut accounts = vec![local];
+
+        let text =
+            r#"[{ "id": "local", "uid": "u1", "nickname": "新名称", "access_token": "tok-new" }]"#;
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(result.overwritten, 1);
+        assert_eq!(
+            accounts[0]["lastUsedAt"],
+            json!(1_763_654_321_000_i64),
+            "旧备份缺 lastUsedAt 时保留本机时间戳"
+        );
+        assert_eq!(
+            accounts[0]["lastUsedClient"], "vscode",
+            "旧备份缺 lastUsedClient 时保留本机来源端"
+        );
+        assert_eq!(accounts[0]["nickname"], "新名称", "官方字段仍以备份为准");
+    }
+
+    /// 备份自带「最近切换」记录时以备份为准（导入即恢复用户当时的记录，与 `mark` 同口径）。
+    #[test]
+    fn merge_restores_last_used_from_backup() {
+        let mut local = record("local", Some("u1"), "旧名称", None, true);
+        local["lastUsedAt"] = json!(1_763_654_321_000_i64);
+        local["lastUsedClient"] = json!("vscode");
+        let mut accounts = vec![local];
+
+        let text = r#"[{ "id": "local", "uid": "u1", "nickname": "新名称", "access_token": "tok-new",
+            "lastUsedAt": 1763700000000, "lastUsedClient": "jetbrains" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(accounts[0]["lastUsedAt"], json!(1_763_700_000_000_i64));
+        assert_eq!(accounts[0]["lastUsedClient"], "jetbrains");
+    }
+
     // -----------------------------------------------------------------------
     // 本地字段白名单不变量（`account::LOCAL_ACCOUNT_FIELDS`）
     //
@@ -120,6 +166,10 @@
                 "createdAt": 1_763_654_321_000_i64,
                 "expiresAt": null,
             }),
+            // issue #184「最近切换」：官方资料与旧备份里都没有这两个键，必须整对保留，
+            // 否则每导入一次旧备份，卡片上的「最近切换」徽标就会集体消失。
+            "lastUsedAt" => json!(1_763_654_321_000_i64),
+            "lastUsedClient" => json!("codebuddy-ide"),
             other => panic!(
                 "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在导入侧不变量测试里补样例值，\
                  并确认旧备份导入不会覆盖它"
