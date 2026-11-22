@@ -180,6 +180,38 @@ fn explicit_group_unify_can_replace_ahead_but_ordinary_overwrite_cannot() {
     );
 }
 
+/// 两边各自新增不同内容（真分歧）→ 统一覆盖后重新预览必须变成一致。
+///
+/// 回归自 issue #3 最后一条：用户选「以此为准」后，组里仍显示「有分歧」消不掉。
+/// 这里验证内核层：只要统一写入成功，重新判定就必须是 identical。
+#[test]
+fn unify_clears_divergence_after_both_sides_changed() {
+    let env = ready_env("sync-unify-diverged");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    // 两边各自追加不同内容：条数相同、内容不同 = 真分歧。
+    append_records(&env.body_path("sess-1"), "sess-1", 10, 2);
+    append_records(&env.body_path(&target_id), &target_id, 20, 2);
+    let group = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(group["verdict"], "diverge", "{group}");
+
+    let group_id = group["groupId"].as_str().unwrap();
+    let token = group["previewToken"].as_str().unwrap();
+    let applied = sync(
+        &env,
+        "uid-b",
+        &[selection(group_id, token, SyncMode::Overwrite)],
+    );
+    assert_eq!(applied["synced"].as_array().unwrap().len(), 1, "{applied}");
+
+    let after = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(
+        after["verdict"], "identical",
+        "统一后仍报分歧，说明状态没有随写入收敛：{after}"
+    );
+}
+
 /// 一方有效成员缺失（失效/被替换）→ 不提供写入动作，记录数按契约给 0 而不是 null。
 #[test]
 fn preview_reports_invalid_member_as_unknown_without_null_record_counts() {
