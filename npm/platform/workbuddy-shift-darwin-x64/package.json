@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-shift-darwin-x64",
-  "version": "0.2.6",
+  "version": "0.3.0-rc.1",
   "description": "workbuddy-shift platform binary (darwin-x64)",
   "os": [
     "darwin"

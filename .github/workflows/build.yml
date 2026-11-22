@@ -223,7 +223,8 @@ jobs:
           cp "$SRC" "$PKG_DIR/bin/${{ matrix.cli_bin }}"
           cd "$PKG_DIR"
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
-          npm publish --access public --registry=https://registry.npmjs.org
+          case "$GITHUB_REF_NAME" in *-*) NPM_TAG="--tag next" ;; *) NPM_TAG="" ;; esac
+          npm publish $NPM_TAG --access public --registry=https://registry.npmjs.org
 
       # 桌面 App（mac app / nsis exe / deb + AppImage）
       # 仓库变量 PUBLISH_APP=false 时整段跳过：纯 npm/CLI 改动可只发 npm 不发桌面 App；
@@ -465,7 +466,8 @@ jobs:
           cp "target/release/workbuddy-shift" "$PKG_DIR/bin/workbuddy-shift-linux-arm64"
           cd "$PKG_DIR"
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
-          npm publish --access public --registry=https://registry.npmjs.org
+          case "$GITHUB_REF_NAME" in *-*) NPM_TAG="--tag next" ;; *) NPM_TAG="" ;; esac
+          npm publish $NPM_TAG --access public --registry=https://registry.npmjs.org
 
   # 所有平台包发布成功后，发布主包（optionalDependencies 引用平台包）
   publish-main:
@@ -484,7 +486,8 @@ jobs:
         run: |
           cd npm
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > .npmrc
-          npm publish --access public --registry=https://registry.npmjs.org
+          case "$GITHUB_REF_NAME" in *-*) NPM_TAG="--tag next" ;; *) NPM_TAG="" ;; esac
+          npm publish $NPM_TAG --access public --registry=https://registry.npmjs.org
 
   # GitHub Packages 的 npm scoped 镜像（备用渠道）。
   #
@@ -579,8 +582,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 资产全部上传成功后才把 draft 转正并设为 latest。
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          # 资产全部上传成功后才把 draft 转正。
+          # 正式版（tag 不含 `-`）才设为 latest；预览版标 prerelease，
+          # 这样 /releases/latest 与自动更新不会把预览版推给所有用户。
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          fi
 
       - name: Verify published release
         env:
@@ -606,7 +615,13 @@ jobs:
       # 必须显式派发：GitHub 的防递归规则下，用 GITHUB_TOKEN 造成的 release:published
       # **不会**触发新的 workflow run（只有人工/第三方发布才会）。v0.2.6 首次发版即踩到：
       # Release 正常转正，但 release-smoke 一条都没跑。
+      #
+      # 预览版（tag 含 `-`）**不派发**：release-smoke 的 preflight 按 PRD P0-1 只验正式版，
+      # `release.prerelease` / `tag.prerelease` 两条是 error，派发了只会得到一次必红的 run
+      # （5 个验收 job 全 skipped，triage 也因 `ok != true` 不做任何处置）。
+      # 判定口径与上面的 npm dist-tag、下面的 Release 转正保持一致。
       - name: Dispatch release-smoke
+        if: ${{ !contains(github.ref, '-') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
