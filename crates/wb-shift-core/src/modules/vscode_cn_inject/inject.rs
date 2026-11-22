@@ -4,6 +4,7 @@ use std::time::Duration;
 
 #[allow(unused_imports)]
 use super::safestorage::*;
+use super::write::write_secret_once;
 use super::*;
 
 /// `state.vscdb` 单次连接的 `busy_timeout`：与 `session::query::open_db` 的 5 秒同口径
@@ -283,75 +284,4 @@ pub(super) fn inject_secret_for_with_policy(
     })
     .map_err(|failure| failure.into_message(policy))?;
     Ok(db_path)
-}
-
-/// 一次完整的写入尝试：打开 → 读既有前缀 → 加密 → 建表 / 写入 → 写后校验。
-///
-/// 读既有前缀必须在同一次尝试里做：上一次尝试撞锁失败时可能什么都没读到，
-/// 前缀决定沿用 `v10` 还是 `v11`（Chromium 版本兼容），不能缓存。
-fn write_secret_once(
-    target: &VscodeSafeStorageTarget,
-    plaintext: &str,
-    db_path: &Path,
-    data_root: &Path,
-    timeout: Duration,
-) -> Result<(), InjectFailure> {
-    let conn = open_state_db_with_timeout(db_path, false, timeout)
-        .map_err(|e| classify_db_error("打开 state.vscdb 失败", e))?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)",
-        [],
-    )
-    .map_err(|e| classify_db_error("初始化 ItemTable 失败", e))?;
-
-    let db_key = secret_storage_item_key_for(target);
-    let existing_prefix: Option<String> = match conn.query_row(
-        "SELECT value FROM ItemTable WHERE key = ?",
-        [db_key.as_str()],
-        |row| row.get::<_, String>(0),
-    ) {
-        Ok(val) => {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
-                if let Ok(bytes) = decode_buffer_data(&parsed) {
-                    detect_prefix(&bytes).map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        Err(_) => None,
-    };
-
-    let encrypted = encrypt_secret_payload(
-        plaintext.as_bytes(),
-        existing_prefix.as_deref(),
-        data_root,
-        target,
-    )
-    .map_err(InjectFailure::Fatal)?;
-    let buffer_str = encode_secret_buffer(encrypted).map_err(InjectFailure::Fatal)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)",
-        rusqlite::params![db_key, buffer_str],
-    )
-    .map_err(|e| classify_db_error("写入 state.vscdb 失败", e))?;
-
-    // 写后校验：行存在且为 Buffer JSON
-    let written: String = conn
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?",
-            [db_key.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|e| classify_db_error("写后校验失败", e))?;
-    let parsed: serde_json::Value = serde_json::from_str(&written)
-        .map_err(|e| InjectFailure::Fatal(format!("写后校验 JSON 失败: {e}")))?;
-    if parsed.get("type").and_then(|v| v.as_str()) != Some("Buffer") {
-        return Err(InjectFailure::Fatal(
-            "写后校验失败：value 不是 Buffer".to_string(),
-        ));
-    }
-    Ok(())
 }

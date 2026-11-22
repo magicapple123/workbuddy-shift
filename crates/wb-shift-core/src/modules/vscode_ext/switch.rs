@@ -164,6 +164,8 @@ pub(super) fn switch_account_after_close_inner(
 
     let mut restarted = false;
     let mut relaunch_error: Option<String> = None;
+    // `closed = None`（本来没在运行）→ 不重开、**不做存活探测、不报错**：把一个我们从没关过
+    // 的编辑器交给存活探测，会把「本来没开」误报成「启动后立即退出」。
     if let Some(closed) = closed {
         match relaunch_closed_editor(closed) {
             Ok(()) => restarted = true,

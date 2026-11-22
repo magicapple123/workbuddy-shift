@@ -264,4 +264,7 @@ mod tests {
     #[allow(unused_imports)]
     use super::switch::*;
     include!("tests/switch.rs");
+    // 启动后存活探测用例（缺陷二）：测的是 `status.rs` 的 `launch_vscode_with`，
+    // 与切换语义无关；单开文件也让 `tests/switch.rs` 留在长文件阈值内。
+    include!("tests/status.rs");
 }

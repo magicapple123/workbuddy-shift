@@ -306,8 +306,108 @@ pub(super) fn open_error_reason(out: &std::process::Output) -> String {
     }
 }
 
+/// 启动后存活探测参数（可注入：单测用 0 超时 / 0 间隔，既不真的起进程也不真的等生产窗口）。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LivenessPolicy {
+    /// 探测窗口上限，从「启动动作返回成功」开始计时。
+    pub(super) timeout: Duration,
+    /// 两次探测之间的间隔。
+    pub(super) interval: Duration,
+}
+
+/// 生产参数：每 200ms 探测一次，窗口按平台给（Windows 15s / 其余 8s）。
+///
+/// **为什么必须探测**：`open` / `spawn` 返回成功只说明进程被拉起来了；编辑器可能因为
+/// 缺依赖、权限不足或安装损坏而**秒退**，旧实现此时照样报「已重新打开」——用户以为切号
+/// 成功、其实编辑器没在跑，等他自己打开才发现问题。
+///
+/// **为什么窗口要按平台分**：Windows 的探针走一次 CIM 查询（单次 1~2s），冷启动慢的机器
+/// 上主进程可能 5s 之后才出现——窗口给太短会把「起来了但慢」误报成「启动后立即退出」，
+/// 那是**对用户说错话**，比旧实现的静默成功更糟。macOS / Linux 的 ps 判据快得多，8s 足够。
+/// 代价只是失败路径多等几秒，可以接受。
+#[cfg(target_os = "windows")]
+pub(super) const DEFAULT_LIVENESS_POLICY: LivenessPolicy = LivenessPolicy {
+    timeout: Duration::from_secs(15),
+    interval: Duration::from_millis(200),
+};
+
+/// 生产参数（macOS / Linux）：最多等 8 秒、每 200ms 探测一次。
+#[cfg(not(target_os = "windows"))]
+pub(super) const DEFAULT_LIVENESS_POLICY: LivenessPolicy = LivenessPolicy {
+    timeout: Duration::from_secs(8),
+    interval: Duration::from_millis(200),
+};
+
+/// 存活探测失败文案（新增文案，与「启动动作失败」严格区分开）。
+///
+/// 先说「写入已生效」：库确实已经写好，用户不该因为这句话去重复切号（重复切号会再关一次
+/// 编辑器、再写一次库）；再说「启动后立即退出」并给出可能原因，让他知道该查什么。
+///
+/// 句尾**不带句号**：`switch_message` / `VscodeEditorGuard::fail` 会在这条文案后面接
+/// 「；请手动打开…」或换行，自带句号会拼出「。；」这种双标点。
+pub(super) fn liveness_error(policy: LivenessPolicy) -> String {
+    format!(
+        "写入已生效，但编辑器启动后立即退出（可能缺少依赖或权限）；已连续探测 {} 秒未检测到 VS Code 进程",
+        policy.timeout.as_secs_f32()
+    )
+}
+
+/// 有界存活探测：每 `interval` 探一次，最多等到 `timeout` 用完。
+///
+/// 返回 `true` = 探测到存活。时间上界是 `timeout`（再加**最后一次**探测本身的耗时：
+/// 生产探针要跑 ps / CIM 子进程，耗时不由本函数控制），所以调用方不会被无限挂住。
+pub(super) fn wait_for_liveness<F>(policy: LivenessPolicy, mut alive: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + policy.timeout;
+    loop {
+        if alive() {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        // 剩余时间可能比 interval 短：按剩余时间睡，别睡过头。
+        std::thread::sleep(policy.interval.min(deadline - now));
+    }
+}
+
+/// 启动动作 + 有界存活探测。`spawn` 与 `alive` 都由调用方注入，单测不会真的起进程。
+pub(super) fn launch_vscode_with<F>(
+    inst: &RunningInstance,
+    policy: LivenessPolicy,
+    spawn: impl FnOnce(&RunningInstance) -> Result<(), String>,
+    alive: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> bool,
+{
+    spawn(inst)?;
+    if wait_for_liveness(policy, alive) {
+        Ok(())
+    } else {
+        Err(liveness_error(policy))
+    }
+}
+
 /// 重新打开 VS Code：只用关闭前记录的路径（D8），不依赖 `code` CLI / PATH。
+///
+/// 启动后做**有界存活探测**：秒退不得报成功（探针 = [`is_vscode_running`]，与 footer /
+/// 状态接口同一套「VS Code 主进程是否存在」判据）。
 pub(super) fn launch_vscode(inst: &RunningInstance) -> Result<(), String> {
+    launch_vscode_with(
+        inst,
+        DEFAULT_LIVENESS_POLICY,
+        spawn_editor,
+        is_vscode_running,
+    )
+}
+
+/// 平台相关的启动动作。返回 `Ok` 只表示「进程已被拉起」，不代表它活下来了（见
+/// [`launch_vscode_with`] 的存活探测）。
+fn spawn_editor(inst: &RunningInstance) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let bundle = inst

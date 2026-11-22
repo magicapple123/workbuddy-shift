@@ -366,6 +366,9 @@
         let missing = format!("no-such-account-{}", uuid::Uuid::new_v4().simple());
         let error = switch_account_after_close(&missing, None).unwrap_err();
         assert!(error.contains("账号不存在"), "{error}");
+        // `closed = None`（本来没运行）不得走到存活探测：那会把「本来没开」误报成
+        // 「编辑器启动后立即退出」。
+        assert!(!error.contains("编辑器启动后立即退出"), "{error}");
     }
 
     /// 失败兜底（D4）：编辑器是本次我们关的 → 任何 Err 路径都要尽力开回来；本来没关的 → 一次都不许调。

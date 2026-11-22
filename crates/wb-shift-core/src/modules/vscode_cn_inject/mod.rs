@@ -248,6 +248,9 @@ pub fn resolve_state_db_path_for(
 
 mod inject;
 mod safestorage;
+/// 写入提交路径（快照 / 内容校验 / 失败回滚）单独成文件：会改动用户库的那一步要能
+/// 一眼看完，且 `inject.rs` 已接近长文件阈值（AGENTS 第 4 节）。
+mod write;
 
 pub use inject::{
     has_secret_row_for, inject_codebuddy_cn_secret, inject_codebuddy_ide_secret, inject_secret_for,
@@ -262,5 +265,11 @@ mod tests {
     use super::inject::*;
     #[allow(unused_imports)]
     use super::safestorage::*;
+    // 不加上 unused 抑制：本 glob 在 `tests/inject_rollback.rs` 里被真实使用
+    //（抑制总数受 `scripts/check-structure.mjs` 的棘轮约束）。
+    use super::write::*;
     include!("tests/inject.rs");
+    // 写入后校验 / 失败回滚用例（缺陷一）。单开文件的原因见该文件头：
+    // `tests/inject.rs` 已在 ARCHITECTURE 的 >500 行豁免表按精确行数登记。
+    include!("tests/inject_rollback.rs");
 }
