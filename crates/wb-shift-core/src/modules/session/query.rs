@@ -86,7 +86,7 @@ pub fn list_sessions_for_account(account: &Value) -> Value {
     })
 }
 
-pub(super) fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
+pub(crate) fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
     let db = paths.workbuddy_db();
     if !db.is_file() {
         return json!([]);

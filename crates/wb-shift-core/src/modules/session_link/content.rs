@@ -1,4 +1,12 @@
 //! 会话正文的摘要、完整性校验与规范化规则。
+//!
+//! 摘要有两套**口径**，刻意分开（改任一套都不影响另一套）：
+//! - 存储口径：`line_digests` / `total_digest`，供写后校验、备份清单与配对基线使用，
+//!   必须逐字反映磁盘上的字节；
+//! - 比较口径：`comparable_line_digests`，只在同步判定里使用，把「复制/同步时对末条
+//!   assistant 消息做的归一留痕」改写成确定性形式后再取摘要（见
+//!   [`comparable_line_digest`]）。归一本身是写入的既定行为，副本不该因此被判定成
+//!   「用户改动」；但存储口径不能跟着变，否则基线文件与写后校验会一起失真。
 
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -28,6 +36,9 @@ pub const NORMALIZATION_VERSION: u32 = 1;
 pub struct NormalizedContent {
     pub record_count: usize,
     pub line_digests: Vec<String>,
+    /// 判定用的行摘要：只把带「末条归一签名」的 assistant 行改写成确定性形式，
+    /// 其余行与 `line_digests` 逐字相同；没有签名时两者完全相等。
+    pub comparable_line_digests: Vec<String>,
     pub total_digest: String,
 }
 
@@ -111,6 +122,7 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
     }
 
     let mut line_digests = Vec::with_capacity(lines.len());
+    let mut comparable_line_digests = Vec::with_capacity(lines.len());
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if line.trim().is_empty() {
@@ -127,13 +139,93 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
         } else {
             Cow::Borrowed(line)
         };
-        line_digests.push(line_digest_of(&marked));
+        let digest = line_digest_of(&marked);
+        // 比较口径：只有带「末条归一签名」的行才重算，其余行直接复用存储口径的摘要。
+        comparable_line_digests.push(comparable_line_digest(line, own_session_id, &digest));
+        line_digests.push(digest);
     }
     let total_digest = total_digest_of(&line_digests);
     Ok(NormalizedContent {
         record_count: line_digests.len(),
         line_digests,
+        comparable_line_digests,
         total_digest,
+    })
+}
+
+/// 判定用的行摘要：把「末条归一签名」改写成确定性形式后再取摘要。
+///
+/// 命中改写时**只**做三件事：`status` 统一成 `completed`、删掉 `_meta.incompleteNormalized`
+/// 留痕、`_meta` 因此变空时整条删掉——时间戳不参与比较，因此不同时间做的归一得到同一个
+/// 摘要。不合条件（不是 assistant 消息、没有归一痕迹、解析失败）一律回退到 `raw_digest`：
+/// 新的比较口径绝不能把原本可读的内容变成不可读，也不能放宽其它任何差异。
+fn comparable_line_digest(line: &str, own_session_id: &str, raw_digest: &str) -> String {
+    match comparable_normalized_line(line, own_session_id) {
+        Some(rewritten) => line_digest_of(&rewritten),
+        None => raw_digest.to_string(),
+    }
+}
+
+/// 归一痕迹的便宜预筛关键字（`INCOMPLETE_META_KEY` 也含它，两个都查只是为了显式）。
+const INCOMPLETE_KEYWORD: &str = "incomplete";
+
+/// 把带「末条归一签名」的 assistant 消息行改写成确定性形式；不必要的行返回 `None`。
+///
+/// 条件（全部满足才改写）：`type == "message"`、`role == "assistant"`，且 `status` 是
+/// `"incomplete"` 或对象里存在 `_meta.incompleteNormalized`。
+fn comparable_normalized_line(line: &str, own_session_id: &str) -> Option<String> {
+    // 先做子串预筛：正文动辄上千行，只有可能带痕迹的行才值得付解析与建树的代价。
+    if !line.contains(INCOMPLETE_KEYWORD) && !line.contains(INCOMPLETE_META_KEY) {
+        return None;
+    }
+    let mut record: serde_json::Value = serde_json::from_str(line).ok()?;
+    {
+        let object = record.as_object_mut()?;
+        if object.get("type").and_then(serde_json::Value::as_str) != Some("message") {
+            return None;
+        }
+        if object.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            return None;
+        }
+        let status = object.get("status").and_then(serde_json::Value::as_str);
+        let has_marker = object
+            .get("_meta")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|meta| meta.contains_key(INCOMPLETE_META_KEY));
+        if status != Some("incomplete") && !has_marker {
+            return None;
+        }
+        // 只有这两个取值被归一统一成 `completed`；其它取值（含缺失）一律原样保留。
+        let rewrite_status = matches!(status, Some("incomplete") | Some("completed"));
+        if rewrite_status {
+            object.insert(
+                "status".to_string(),
+                serde_json::Value::String("completed".to_string()),
+            );
+        }
+        if let Some(meta) = object
+            .get_mut("_meta")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove(INCOMPLETE_META_KEY);
+        }
+        // 空 `_meta` 与「没有 `_meta`」必须等价：否则两侧只差一个空壳就被判成内容不同。
+        let empty_meta = object
+            .get("_meta")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|meta| meta.is_empty());
+        if empty_meta {
+            object.remove("_meta");
+        }
+    }
+    // `serde_json::Value` 的对象是 BTreeMap（未开启 `preserve_order`），键序确定，
+    // 因此同一份语义内容无论原来的书写顺序如何都得到同一条序列化结果。
+    let serialized = serde_json::to_string(&record).ok()?;
+    // 与存储口径一致：只替换本副本自己的会话 id，其它 sessionId 原样保留。
+    Some(if serialized.contains(own_session_id) {
+        serialized.replace(own_session_id, SESSION_ID_MARKER)
+    } else {
+        serialized
     })
 }
 

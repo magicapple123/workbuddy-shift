@@ -169,6 +169,7 @@
             normalized: crate::modules::session_link::NormalizedContent {
                 record_count: 0,
                 line_digests: Vec::new(),
+                comparable_line_digests: Vec::new(),
                 total_digest: String::new(),
             },
         };

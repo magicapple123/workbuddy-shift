@@ -576,3 +576,169 @@ fn group_fingerprint_tracks_members_and_pair_bases() {
     other_variant.variant = WbVariant::Ai;
     assert_ne!(group_fingerprint(&other_variant), baseline);
 }
+
+// -----------------------------------------------------------------------
+// 末条归一等价（issue #3 最后一条：副本永久显示「存在分歧」消不掉）
+// -----------------------------------------------------------------------
+//
+// 复制与同步写目标时都会把末条 assistant 消息的 `incomplete` 归一到 `completed`
+// 并留一条 `_meta.incompleteNormalized` 痕迹。两侧因此「行数相同、末行摘要必然不同」，
+// 按原始摘要逐行硬比会永远判 diverge，用户点多少次「以此为准」都消不掉。
+
+/// 末条 assistant 消息行；`normalized` 为真时带上归一留痕（时间戳刻意固定，
+/// 用例只关心「留痕内容不同也不影响判定」）。
+fn tail_record(index: usize, status: &str, text: &str, normalized: bool) -> String {
+    let marker = if normalized {
+        r#","_meta":{"incompleteNormalized":{"at":"20260101-000000","reason":"copy normalize"}}"#
+    } else {
+        ""
+    };
+    format!(
+        "{{\"type\":\"message\",\"role\":\"assistant\",\"index\":{index},\"status\":\"{status}\",\"text\":\"{text}\"{marker}}}\n"
+    )
+}
+
+/// 两边只差末条归一签名 → identical（原始摘要不同，比较口径相同）。
+#[test]
+fn identical_when_only_tail_normalization_signature_differs() {
+    let prefix = records(2, 0);
+    let source = format!("{prefix}{}", tail_record(2, "incomplete", "被打断", false));
+    let target = format!("{prefix}{}", tail_record(2, "completed", "被打断", true));
+
+    // 先证明这个用例不是「正文本来就一样」：存储口径必须不同，否则证明不了新规则。
+    let source_normalized = normalized_from(&source);
+    let target_normalized = normalized_from(&target);
+    assert_ne!(
+        source_normalized.line_digests, target_normalized.line_digests,
+        "末条签名不同的原始摘要必须不同，否则用例失去意义"
+    );
+    assert_eq!(
+        source_normalized.comparable_line_digests, target_normalized.comparable_line_digests,
+        "比较口径必须把归一签名折算成等价形式"
+    );
+
+    for baseline in [
+        BaselineState::Missing,
+        BaselineState::Ready(baseline_from(&prefix)),
+    ] {
+        let decision = decide_sync(&content_from(&source), &content_from(&target), &baseline);
+        assert_eq!(decision.verdict, SyncVerdict::Identical, "{baseline:?}");
+        assert!(!decision.default_checked, "一致不默认勾选");
+        assert!(decision.verdict.available_modes().is_empty(), "一致不可勾选");
+        assert!(
+            decision.reason.contains("不需要同步"),
+            "{}",
+            decision.reason
+        );
+        assert!(
+            decision.reason.contains("归一"),
+            "新增的等价路径要自解释为什么算一致：{}",
+            decision.reason
+        );
+        assert!(
+            !decision.verdict.allows(SyncMode::Overwrite),
+            "不得因为新规则放开覆盖入口"
+        );
+    }
+}
+
+/// 来源在归一副本之后又追加（末条签名仍只差归一）→ fastForward：目标仍是来源的有序前缀。
+#[test]
+fn fast_forward_when_source_appends_after_normalized_copy() {
+    let prefix = records(2, 0);
+    let target = format!("{prefix}{}", tail_record(2, "completed", "被打断", true));
+    let source = format!(
+        "{prefix}{}{}",
+        tail_record(2, "incomplete", "被打断", false),
+        records(1, 9)
+    );
+
+    let decision = decide_sync(
+        &content_from(&source),
+        &content_from(&target),
+        &BaselineState::Missing,
+    );
+    assert_eq!(decision.verdict, SyncVerdict::FastForward);
+    assert!(decision.default_checked, "只有快进默认勾选");
+    assert_eq!(
+        decision.verdict.available_modes(),
+        vec![SyncMode::FastForward]
+    );
+    // 文案按记录数差给出「新增 1 条」；`extra_a` / `extra_b` 仍是原始摘要的多重集差集
+    // （只用于解释，不参与判定），这里不断言它们的取值以免把解释口径固化。
+    assert!(
+        decision.reason.contains("新增 1 条"),
+        "{}",
+        decision.reason
+    );
+}
+
+/// 目标在归一副本之后又追加 → ahead（目标已完整包含来源，本次没有可写内容）。
+#[test]
+fn ahead_when_target_appends_after_normalized_copy() {
+    let prefix = records(2, 0);
+    let source = format!("{prefix}{}", tail_record(2, "incomplete", "被打断", false));
+    let target = format!(
+        "{prefix}{}{}",
+        tail_record(2, "completed", "被打断", true),
+        records(1, 9)
+    );
+
+    let decision = decide_sync(&content_from(&source), &content_from(&target), &BaselineState::Missing);
+    assert_eq!(decision.verdict, SyncVerdict::Ahead);
+    assert!(!decision.default_checked);
+    assert!(decision.verdict.available_modes().is_empty());
+    assert!(
+        decision.reason.contains("已包含"),
+        "{}",
+        decision.reason
+    );
+}
+
+/// 末条内容本身不同（不只是签名）→ 仍判 diverge，不得被新规则放过。
+#[test]
+fn diverge_when_tail_content_differs_beyond_normalization() {
+    let prefix = records(2, 0);
+    let source = format!("{prefix}{}", tail_record(2, "incomplete", "我的回答", false));
+    let target = format!("{prefix}{}", tail_record(2, "completed", "别人的回答", true));
+
+    let decision = decide_sync(
+        &content_from(&source),
+        &content_from(&target),
+        &BaselineState::Ready(baseline_from(&prefix)),
+    );
+    assert_eq!(decision.verdict, SyncVerdict::Diverge);
+    assert!(!decision.default_checked);
+    assert_eq!(
+        decision.verdict.available_modes(),
+        vec![SyncMode::Overwrite],
+        "有效可比较的冲突仍保留显式覆盖入口"
+    );
+}
+
+/// 中间行带归一留痕、其它内容确实不同 → 仍判 diverge。
+///
+/// 归一改写对任意一行都会尝试（不只看末行），所以必须验证它不会把「其它真实差异」一起吃掉。
+#[test]
+fn diverge_when_middle_line_carries_marker_and_other_content_differs() {
+    let prefix = records(1, 0);
+    let source = format!(
+        "{prefix}{}{}",
+        tail_record(1, "incomplete", "被打断", false),
+        records(1, 50)
+    );
+    let target = format!(
+        "{prefix}{}{}",
+        tail_record(1, "completed", "被打断", true),
+        records(1, 60)
+    );
+
+    let decision = decide_sync(
+        &content_from(&source),
+        &content_from(&target),
+        &BaselineState::Ready(baseline_from(&prefix)),
+    );
+    assert_eq!(decision.verdict, SyncVerdict::Diverge);
+    assert!(!decision.default_checked);
+    assert!(!decision.verdict.allows(SyncMode::FastForward));
+}

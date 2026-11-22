@@ -187,6 +187,16 @@ fn mirror_ahead_reason(counts: (usize, usize, usize)) -> String {
 ///    基线属于来源侧被删减/回滚，保持下一条的显式覆盖入口）；
 /// 7. 其余（双方变化、来源重写/重排/压缩）→ [`SyncVerdict::Diverge`]。
 ///
+/// 第 2～4、6 条的前缀/相等比较都走 `comparable_line_digests`（比较口径，见
+/// [`super::content`] 模块注释）：**只**把「复制/同步写目标时对末条 assistant 消息做的
+/// `incomplete` 归一留痕」折算成等价形式。归一本身是复制与同步的既定行为，副本因此与
+/// 来源的原始摘要不同，但那不是用户改动——按原始摘要逐行硬比会把这类副本永久判成
+/// `Diverge`（issue #3 最后一条：点「以此为准」也消不掉「存在分歧」）。约定：
+/// 两边只差这条归一签名时判 [`SyncVerdict::Identical`]。
+///
+/// 第 5、6 条里与**基线**的比较仍走原始 `line_digests`：基线存的是写入当时的原始摘要，
+/// 换成比较口径就等于放宽「目标是否已偏离基线」，这是本次刻意不改的部分。
+///
 /// 纯函数：不读文件、不写文件、无时间依赖。
 pub fn decide_sync(
     source: &ContentState,
@@ -208,26 +218,35 @@ pub fn decide_sync(
             return SyncDecision::unknown(format!("目标账号的内容无法确认：{reason}"))
         }
     };
+    // 计数是给用户看的**解释**，因此与判定同一口径（比较口径）：否则判成一致（identical）的组
+    // 仍会显示「目标账号独有 1 条」，自相矛盾。没有归一签名的内容两者逐元素相等，既有计数不变。
     let counts = multiset_counts(
-        &source.normalized.line_digests,
-        &target.normalized.line_digests,
+        &source.normalized.comparable_line_digests,
+        &target.normalized.comparable_line_digests,
     );
 
-    if source.normalized.line_digests == target.normalized.line_digests {
-        return SyncDecision::decide(
-            SyncVerdict::Identical,
-            counts,
+    // 比较口径：原始摘要不同、但只差「末条归一签名」时仍判一致（见函数文档第 2 条）。
+    if source.normalized.comparable_line_digests == target.normalized.comparable_line_digests {
+        // 两侧原始摘要也相同时沿用原文案；只在新增的等价路径上用能自解释的那句，
+        // 让用户明白「副本末条被复制规则归一过」不是分歧。
+        let reason = if source.normalized.line_digests == target.normalized.line_digests {
             format!(
                 "两边的内容一致（各 {} 条），不需要同步",
                 source.normalized.record_count
-            ),
-        );
+            )
+        } else {
+            format!(
+                "两边内容一致（副本末条已按复制规则归一，各 {} 条），不需要同步",
+                source.normalized.record_count
+            )
+        };
+        return SyncDecision::decide(SyncVerdict::Identical, counts, reason);
     }
     // 目标内容全部包含在来源里（B 是 A 的严格有序前缀）：追加同步零覆盖，
     // 不依赖基线即可判定（对齐 git fast-forward 的 ancestor 语义）。
     if is_strict_ordered_extension(
-        &target.normalized.line_digests,
-        &source.normalized.line_digests,
+        &target.normalized.comparable_line_digests,
+        &source.normalized.comparable_line_digests,
     ) {
         let added = source.normalized.record_count - target.normalized.record_count;
         return SyncDecision::decide(
@@ -240,8 +259,8 @@ pub fn decide_sync(
         // 目标已完整包含来源（A ⊊ B 的镜像）：普通同步没有可写内容，
         // 与祖先快进同一原则，不依赖基线即可判定，且不授权任何写入。
         if is_strict_ordered_extension(
-            &source.normalized.line_digests,
-            &target.normalized.line_digests,
+            &source.normalized.comparable_line_digests,
+            &target.normalized.comparable_line_digests,
         ) {
             return SyncDecision::decide(SyncVerdict::Ahead, counts, mirror_ahead_reason(counts));
         }
@@ -251,6 +270,7 @@ pub fn decide_sync(
                 .unwrap_or_else(|| "找不到上次同步的记录，无法确认两边内容".to_string()),
         );
     };
+    // 基线比较用原始摘要：基线存的是写入当时的原始字节摘要（口径不随判定放宽）。
     if source.normalized.line_digests == record.line_digests {
         return SyncDecision::decide(
             SyncVerdict::Ahead,
@@ -261,8 +281,8 @@ pub fn decide_sync(
     // A 是 B 的严格有序前缀（目标已完整包含来源）：本次没有可写内容 → ahead。
     // B 恰好停在基线 → 是来源侧被删减/回滚，维持 diverge 的显式覆盖入口。
     if is_strict_ordered_extension(
-        &source.normalized.line_digests,
-        &target.normalized.line_digests,
+        &source.normalized.comparable_line_digests,
+        &target.normalized.comparable_line_digests,
     ) && target.normalized.line_digests != record.line_digests
     {
         return SyncDecision::decide(SyncVerdict::Ahead, counts, mirror_ahead_reason(counts));

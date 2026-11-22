@@ -139,6 +139,98 @@
         assert_eq!(common_base_branches(&views, &active_indexes(&views)), None);
     }
 
+    /// 由**原始 JSONL 行**构造内容快照。
+    ///
+    /// 与 `ready_lines` 的区别：后者把入参当成 id 再包一层 `{"id":...}`，造不出
+    /// 「assistant 消息 + 归一留痕」这类真实记录形态，而这正是本用例要验的摘要口径。
+    fn ready_jsonl(lines: &[&str]) -> ContentState {
+        let text = lines.join("\n");
+        ContentState::Ready(ContentSnapshot {
+            full_digest: full_digest_of(text.as_bytes()),
+            normalized: normalize_jsonl(&text, "unrelated-session-id").unwrap(),
+            text,
+        })
+    }
+
+    /// 末条 `incomplete` 归一后的副本与来源是**同一个版本**，不是独立分支。
+    ///
+    /// 三成员组：老副本（base）、来源（base + `incomplete` 尾）、新副本（base + 归一后的尾）。
+    /// 两两判定分别是 identical / fastForward（老副本可安全快进），组徽标必须是 `behind`。
+    /// 改造前 `common_base_branches` 比原始摘要，会把来源与归一后的新副本当成两条独立分支
+    /// 返回 `Some(...)`，`view.rs` 随后把 `summaryStatus` 强行改成 `diverge`，与同一组两两
+    /// `decide_sync` 的结论自相矛盾（issue #3 最后一条：「存在分歧」消不掉）。
+    #[test]
+    fn normalized_copy_is_not_an_independent_branch() {
+        let base = [
+            r#"{"type":"user","text":"你好"}"#,
+            r#"{"type":"message","role":"assistant","status":"completed","text":"hi"}"#,
+        ];
+        // 来源末条停在 incomplete（用户中断 / 限流 / 报错）。
+        let source_lines = [
+            base[0],
+            base[1],
+            r#"{"type":"message","role":"assistant","status":"incomplete","text":"被打断"}"#,
+        ];
+        // 复制 / 同步写目标时的归一形态：`status` 改 completed + `_meta.incompleteNormalized` 留痕。
+        let normalized_lines = [
+            base[0],
+            base[1],
+            r#"{"type":"message","role":"assistant","status":"completed","text":"被打断","_meta":{"incompleteNormalized":{"at":"20260101-000000","reason":"copy normalize"}}}"#,
+        ];
+
+        let mut views = vec![
+            member_view("old", "a", MemberState::Active, ready_jsonl(&base)),
+            member_view(
+                "source",
+                "b",
+                MemberState::Active,
+                ready_jsonl(&source_lines),
+            ),
+            member_view(
+                "copy",
+                "c",
+                MemberState::Active,
+                ready_jsonl(&normalized_lines),
+            ),
+        ];
+        let baseline = session_link::BaselineState::Missing;
+        let decide = |source: usize, target: usize| {
+            session_link::decide_sync(&views[source].content, &views[target].content, &baseline)
+        };
+        // 前提：两两判定本来就认为「来源与归一副本一致、老副本可快进」。
+        assert_eq!(decide(1, 2).verdict, SyncVerdict::Identical);
+        assert_eq!(decide(2, 1).verdict, SyncVerdict::Identical);
+        assert_eq!(decide(1, 0).verdict, SyncVerdict::FastForward);
+        assert_eq!(decide(0, 1).verdict, SyncVerdict::Ahead);
+
+        let active = active_indexes(&views);
+        assert_eq!(
+            common_base_branches(&views, &active),
+            None,
+            "归一后的副本不是独立分支：否则组徽标被强行改成 diverge"
+        );
+
+        let mut matrix = HashMap::new();
+        for (source, target) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+            let decision = session_link::decide_sync(
+                &views[source].content,
+                &views[target].content,
+                &baseline,
+            );
+            matrix.insert((source, target), (decision.verdict, decision.reason));
+        }
+        let (safe_source, summary) = aggregate_group_state(&mut views, &active, &matrix);
+        assert_eq!(
+            safe_source,
+            Some(1),
+            "来源是唯一安全的操作来源：老副本可快进、归一副本内容一致"
+        );
+        assert_eq!(summary, "behind");
+        assert_eq!(views[0].version_status, "behind");
+        assert_eq!(views[1].version_status, "latest");
+        assert_eq!(views[2].version_status, "latest");
+    }
+
     #[test]
     fn aggregate_keeps_unknown_and_missing_distinct() {
         let mut unknown_views = vec![

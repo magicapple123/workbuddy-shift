@@ -325,7 +325,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1518 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/vscode_cn_inject/tests/inject.rs` | 542 | 测试 | state.vscdb 锁冲突与重试用例（busy_timeout / 失败分类 / 重试循环）共用同一套 `hold_exclusive` + `insert_row` 夹具，拆开会让「同一把库、同一把锁、唯一变量是 attempts」的对照失效。 | 测试继续膨胀时把「锁冲突与重试」用例组拆到 `tests/inject_lock.rs`。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1282 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |
-| `crates/wb-shift-core/src/modules/session/tests/sync.rs` | 1464 | 测试 | 会话同步主题测试分组。 | 同上，保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/sync.rs` | 1737 | 测试 | 会话同步主题测试分组（含「末条 incomplete 归一后不得永久分歧」的四条收敛用例，以及走真实复制链路 + 组载荷装配（`detail_at`）断言 `summaryStatus` 的三成员组场景，见 issue #3 最后一条）。「三成员组不得被末条归一误判为分歧」这条另带反假绿锚点（成员正文必须真读到：三个成员 `contentState == "ready"` 且 `recordCount > 0`），避免断言在空载荷上假绿。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 839 | 测试 | 会话执行/恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/run.rs` | 867 | 测试 | 会话编排主题测试分组。 | 同上，保留。 |
 | `companion-ui/src/desktop/rail-controller.ts` | 734 | 单一状态所有者 | 悬浮栏的唯一状态所有者（文件头已声明设计意图），拆分会让同一份布局/动画状态跨文件。 | 保持单文件；如继续增长，先抽纯函数（布局计算），状态仍留在 controller。 |
@@ -334,11 +334,11 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/session/copy/db_spaces.rs` | 519 | 会话复制 | 目标账号空间匹配、新建与回滚共用同一份路径归一（`space_path_key`）与列探测结果：拆开会让「匹配口径」与「建行口径」分叉，而两者必须对同一目录给出同一结论。 | 下一轮按「查找（`find_target_space_id`/`SpaceLookup`）」与「新建/回滚（`insert_target_space`）」拆成 `copy/space_lookup.rs` 与 `copy/space_create.rs`；拆分前先补两者共用的路径键单测。 |
 | `crates/wb-shift-core/src/modules/checkin/tests/window.rs` | 702 | 测试 | 签到的时间窗口、到点口径（跨日补签 / 只看今日 / 窗口外限量补签）与周期延迟三组规则互为前提，用例集中放置便于对照口径差异。 | 测试继续膨胀时按「窗口解析」「到点判定」「周期延迟」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/variant.rs` | 650 | 单一来源 | 档位（国内/国际）规则与路径的单一来源，刻意集中；拆开会让同一规则出现多个入口。 | 保持单文件；新增档位时只在这里扩展。 |
-| `crates/wb-shift-core/src/modules/session_link/tests/sync_decision.rs` | 578 | 测试 | 同步判定测试分组。 | 保留。 |
+| `crates/wb-shift-core/src/modules/session_link/tests/sync_decision.rs` | 744 | 测试 | 同步判定测试分组（含「只差末条归一签名算一致」的五条纯函数用例）。 | 保留。 |
 | `crates/companion-core/tests/custom.rs` | 541 | 测试 | 自定义集成集成测试，整体随上游迁移。 | 保留。 |
 | `crates/wb-shift-server/src/api/tests.rs` | 677 | 测试 | api 层边界测试集中在一个文件（SPA 回退 / Host 边界与 `WB_SHIFT_ALLOWED_HOSTS` 白名单 / Origin 口径选择 `origin_policy` / 请求体 DTO 契约 / 切换运行标记 / 清理接口的破坏性默认），共享 `router_request`、`post_json`、`router_status` 三个 helper，按域拆文件会把它们复制到每个子文件。 | 保留；边界层测试再显著膨胀时，先把三个 helper 抽到 `api/tests/support.rs` 再按域拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/plugin_liveness.rs` | 823 | 测试 | 插件 / IDE 的存活判定主题测试组（会话目录证据、空工作区分母、`Partial` 判不了时清理入口的 `pruneBlocked`、隐藏集合 ≡ 清理集合、客户端与档位隔离），共用 `tests/editor.rs` 的 `TempStore` 造数夹具；按主题分组而非按行数拆分。 | 继续膨胀时把 `pruneBlocked` 相关用例拆到 `tests/prune_blocked.rs`。 |
-| `crates/wb-shift-core/src/modules/session_groups/view.rs` | 664 | 视图装配 | 列表/详情/卡片载荷共用一份成员快照与判定矩阵；拆开会让「同一份摘要口径」跨文件传递，先保持单文件。列表的存活过滤按客户端分派（WorkBuddy 读库、插件/IDE 走 `liveness`），与清理共用同一份组级汇总。 | 继续增长时把卡片载荷装配（`group_payload`）与共用口径（`member_snapshot`/`summary_text`）按职责再拆。 |
+| `crates/wb-shift-core/src/modules/session_groups/view.rs` | 733 | 视图装配 | 列表/详情/卡片载荷共用一份成员快照与判定矩阵；拆开会让「同一份摘要口径」跨文件传递，先保持单文件。列表的存活过滤按客户端分派（WorkBuddy 读库、插件/IDE 走 `liveness`），与清理共用同一份组级汇总。本轮为「组徽标能不能被测试」抽出 `detail_at`（显式注入关联存储根 + 成员路径解析器 `PayloadContext`）：判定、聚合与徽标合成必须仍与生产同一份实现，否则「纯函数测到了、真实载荷没接上」的缺口会重演。 | 继续增长时把卡片载荷装配（`group_payload`）与共用口径（`member_snapshot`/`summary_text`）按职责再拆；`detail`/`detail_at` 的转发关系保持单文件。 |
 | `crates/wb-shift-core/src/modules/vscode_session_sync/tests/sync.rs` | 523 | 测试 | 插件侧同步/预览主题测试分组（含代表成员与存活过滤用例）。 | 保留；测试继续膨胀时按「复制登记」「预览」「同步执行」再拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/maintenance.rs` | 1131 | 测试 | 失效组清理与列表过滤的判定/备份/拒绝语义共用一套造数夹具（临时工具存储根、`sessions` 表、插件工作区索引）；补齐插件与 IDE 的清理、索引部分损坏（`Partial`）的拒绝与放行、无失效组时不重写主表、两客户端互不串用等用例后超过阈值，属测试分组而非生产逻辑。 | 继续膨胀时按「WorkBuddy（`sessions` 表）」与「插件 / IDE（工作区索引）」两个主题拆成 `maintenance.rs` + `plugin_prune.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/editor.rs` | 565 | 测试 | 管理页/客户端作用域/目标兼容性测试与共享夹具 `TempStore`（临时工具存储根、`sessions` 表、插件工作区索引造数）集中在一个文件；夹具被同模块多个 `include!` 的测试共用，按行数拆开只会把同一份造数逻辑复制多份。 | 夹具继续增长时抽到 `tests/support.rs`（与 `vscode_session_sync/tests/fixtures.rs` 同构）。 |
@@ -350,7 +350,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `scripts/smoke/dispose.py` | 818 | 脚本（处置闸门） | 整条链里**唯一**会改变仓库外部状态的一步，所以四道闸门（单 run ≤3 / 每类每版本 ≤1 / `attempt>=2` 不重跑 / 白名单动作）与「怎么拼 gh 命令」写在同一处：把它们分开就等于让「闸门」与「执行」之间出现可绕过的一层。约 1/4 是自测（优先级、上限、attempt 闸门、dry_run 零调用、rejected、命令形态）。 | 若将来引入新的处置动作（例如 `dispatch-build`），先把白名单 + `build_command` + 闸门抽成 `dispose/policy.py`，CLI 与报告渲染留在原文件。 |
 | `crates/wb-shift-core/src/modules/jetbrains/detect.rs` | 791 | 客户端识别 | WorkBuddy / CodeBuddy IDE / CLI / VS Code / JetBrains 五类客户端的安装路径、进程、插件目录与版本探测共用一组平台分支（同一路径要判多个客户端）；拆开会把同一份平台判断复制成多份。第三轮新增 JetBrains 诊断入口、第五轮（R5-19）加入双配置根与 16 产品识别后超过阈值；产品表已抽到 `jetbrains/products.rs`，本文件只剩安装根解析、配置目录映射与进程枚举。 | 下一轮改识别逻辑时按客户端抽 `jetbrains/detect/{workbuddy,codebuddy,jetbrains}.rs`，共用平台分支留在 `mod.rs`。 |
 | `crates/wb-shift-core/src/modules/jetbrains/tests/switch.rs` | 809 | 测试 | 切换流程用例（账号数据、IDE 状态、失败回滚、诊断输出）共用一套造数夹具，属测试分组而非生产逻辑。R5-19 的产品表 / 双配置根用例另放 `tests/products.rs`，本文件不再膨胀。 | 继续膨胀时按「正常切换」「失败回滚」「诊断」三组拆文件。 |
-| `crates/wb-shift-core/src/modules/session_groups/graph.rs` | 502 | 批次编排 | 统一批次（复制/同步/登记/回滚）刚越过阈值；计划与实际执行共享同一份批次状态，拆开要跨文件传递可变状态。 | 新增客户端类型时先把批次计划抽到 `session_groups/graph/plan.rs`，执行留在原文件。 |
+| `crates/wb-shift-core/src/modules/session_groups/graph.rs` | 510 | 批次编排 | 统一批次（复制/同步/登记/回滚）刚越过阈值；计划与实际执行共享同一份批次状态，拆开要跨文件传递可变状态。本轮把组级 N 路识别（`common_base_branches`）的摘要换成与 `decide_sync` 同一套比较口径（`comparable_line_digests`），它必须与两两判定同处一组判据里，否则「组徽标 diverge、两两 behind」会自相矛盾。 | 新增客户端类型时先把批次计划抽到 `session_groups/graph/plan.rs`，执行留在原文件；N 路识别与聚合判定保持同文件（同一份比较口径）。 |
 | `crates/wb-shift-core/src/modules/session_groups/members.rs` | 569 | 成员操作 | 成员增删与组一致性校验共用同一份成员快照（`member_snapshot`），拆开会让校验与写入读到不同版本。 | 下次改成员语义时把「校验」与「落盘」按职责拆开。 |
 | `crates/wb-shift-core/src/modules/session_groups/sync.rs` | 591 | 配对 | 配对算法与失败回滚共用同一事务状态；第三轮加入 JetBrains 一致性守卫后超过阈值。 | 下一轮把「配对判定」抽成纯函数文件，回滚保持原位。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/jetbrains.rs` | 833 | 测试 | JetBrains 组同步/守卫用例，共用 `tests/editor.rs` 的造数夹具。 | 继续膨胀时按「守卫拒绝」「同步执行」拆两组。 |
@@ -374,7 +374,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/automation_sync.rs` | 761 | 定时任务同步 | 只读统计、备份、复制、暂停与设置读写共用同一份 `automations` 列清单与判定函数，拆开会让「跳过的任务」与「复制的列」口径分叉；其中约 300 行为单测。 | 下一轮把 `tests` 段拆到 `automation_sync_tests.rs` 即可回落到 500 行内。 |
 | `crates/wb-shift-core/src/modules/refresh.rs` | 1775 | 认证刷新 | 失败分级、标记自愈、单飞与退避共用同一份账号库读写与 `accounts.json` 语义；拆开会让「写标记」与「清标记」读到不同版本。 | 下一轮把 `verify_*` 复核调度抽到 `refresh/verify.rs`。 |
 | `crates/wb-shift-core/src/modules/session/sync/preview.rs` | 1054 | 同步预览 | 判定、指纹缓存、预览凭据绑定三者共享同一份内容身份（`ContentStamp`），拆开会让缓存键与判定前提分叉。 | 下一轮把 `PreviewDecision*` 缓存段抽到 `preview/cache.rs`。 |
-| `crates/wb-shift-core/src/modules/session_link/content.rs` | 791 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`。 |
+| `crates/wb-shift-core/src/modules/session_link/content.rs` | 883 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。本轮加入「比较口径」`comparable_line_digests`（把复制/同步写目标时的末条归一签名折算成确定性形式），它必须与存储口径（`line_digests`/`total_digest`）在读同一行的同一个循环里算出，两套口径分开维护正是不拆的理由。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`；比较口径随 `normalize_jsonl` 留在本文件。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 502 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |
 | `src/pages/credit-stats/data.ts` | 586 | 纯逻辑 | 档位过滤、客户端筛选（明细重算）、账本形状转换三套口径都在这里收敛，页面只调用；拆开会让同一口径出现多份实现。 | 下一轮把账本转换抽到 credit-stats/ledger-view.ts。 |
 | `src/pages/credit-stats/index.tsx` | 636 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |

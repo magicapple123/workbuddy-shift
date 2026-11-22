@@ -234,12 +234,19 @@ pub(super) fn build_group_payloads(
         .map(|count| count.get())
         .unwrap_or(1)
         .clamp(1, 12);
+    // 列表载荷固定按成员档位解析数据根（生产口径）；注入版本只在 `detail_at` 里用。
+    let context = PayloadContext {
+        client,
+        scope,
+        paths,
+        member_paths: &SessionPaths::for_variant,
+    };
     if workers <= 1 || groups.len() <= 1 {
         return groups
             .iter()
             .map(|group| {
                 let mut cache = shared.clone();
-                group_payload(client, scope, paths, group, accounts, &mut cache, false)
+                group_payload(&context, group, accounts, &mut cache, false)
             })
             .collect();
     }
@@ -251,13 +258,16 @@ pub(super) fn build_group_payloads(
         for _ in 0..workers {
             let cursor = &cursor;
             let collected = &collected;
+            // 与 `cursor` / `collected` 同法：按引用捕获，避免 `move` 把上下文搬进第一个线程。
+            let context = &context;
             s.spawn(move || loop {
                 let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(group) = groups.get(index) else {
                     break;
                 };
                 let mut cache = shared.clone();
-                let value = group_payload(client, scope, paths, group, accounts, &mut cache, false);
+                // `context` 在本循环里已是引用（见上一行），直接用。
+                let value = group_payload(context, group, accounts, &mut cache, false);
                 // 收集器只做排序前暂存：即便有线程 panic 导致中毒，thread::scope 也会在
                 // 退出时把 panic 抛出；这里取回内部 Vec 继续 push，避免二次 panic。
                 locks::recover(collected).push((index, value));
@@ -271,15 +281,61 @@ pub(super) fn build_group_payloads(
     items.into_iter().map(|(_, value)| value).collect()
 }
 
+/// 成员会话行 / 正文的路径解析器（`variant → SessionPaths`）。
+///
+/// 生产传 [`SessionPaths::for_variant`]（按成员档位解析数据根），用例可传同一份临时根，
+/// 从而**不读写真实 `~/.workbuddy-shift`** 也能覆盖组载荷的合成链路（见 [`detail_at`]）。
+/// 这里只替换「从哪里读成员内容」，判定与徽标合成（`aggregate_group_state` /
+/// `common_base_branches` / 组级 `summaryStatus`）用的仍是同一份实现。
+///
+/// 带 `Sync`：列表载荷会按分组切到多个线程并行构建（`build_group_payloads`），解析器要被
+/// 多个线程共享。可见性与 [`detail_at`] 对齐（`pub(crate)`），避免 `private_interfaces`
+/// 这类「类型比使用它的函数更私有」的告警。
+pub(crate) type MemberPaths<'a> = &'a (dyn Fn(WbVariant) -> SessionPaths + Sync);
+
+/// 组载荷装配的上下文：客户端、作用域、关联存储根与成员路径解析器。
+///
+/// 打包成一个结构而不是继续加参数：`group_payload` 的参数已经到 clippy 的上限
+/// （8/7），且这四项在整次装配里是**不变**的（只有 group / cache 会变）。
+pub(super) struct PayloadContext<'a> {
+    pub(super) client: SessionClient,
+    pub(super) scope: Option<WbVariant>,
+    /// 关联存储根（关联表 / 基线 / 预览凭据都在它下面）。
+    pub(super) paths: &'a SessionPaths,
+    /// 成员会话行与正文的解析器（生产 = [`SessionPaths::for_variant`]）。
+    pub(super) member_paths: MemberPaths<'a>,
+}
+
 /// Load one group and all saved members, including stale/superseded entries.
 pub fn detail(
     client: SessionClient,
     scope: Option<WbVariant>,
     group_id: &str,
 ) -> Result<Value, String> {
+    detail_at(
+        &client.store_paths(),
+        &SessionPaths::for_variant,
+        client,
+        scope,
+        group_id,
+    )
+}
+
+/// [`detail`] 的显式路径版本：关联存储根与成员档位解析都由调用方给出。
+///
+/// 生产仍走 [`detail`]（`client.store_paths()` + [`SessionPaths::for_variant`]）；用例用它把
+/// 临时数据根注入进来，从而能断言 `summaryStatus` / `divergence` 这类**组级字段**——它们是
+/// 用户在列表里看到「存在分歧」徽标的来源，纯函数用例覆盖不到
+/// （与 `list_at` / `list_at_with_index_root` 同一套做法）。
+pub(crate) fn detail_at(
+    paths: &SessionPaths,
+    member_paths: MemberPaths<'_>,
+    client: SessionClient,
+    scope: Option<WbVariant>,
+    group_id: &str,
+) -> Result<Value, String> {
     client.validate_scope(scope)?;
-    let paths = client.store_paths();
-    let store = match session_link::load_store(&paths) {
+    let store = match session_link::load_store(paths) {
         StoreState::Ready(store) => store,
         StoreState::Missing => return Err("会话关联组不存在".to_string()),
         // 与列表载荷的 `pruneBlocked`、批量清理的 `Err` 共用同一句（单一来源）。
@@ -293,10 +349,14 @@ pub fn detail(
         .find(|group| group.id == group_id && group_is_in_scope(client, scope, group))
         .ok_or_else(|| "会话关联组不存在或不属于当前客户端".to_string())?;
     let accounts = account::load_accounts_at(&account::accounts_file_in(&paths.store_root));
+    let context = PayloadContext {
+        client,
+        scope,
+        paths,
+        member_paths,
+    };
     let mut cache = HashMap::new();
-    Ok(group_payload(
-        client, scope, &paths, group, &accounts, &mut cache, true,
-    ))
+    Ok(group_payload(&context, group, &accounts, &mut cache, true))
 }
 
 pub(super) fn group_is_in_scope(
@@ -325,14 +385,18 @@ pub(super) fn ide_flavor(variant: WbVariant) -> codebuddy_ide_session::IdeFlavor
 }
 
 pub(super) fn group_payload(
-    client: SessionClient,
-    scope: Option<WbVariant>,
-    paths: &SessionPaths,
+    context: &PayloadContext<'_>,
     group: &LinkGroup,
     accounts: &[Value],
     cache: &mut HashMap<(String, String), Arc<Vec<Value>>>,
     include_detail: bool,
 ) -> Value {
+    let PayloadContext {
+        client,
+        scope,
+        paths,
+        member_paths,
+    } = *context;
     let root = client.data_root();
     let spec = client.store_spec();
     let mut views = group
@@ -350,7 +414,7 @@ pub(super) fn group_payload(
                 .or_else(|| member.account_id.clone())
                 .unwrap_or_else(|| member.uid.clone());
             let (title, project_label, updated_at, content) =
-                member_snapshot(client, &root, spec, group, member, cache);
+                member_snapshot(client, &root, spec, group, member, cache, member_paths);
             let mut member = member.clone();
             // Correct legacy plugin labels from the account library; region never selects its data root.
             // 插件型客户端（VS Code / JetBrains）的存储与地区无关，档位一律取账号库。
@@ -490,15 +554,20 @@ pub(super) fn member_snapshot(
     group: &LinkGroup,
     member: &LinkMember,
     cache: &mut HashMap<(String, String), Arc<Vec<Value>>>,
+    member_paths: MemberPaths<'_>,
 ) -> (String, String, i64, ContentState) {
     match client {
         SessionClient::Workbuddy => {
             let variant = session_link::member_variant(group, member);
+            // 生产 = `SessionPaths::for_variant(variant)`（按成员档位）；用例注入同一份临时根。
+            let paths = member_paths(variant);
             let rows = cache
                 .entry((variant.as_str().to_string(), member.uid.clone()))
                 .or_insert_with(|| {
+                    // 与 `prefetch_session_rows` 同源：都落在 `list_sessions_for_user_at` 上，
+                    // 只是这里按注入的路径解析，避免用例读写真实数据目录。
                     Arc::new(
-                        session::list_sessions_for_user(variant, &member.uid)
+                        session::list_sessions_for_user_at(&paths, &member.uid)
                             .as_array()
                             .cloned()
                             .unwrap_or_default(),
@@ -521,11 +590,11 @@ pub(super) fn member_snapshot(
                 .and_then(|row| row.get("updatedAt"))
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let member_paths = SessionPaths::for_variant(variant);
             let content = if row.is_none() {
                 ContentState::Missing
             } else {
-                session::member_content_state(&member_paths, &member.session_id)
+                // 与 `list_sessions_for_user_at` 用同一份解析结果：行与正文必须同源。
+                session::member_content_state(&paths, &member.session_id)
             };
             (
                 title,

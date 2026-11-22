@@ -69,6 +69,9 @@ pub fn read_session_content(conv_dir: &Path, conversation_id: &str) -> ContentSt
     let normalized = NormalizedContent {
         record_count: line_digests.len(),
         total_digest: session_link::total_digest_of(&line_digests),
+        // 插件侧按「一条消息一行」建模，没有「末条 assistant 归一」这回事：
+        // 判定口径与存储口径因此完全相同。
+        comparable_line_digests: line_digests.clone(),
         line_digests,
     };
     ContentState::Ready(ContentSnapshot {

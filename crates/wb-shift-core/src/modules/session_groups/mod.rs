@@ -127,6 +127,10 @@ pub use members::{
 };
 pub use sync::{jetbrains_restart_precheck, preview_pair, sync_pair, vscode_restart_precheck};
 pub use view::{detail, list};
+// 用例注入临时数据根后读组详情（断言 `summaryStatus` / `divergence`）；生产仍走 `detail`。
+// 与 `session_link::real_read_count` 同形：只在测试构建里导出，避免生产构建出现未使用导入。
+#[cfg(test)]
+pub(crate) use view::detail_at;
 
 /// 插件侧同步入口运行中的报错文案（`restart=false`，逐字保持既有文案）。
 pub(super) const VSCODE_SYNC_RUNNING_HINT: &str =

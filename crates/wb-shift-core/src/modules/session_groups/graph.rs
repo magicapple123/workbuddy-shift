@@ -277,6 +277,12 @@ pub fn sync_safe_batch(
 /// Recognize one present shared snapshot followed by independent append-only branches.
 /// This uses normalized ordered content, so timestamps and record counts cannot invent ancestry.
 /// A more complex history stays in the generic divergence state.
+///
+/// 摘要取的是**比较口径**（`comparable_line_digests`，与 [`session_link::decide_sync`] 同一套）：
+/// 复制与同步写目标时会把末条 assistant 的 `incomplete` 归一成 `completed` 并留痕，那行因此在
+/// 原始摘要上与来源不同，但它不是「用户改动」。若这里仍比原始摘要，三成员组（老副本 + 来源
+/// `incomplete` 尾 + 归一后的新副本）会被判成「独立分支」并强行把组徽标改成 `diverge`，与同一
+/// 组两两 `decide_sync` 得出的 `behind`（可安全同步）自相矛盾——issue #3 最后一条。
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CommonBaseBranches {
     pub(super) common: Vec<usize>,
@@ -291,7 +297,9 @@ pub(super) fn common_base_branches(
         return None;
     }
     let lines = |index: usize| match &views[index].content {
-        ContentState::Ready(snapshot) => Some(snapshot.normalized.line_digests.as_slice()),
+        ContentState::Ready(snapshot) => {
+            Some(snapshot.normalized.comparable_line_digests.as_slice())
+        }
         _ => None,
     };
     let mut versions: Vec<Vec<usize>> = Vec::new();

@@ -1462,3 +1462,276 @@ fn execution_content_read_is_never_served_from_cache() {
         other => panic!("目标正文应可验证，实际 {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// 末条 incomplete 归一不得让组永久「存在分歧」（issue #3 最后一条）
+// ---------------------------------------------------------------------------
+//
+// 复制与同步写目标时都会把末条 assistant 的 `incomplete` 归一到 `completed` 并留痕，
+// 于是「刚复制完」「刚点过以此为准」的组在原始摘要上永远与来源差一行 → 判定恒为
+// diverge，用户消不掉「存在分歧」。下面三条覆盖这条链路的三个入口：
+// 复制 → 预览 / 覆盖 → 预览 / 快进 → 预览。
+
+/// 造一个「来源会话已结束、末条停在 incomplete」的环境（复制与同步都按终态归一）。
+fn settled_incomplete_env(name: &str) -> Env {
+    let env = ready_env_with_status(name);
+    // `source_settled_for_normalize` 只认终态集合（completed/error/terminated/archived）。
+    env.set_status("sess-1", "completed");
+    env.add_body("sess-1", &incomplete_body("sess-1"));
+    env
+}
+
+/// 复制出一个「末条已归一」的副本 → 立即预览必须是 identical（改造前恒为 diverge）。
+#[test]
+fn copy_incomplete_tail_previews_as_identical() {
+    let env = settled_incomplete_env("sync-copy-incomplete-identical");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    // 前提：副本确实被归一了（末条 completed + 留痕），否则这个用例证明不了什么。
+    let target_text = std::fs::read_to_string(env.body_path(&target_id)).unwrap();
+    assert!(
+        target_text.contains("incompleteNormalized"),
+        "副本末条应带归一留痕：{target_text}"
+    );
+    assert!(
+        !target_text.contains("\"status\":\"incomplete\""),
+        "副本末条不应再停在 incomplete：{target_text}"
+    );
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "identical", "{preview}");
+    assert_eq!(group["availableModes"], json!([]), "{preview}");
+    assert_eq!(group["defaultChecked"], false, "{preview}");
+    assert!(
+        group.get("previewToken").is_none(),
+        "一致且无归档动作的组不发凭据：{preview}"
+    );
+    assert!(
+        group["reason"].as_str().unwrap().contains("归一"),
+        "理由是用户能读懂的说明：{preview}"
+    );
+    // 解释性计数必须与判定同口径：判成「一致」的组不能在详情里显示「独有 1 条」。
+    assert_eq!(group["extraA"], 0, "一致的组不该报告来源独有记录：{preview}");
+    assert_eq!(group["extraB"], 0, "一致的组不该报告目标独有记录：{preview}");
+    assert_eq!(
+        group["common"], group["recordCount"]["source"],
+        "共有条数应等于来源条数：{preview}"
+    );
+}
+
+/// 两边真分歧 → 「以此为准（overwrite）」写入成功后，再预览必须收敛为 identical。
+#[test]
+fn overwrite_incomplete_tail_converges_to_identical() {
+    let env = settled_incomplete_env("sync-overwrite-incomplete-tail");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    // 两侧各自追加不同内容：条数相同、内容不同 = 真分歧（用户点「以此为准」的场景）。
+    append_records(&env.body_path("sess-1"), "sess-1", 10, 2);
+    append_records(&env.body_path(&target_id), &target_id, 20, 2);
+    let group = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(group["verdict"], "diverge", "{group}");
+
+    let group_id = group["groupId"].as_str().unwrap();
+    let token = group["previewToken"].as_str().unwrap();
+    let applied = sync(
+        &env,
+        "uid-b",
+        &[selection(group_id, token, SyncMode::Overwrite)],
+    );
+    assert_eq!(applied["synced"].as_array().unwrap().len(), 1, "{applied}");
+
+    let after = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(
+        after["verdict"], "identical",
+        "覆盖后仍报分歧，说明「以此为准」消不掉分歧：{after}"
+    );
+    assert_eq!(after["availableModes"], json!([]), "{after}");
+    assert_eq!(after["defaultChecked"], false, "{after}");
+}
+
+/// 来源在归一副本之后又追加 → 快进写入成功后，再预览必须收敛为 identical。
+#[test]
+fn fast_forward_incomplete_tail_converges_to_identical() {
+    let env = settled_incomplete_env("sync-ff-incomplete-tail");
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+
+    // 目标仍是来源的严格有序前缀 → 可快进（尾部两行只有来源有）。
+    append_records(&env.body_path("sess-1"), "sess-1", 10, 2);
+    let group = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(group["verdict"], "fastForward", "{group}");
+
+    let group_id = group["groupId"].as_str().unwrap();
+    let token = group["previewToken"].as_str().unwrap();
+    let applied = sync(
+        &env,
+        "uid-b",
+        &[selection(group_id, token, SyncMode::FastForward)],
+    );
+    assert_eq!(applied["synced"].as_array().unwrap().len(), 1, "{applied}");
+
+    // 写入确实落到了目标：末条留痕是同步场景的，且不再停在 incomplete。
+    let target_text = std::fs::read_to_string(env.body_path(&target_id)).unwrap();
+    assert!(
+        target_text.contains("incompleteNormalized"),
+        "目标末条应带归一留痕：{target_text}"
+    );
+    assert!(
+        !target_text.contains("\"status\":\"incomplete\""),
+        "目标末条不应再停在 incomplete：{target_text}"
+    );
+
+    let after = preview(&env, "uid-b")["groups"][0].clone();
+    assert_eq!(
+        after["verdict"], "identical",
+        "快进后仍报分歧，说明写入把归一签名当成了内容差异：{after}"
+    );
+    assert_eq!(after["availableModes"], json!([]), "{after}");
+    assert_eq!(after["defaultChecked"], false, "{after}");
+}
+
+/// 三成员组：两两判定都已收敛，组级判定不得因为「末条归一留痕」另造一条独立分支。
+///
+/// 场景（真实可达，只需 3 个成员）：uid-b 的副本停在 base；来源末条变成 `incomplete`；
+/// 来源行仍是终态，再复制出的 uid-c 副本末条是 `completed` + `_meta.incompleteNormalized`。
+/// 组级判定（`session_groups::graph::common_base_branches`）若仍比原始摘要，会把来源与 uid-c 的
+/// 副本当成两条独立尖端，`view.rs` 随即把 `summaryStatus` 强制改成 `diverge`——用户看到的还是
+/// 「存在分歧」（issue #3 最后一条的第二个出口）。
+///
+/// 这里断言的是组级判定的**全部输入**：同一组 3 个 active 成员 + 六个有序对的两两判定里没有
+/// 任何一个 `Diverge`。徽标覆盖条件本身（`divergence.is_some()` → `diverge`）及
+/// `common_base_branches` 对这种内容形态返回 `None` 由
+/// `session_groups::tests::normalized_copy_is_not_an_independent_branch` 覆盖——组级载荷
+/// （`session_groups::detail`）无法在这里断言：它对 WorkBuddy 走
+/// `session::list_sessions_for_user` / `member_content_state(SessionPaths::for_variant(..))`，
+/// 路径不可注入，单测里调用会读写真实 `~/.workbuddy-shift`。
+#[test]
+fn three_member_group_is_not_marked_divergent_by_tail_normalization() {
+    let env = ready_env_with_status("sync-group-3-member-normalized-tail");
+    // 来源会话已结束（复制不看状态，但同步的归一资格看它，场景要真实）。
+    env.set_status("sess-1", "completed");
+
+    // 1) 把来源正文换成 `incomplete_body` 的**前两行**（user + 已收尾的 assistant），
+    //    再复制出停在 base 的副本（uid-b，末条无留痕）。
+    let full_body = incomplete_body("sess-1");
+    let base_text = body_lines(&full_body)[..2].join("\n");
+    std::fs::write(env.body_path("sess-1"), format!("{base_text}\n")).unwrap();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let base_copy = env.first_copy_id(&report);
+    // 2) 来源末条变成 incomplete（用户中断 / 限流 / 报错留下的真实形态）。
+    std::fs::write(env.body_path("sess-1"), &full_body).unwrap();
+    // 3) 再复制出一个末条已归一的副本（uid-c）。
+    let report = copy(&env, "uid-c", &["sess-1"]);
+    let normalized_copy = env.first_copy_id(&report);
+
+    // 前提一：两次复制登记进同一个组，且三个成员都 active（否则触发不到 N 路识别）。
+    let group = preview(&env, "uid-b")["groups"][0].clone();
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let store = env.store();
+    let link_group = store
+        .groups
+        .iter()
+        .find(|candidate| candidate.id == group_id)
+        .expect("两次复制应在同一组里");
+    assert_eq!(link_group.members.len(), 3, "该场景只需 3 个成员");
+    assert!(
+        link_group
+            .members
+            .iter()
+            .all(|member| member.state == MemberState::Active),
+        "三个成员都应有效"
+    );
+
+    // 前提二：两两判定已收敛（uid-b 落后可快进、uid-c 与来源一致）。
+    assert_eq!(group["verdict"], "fastForward", "{group}");
+    let normalized_preview = preview(&env, "uid-c");
+    assert_eq!(
+        normalized_preview["groups"][0]["verdict"], "identical",
+        "{normalized_preview}"
+    );
+
+    // 组级判定的输入矩阵：六个有序对，一个 Diverge 都不许有。
+    let states = [
+        member_content_state(&env.paths(), "sess-1"),
+        member_content_state(&env.paths(), &base_copy),
+        member_content_state(&env.paths(), &normalized_copy),
+    ];
+    for (source, target) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+        let decision = session_link::decide_sync(
+            &states[source],
+            &states[target],
+            &session_link::BaselineState::Missing,
+        );
+        assert_ne!(
+            decision.verdict,
+            crate::modules::session_link::SyncVerdict::Diverge,
+            "成员 {source}→{target} 不该判成分歧（否则组徽标会被强制改成 diverge）：{}",
+            decision.reason
+        );
+    }
+    // 具体口径：来源 → 停在 base 的副本 = 可快进；来源 ↔ 归一副本 = 一致。
+    let verdict = |source: usize, target: usize| {
+        session_link::decide_sync(
+            &states[source],
+            &states[target],
+            &session_link::BaselineState::Missing,
+        )
+        .verdict
+    };
+    assert_eq!(
+        verdict(0, 1),
+        crate::modules::session_link::SyncVerdict::FastForward
+    );
+    assert_eq!(
+        verdict(0, 2),
+        crate::modules::session_link::SyncVerdict::Identical
+    );
+    assert_eq!(
+        verdict(2, 0),
+        crate::modules::session_link::SyncVerdict::Identical
+    );
+
+    // 组徽标：用户在列表里看到「存在分歧」的那个字段。`view.rs` 只在
+    // `common_base_branches` 识别出「共同旧版 + 独立尖端」时才把 `summaryStatus` 覆盖成
+    // `diverge`，所以必须真的走一遍组载荷装配（`detail_at` 注入临时数据根），
+    // 只断言两两判定是推断，证明不了这条合成链路。
+    let detail = crate::modules::session_groups::detail_at(
+        &env.paths(),
+        &|_: WbVariant| env.paths(),
+        crate::modules::session_groups::SessionClient::Workbuddy,
+        // 只有 CodeBuddy IDE 支持档位筛选（`validate_scope`），WorkBuddy 必须传 None。
+        None,
+        &group_id,
+    )
+    .expect("组详情应可读");
+    assert_eq!(
+        detail["summaryStatus"], "behind",
+        "组徽标不该被末条归一留痕带成 diverge：{detail}"
+    );
+    assert!(
+        detail.get("divergence").is_none(),
+        "不该识别出独立分支：{detail}"
+    );
+    assert_eq!(detail["hasSafeSource"], true, "{detail}");
+    assert_eq!(detail["activeMemberCount"], 3, "{detail}");
+    // 反「假绿」锚点：徽标结论必须建立在**真读到的正文**上。镜像注入路径漏传时三个成员会
+    // 全变成 `Missing`，那时 `common_base_branches` 永远返回 `None`，徽标断言不红也说明不了
+    // 任何问题（改了 bug 也照样绿）。
+    let members = detail["members"]
+        .as_array()
+        .expect("详情载荷应带成员列表");
+    assert_eq!(members.len(), 3, "{detail}");
+    for member in members {
+        assert_eq!(
+            member["contentState"], "ready",
+            "成员正文必须真读到，否则徽标断言是假绿：{detail}"
+        );
+        assert!(
+            member["recordCount"].as_u64().is_some_and(|count| count > 0),
+            "成员记录数必须为正：{detail}"
+        );
+    }
+}
