@@ -2,6 +2,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use super::failure::{failure_response, sanitize_error_payload};
+
 /// 官网套餐页桌面 Chrome UA（plans-usage 捕获）。
 pub const DEFAULT_HTTP_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 
@@ -67,9 +69,16 @@ fn http_client() -> &'static reqwest::Client {
 /// 通用 HTTP 请求，返回解析后的 JSON。
 ///
 /// 行为对齐 Python 版：
-/// - 2xx：解析 body 为 JSON；
-/// - HTTP 错误：body 可解析则返回其 JSON，否则 `{"code": <status>, "message": <body 前 500 字符>}`；
+/// - 2xx 且 body 是 JSON：原样返回解析结果；
+/// - HTTP 错误且 body 是 JSON：原样返回其 JSON（业务码一个都不动），只清掉「夹带网页
+///   正文的文案」（[`sanitize_error_payload`]）；
+/// - body 不是 JSON（整页 HTML 登录页 / 网关错误页 / 空响应 / 纯文本）：交给
+///   [`failure_response`] 统一分类，**绝不把正文塞进 `message`**（issue #189）；
 /// - 网络错误：`{"code": -1, "message": <原因>}`。
+///
+/// 这里是全仓上游请求的唯一收口点：积分、签到、旅行、企业配额、刷新令牌、OAuth、
+/// 更新清单都经过它，所以「响应不是预期 JSON」这件事只需要在这一个地方判一次。
+/// （限额 chip 读的是 IDE 日志、不是这个入口，因此它天然不会遇到网页响应。）
 pub async fn http_request(
     url: &str,
     method: &str,
@@ -113,17 +122,22 @@ pub async fn http_request_with_proxy(
     }
     match req.send().await {
         Ok(resp) => {
-            let status = resp.status();
+            let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            if status.is_success() {
-                serde_json::from_str(&text).unwrap_or(Value::Null)
-            } else {
-                serde_json::from_str(&text).unwrap_or_else(|_| {
-                    json!({
-                        "code": status.as_u16(),
-                        "message": normalize_error_body(&text),
-                    })
-                })
+            match serde_json::from_str::<Value>(&text) {
+                // 合法 JSON：成功时逐字返回；错误时只做「夹带网页正文」这一项净化，
+                // 业务字段（`code` / `data`）一律不动 —— 404 回落、401 刷新重试的判定
+                // 依赖它们，改一个字节都会让既有分级失效。
+                Ok(payload) => {
+                    if (200..300).contains(&status) {
+                        payload
+                    } else {
+                        sanitize_error_payload(status, payload)
+                    }
+                }
+                // 不是 JSON：整页 HTML（登录页 / 网关错误页）、空响应、纯文本。
+                // 统一分类成结构化错误，用户看到的是分类文案，正文只进日志。
+                Err(_) => failure_response(status, &text),
             }
         }
         Err(e) => json!({"code": -1, "message": error_chain(&e)}),
@@ -133,6 +147,9 @@ pub async fn http_request_with_proxy(
 /// 非 JSON 错误响应体归一化：网关（openresty / APISIX 等）的 401/5xx 常返回
 /// 整页 HTML，原样截断会把 `<html>…` 整段塞进通知与界面卡片（issue #94）。
 /// HTML 提取 `<title>` 作为可读信息；其余保持原有的 500 字符截断。
+///
+/// 现在是 [`super::failure::diagnostic_summary`] 的输入：它的结果**只写日志**，
+/// 用户可见文案一律来自 [`super::failure::FailureKind::message`]（issue #189）。
 pub(super) fn normalize_error_body(text: &str) -> String {
     if text.trim_start().starts_with('<') {
         let title = text

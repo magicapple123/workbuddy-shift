@@ -411,3 +411,67 @@
             None
         );
     }
+
+    /// 用户可见文案的硬约束（issue #189）：不含 `<html` / `<!DOCTYPE` / 任何标签。
+    fn assert_no_raw_html(text: &str) {
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("<html"), "积分错误不得含 <html：{text}");
+        assert!(
+            !lower.contains("<!doctype"),
+            "积分错误不得含 <!DOCTYPE：{text}"
+        );
+        assert!(!text.contains('<'), "积分错误不得含标签：{text}");
+        assert!(!text.contains('>'), "积分错误不得含标签：{text}");
+    }
+
+    /// 真实取数路径回归：网关返回整页 HTML 时，账号卡片的积分位显示人话而不是网页。
+    ///
+    /// 链路：`http_request` 把非 JSON 响应分类成结构化错误 → `legacy_credit_result`
+    /// 取 `message` 作为 `error` → `credit-section.tsx` 直接渲染该字段。
+    #[test]
+    fn credit_error_from_html_page_is_readable_not_raw_body() {
+        let account = json!({"id": "acc-credit-html", "uid": "u-html", "nickname": "示例"});
+        let now = 1_700_000_000_000i64;
+
+        // 401 + 官方登录页：告诉用户去重新登录。
+        let login_page = crate::modules::config::failure_response(
+            401,
+            "<!DOCTYPE html><html><head><title>登录</title></head><body>扫码登录</body></html>",
+        );
+        let result = legacy_credit_result(&account, &login_page, now);
+        assert_eq!(result["ok"], false);
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("登录已失效"), "{error}");
+        assert_no_raw_html(error);
+
+        // 502 + 网关错误页：指向代理 / 网关，不误导用户去重登。
+        let gateway_page = crate::modules::config::failure_response(
+            502,
+            "<html><head><title>502 Bad Gateway</title></head><body>openresty</body></html>",
+        );
+        let result = legacy_credit_result(&account, &gateway_page, now);
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("代理或网关"), "{error}");
+        assert_no_raw_html(error);
+
+        // 空响应：只说「格式异常 + 状态码」，正文一个字都不带。
+        let empty = crate::modules::config::failure_response(503, "");
+        let result = legacy_credit_result(&account, &empty, now);
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(error.contains("返回格式异常"), "{error}");
+        assert!(error.contains("503"), "{error}");
+        assert_no_raw_html(error);
+    }
+
+    /// 官方给的人话（JSON `message`）必须逐字保留：分类器不许改写正常错误。
+    #[test]
+    fn credit_error_keeps_upstream_human_message() {
+        let account = json!({"id": "acc-credit-json", "uid": "u-json"});
+        let response = crate::modules::config::sanitize_error_payload(
+            400,
+            json!({"code": 400, "message": "积分包已过期，请重新购买"}),
+        );
+        let result = legacy_credit_result(&account, &response, 1_700_000_000_000i64);
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "积分包已过期，请重新购买");
+    }

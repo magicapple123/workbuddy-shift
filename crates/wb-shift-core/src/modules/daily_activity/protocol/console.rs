@@ -418,17 +418,19 @@ fn message_of(payload: &Value) -> String {
     truncate(&scrub(text))
 }
 
-/// 非 JSON 响应或没有 `msg` 时，用截断后的正文兜底。
+/// 兜底文案：JSON 里没有 `msg`、或 `msg` / 正文本身就是一整页网页时用分类文案。
+///
+/// 本模块有自己的 reqwest 封装（沙箱域名 DoH 兜底），不经过
+/// `config::http_request`，但错误文案同样会进「本轮失败」提示，因此**共用**
+/// `config::failure` 的判据：绝不把 `response.body` 截一段原文回显（可能是整页
+/// HTML 登录页或网关 502 页，issue #189）。
 fn response_message(response: &HttpResponse) -> String {
-    match response.json() {
-        Some(payload) => {
-            let message = message_of(&payload);
-            if message.is_empty() {
-                truncate(&scrub(&response.body))
-            } else {
-                message
-            }
-        }
-        None => truncate(&scrub(&response.body)),
+    let direct = response
+        .json()
+        .map(|payload| message_of(&payload))
+        .unwrap_or_default();
+    if !direct.is_empty() && !crate::modules::config::contains_markup(&direct) {
+        return direct;
     }
+    crate::modules::config::user_message_for_body(response.status, &response.body)
 }

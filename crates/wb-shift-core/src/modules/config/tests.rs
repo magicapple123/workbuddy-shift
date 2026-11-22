@@ -15,6 +15,17 @@ use super::configs::set_rate_limit_hook_opt_out_at;
 use super::configs::try_consume_rotate_notify_at;
 use super::configs::ROTATE_NOTIFY_DAILY_LIMIT;
 use super::configs::ROTATE_NOTIFY_FILE_NAME;
+use super::failure::classify_body;
+use super::failure::diagnostic_summary;
+use super::failure::failure_response;
+use super::failure::is_html_failure;
+use super::failure::sanitize_error_payload;
+use super::failure::strip_markup;
+use super::failure::user_message_for_body;
+use super::failure::FailureKind;
+use super::failure::DIAGNOSTIC_LIMIT;
+use super::failure::FAILURE_KIND_FIELD;
+use super::failure::HTTP_STATUS_FIELD;
 use super::http::http_client_builder;
 use super::http::is_route_missing;
 use super::http::normalize_error_body;
@@ -1060,4 +1071,212 @@ fn dev_home_dir_at_resolves_relative_candidate_against_real_home() {
     assert_eq!(resolved, home.join("relative/dir"));
     assert!(resolved.is_absolute());
     assert!(resolved.starts_with(&home));
+}
+
+// ---------------------------------------------------------------------------
+// issue #189：传输层失败分类（`config/failure.rs`）
+// ---------------------------------------------------------------------------
+
+/// 用户可见文案的硬约束：不含 `<html` / `<!DOCTYPE` / 任何标签。
+fn assert_no_markup(text: &str) {
+    let lower = text.to_ascii_lowercase();
+    assert!(!lower.contains("<html"), "用户可见文案不得含 <html：{text}");
+    assert!(
+        !lower.contains("<!doctype"),
+        "用户可见文案不得含 <!DOCTYPE：{text}"
+    );
+    assert!(!text.contains('<'), "用户可见文案不得含标签：{text}");
+    assert!(!text.contains('>'), "用户可见文案不得含标签：{text}");
+}
+
+const LOGIN_PAGE: &str = "<!DOCTYPE html><html><head><title>登录 - WorkBuddy</title>\
+    </head><body><form id=\"login\"><input name=\"account\">扫码登录</form></body></html>";
+
+const GATEWAY_PAGE: &str = "<html><head><title>502 Bad Gateway</title></head>\
+    <body><center><h1>502 Bad Gateway</h1></center><hr><center>openresty</center></body></html>";
+
+/// 登录页 HTML → LoginExpired，文案告诉用户「去重新登录」。
+#[test]
+fn login_page_html_is_login_expired() {
+    assert_eq!(classify_body(LOGIN_PAGE), FailureKind::LoginExpired);
+
+    let response = failure_response(401, LOGIN_PAGE);
+    let message = response["message"].as_str().unwrap_or_default();
+    assert_eq!(message, "登录已失效，需要重新登录");
+    assert_no_markup(message);
+    assert_eq!(response[FAILURE_KIND_FIELD], "login_expired");
+    assert_eq!(response[HTTP_STATUS_FIELD], 401);
+    // 401 是既有判据依赖的取值，不能被分类器改掉。
+    assert_eq!(response["code"], 401);
+}
+
+/// 网关 / 代理错误页 → GatewayHtml：文案指向「代理或网关」，不是「去重登」。
+#[test]
+fn gateway_html_is_not_reported_as_login_expired() {
+    assert_eq!(classify_body(GATEWAY_PAGE), FailureKind::GatewayHtml);
+
+    let response = failure_response(502, GATEWAY_PAGE);
+    let message = response["message"].as_str().unwrap_or_default();
+    assert!(message.contains("代理或网关"), "{message}");
+    assert_no_markup(message);
+    assert_eq!(response[FAILURE_KIND_FIELD], "gateway_html");
+    assert_eq!(response["code"], 502);
+}
+
+/// `401 Authorization Required` 是网关页，**不能**因为含 `authorization` 就误报登录失效。
+#[test]
+fn nginx_authorization_required_stays_gateway_html() {
+    let body = "<html><head><title>401 Authorization Required</title></head>\
+        <body><h1>401 Authorization Required</h1></body></html>";
+    assert_eq!(classify_body(body), FailureKind::GatewayHtml);
+}
+
+/// 空响应 / 纯文本 → Malformed：只说「格式异常 + 状态码」，不 echo 正文。
+#[test]
+fn empty_and_plain_text_bodies_are_malformed() {
+    for body in ["", "   \n\t ", "upstream connect error or disconnect/reset"] {
+        let kind = classify_body(body);
+        assert_eq!(kind, FailureKind::Malformed, "正文：{body:?}");
+        let message = kind.message(500);
+        assert_eq!(message, "返回格式异常（HTTP 500）");
+        assert_no_markup(&message);
+    }
+    // 状态码必须进文案：没有正文时它是唯一可诊断的信息。
+    assert_eq!(classify_body("").message(503), "返回格式异常（HTTP 503）");
+}
+
+/// 超大 HTML：分类不看长度，摘要被截断且不含标签，用户文案仍是固定短句。
+#[test]
+fn oversized_html_is_truncated_without_markup() {
+    let mut body = String::from(
+        "<!DOCTYPE html><html><head><title>503 服务暂时不可用</title>\
+        </head><body>",
+    );
+    body.push_str(&"<div class=\"row\">维护中</div>".repeat(2_000));
+    body.push_str("</body></html>");
+    assert!(
+        body.len() > 60_000,
+        "构造的超大正文只有 {} 字节",
+        body.len()
+    );
+
+    assert_eq!(classify_body(&body), FailureKind::GatewayHtml);
+
+    let summary = diagnostic_summary(503, &body);
+    assert!(
+        summary.chars().count() <= DIAGNOSTIC_LIMIT + 16,
+        "摘要应当是「HTTP xxx · 」+≤{DIAGNOSTIC_LIMIT} 字符：{}",
+        summary.chars().count()
+    );
+    assert_no_markup(&summary);
+    assert!(summary.contains("503"), "{summary}");
+
+    let response = failure_response(503, &body);
+    assert_no_markup(response["message"].as_str().unwrap_or_default());
+    // 返回值里不得出现正文：整段 HTML 一个字都不许出现在任何字段里。
+    let serialized = response.to_string();
+    assert!(
+        !serialized.to_ascii_lowercase().contains("<html"),
+        "响应对象里不得带原始正文：{serialized}"
+    );
+    assert!(!serialized.contains("维护中"), "{serialized}");
+}
+
+/// JSON 里本来是人话：逐字保留，且不打 `failureKind`（不能把官方文案改掉）。
+#[test]
+fn plain_json_error_message_is_kept_verbatim() {
+    let payload = json!({"code": 400, "message": "积分包已过期，请重新购买"});
+    let sanitized = sanitize_error_payload(400, payload.clone());
+    assert_eq!(sanitized, payload, "人话必须逐字保留");
+    assert!(sanitized.get(FAILURE_KIND_FIELD).is_none());
+    assert!(!is_html_failure(&sanitized));
+}
+
+/// JSON 里夹带整页 HTML：换成分类文案 + 打上档位，业务码不动。
+#[test]
+fn json_error_carrying_html_is_sanitized() {
+    let payload = json!({"code": 401, "message": LOGIN_PAGE, "data": {"trace": "x"}});
+    let sanitized = sanitize_error_payload(401, payload);
+
+    assert_eq!(sanitized["code"], 401, "业务码不得被改写");
+    assert_eq!(sanitized["data"]["trace"], "x");
+    assert_eq!(sanitized["message"], "登录已失效，需要重新登录");
+    assert_eq!(sanitized[FAILURE_KIND_FIELD], "login_expired");
+    assert_no_markup(sanitized.to_string().as_str());
+    assert!(is_html_failure(&sanitized));
+}
+
+/// 嵌套在 `data` 里的网页正文同样要清掉。
+#[test]
+fn nested_data_message_is_sanitized() {
+    let payload = json!({"code": 502, "data": {"msg": GATEWAY_PAGE}});
+    let sanitized = sanitize_error_payload(502, payload);
+    let nested = sanitized["data"]["msg"].as_str().unwrap_or_default();
+    assert!(nested.contains("代理或网关"), "{nested}");
+    assert_no_markup(nested);
+}
+
+/// 2xx 却是网页：绝不能报成成功（`code` 必须是 -1），否则签到会把网关页读成「状态正常」。
+#[test]
+fn html_with_success_status_is_not_success() {
+    let response = failure_response(200, LOGIN_PAGE);
+    assert_eq!(response["code"], -1, "200 的网页不得保留成功码");
+    assert_eq!(response[HTTP_STATUS_FIELD], 200);
+    assert!(is_html_failure(&response));
+}
+
+/// 档位字符串是机器契约：往返转换稳定，未知取值退化成 `None` 而不是 panic。
+#[test]
+fn failure_kind_wire_roundtrip() {
+    for kind in [
+        FailureKind::LoginExpired,
+        FailureKind::GatewayHtml,
+        FailureKind::Upstream,
+        FailureKind::Malformed,
+    ] {
+        assert_eq!(FailureKind::from_wire(kind.as_wire()), Some(kind));
+    }
+    assert_eq!(FailureKind::from_wire("something-new"), None);
+    assert_eq!(FailureKind::from_wire(""), None);
+    // 只有 HTML 的两档算「网页」。
+    assert!(FailureKind::LoginExpired.is_html());
+    assert!(FailureKind::GatewayHtml.is_html());
+    assert!(!FailureKind::Upstream.is_html());
+    assert!(!FailureKind::Malformed.is_html());
+}
+
+/// 缺 `failureKind` 的老响应：`is_html_failure` 必须给 `false`（保守，不改判定）。
+#[test]
+fn is_html_failure_defaults_to_false() {
+    assert!(!is_html_failure(
+        &json!({"code": 401, "message": "Unauthorized"})
+    ));
+    assert!(!is_html_failure(&json!({"failureKind": "upstream"})));
+    assert!(!is_html_failure(&Value::Null));
+    assert!(is_html_failure(&json!({"failureKind": "gateway_html"})));
+}
+
+/// `limit a < b` 这种普通文本里的单个小于号不能被当成标签吞掉。
+#[test]
+fn strip_markup_keeps_plain_less_than() {
+    assert_eq!(strip_markup("limit a < b"), "limit a < b");
+    assert_eq!(strip_markup("<b>粗体</b> 正文"), "粗体 正文");
+    assert_eq!(
+        strip_markup("<html><body>  \n  多  空白 </body></html>"),
+        "多 空白"
+    );
+}
+
+/// 自建传输层（daily_activity）复用的入口与主分类器同源。
+#[test]
+fn user_message_for_body_matches_classifier() {
+    assert_eq!(
+        user_message_for_body(401, LOGIN_PAGE),
+        "登录已失效，需要重新登录"
+    );
+    assert_eq!(
+        user_message_for_body(502, GATEWAY_PAGE),
+        "服务端返回了网页而不是数据，可能是代理或网关拦截"
+    );
+    assert_eq!(user_message_for_body(200, ""), "返回格式异常（HTTP 200）");
 }

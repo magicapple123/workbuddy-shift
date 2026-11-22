@@ -1,6 +1,7 @@
 //! 常量、路径与通用工具函数（对照 server.py 常量区与工具区）
 
 mod configs;
+mod failure;
 mod http;
 mod paths;
 mod store;
@@ -8,6 +9,7 @@ mod store;
 mod tests;
 
 pub use self::configs::*;
+pub use self::failure::*;
 pub use self::http::*;
 pub use self::paths::*;
 pub use self::store::*;

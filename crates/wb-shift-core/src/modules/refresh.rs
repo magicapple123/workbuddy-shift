@@ -26,7 +26,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::modules::account::{account_meta, build_auth_headers, upsert_account};
 use crate::modules::auth_file;
-use crate::modules::config::{http_request, load_checkin_config, norm_ts, now_ms, RunFlagGuard};
+use crate::modules::config::{
+    http_request, is_html_failure, load_checkin_config, norm_ts, now_ms, RunFlagGuard,
+};
 
 static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 static RELOGIN_SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -166,7 +168,14 @@ fn response_message(resp: &Value) -> String {
     text.trim().to_string()
 }
 
-/// 文案是否来自网关的 HTML 错误页（`normalize_error_body` 已归一化为该前缀）。
+/// 文案是否来自网关的 HTML 错误页。
+///
+/// 两个来源都要认：
+/// - 老形态：`normalize_error_body` 归一化出的「服务端返回 HTML 错误页：<title>」前缀
+///   或原始 `<…`；
+/// - 新形态：`config::failure` 分类后的固定文案（`登录已失效，需要重新登录` /
+///   `服务端返回了网页而不是数据…`）。文案本身不含任何标记，因此**判定不能看文案**，
+///   要看 [`is_html_failure`] 读的 `failureKind` 字段。
 fn looks_like_html_error(message: &str) -> bool {
     let text = message.trim_start();
     text.starts_with('<') || text.contains("服务端返回 HTML 错误页")
@@ -232,10 +241,11 @@ pub fn classify_refresh_failure(resp: &Value) -> RefreshFailure {
     let code = response_code(resp);
     let message = response_message(resp);
 
-    // 网关的 401/5xx 常返回整页 HTML（`http_request` 已归一化成
-    // 「服务端返回 HTML 错误页：<title>」）。这既不是吊销也不是业务码 —— 先判掉，
-    // 否则会被下面的 401/403 分支误判成「需重新登录」（issue #94 的教训）。
-    if looks_like_html_error(&message) {
+    // 网关的 401/5xx 常返回整页 HTML（`http_request` 统一分类成 `failureKind`，
+    // 文案是固定短句、不再含标记，所以文案判定与字段判定两条都要走）。这既不是吊销
+    // 也不是业务码 —— 先判掉，否则会被下面的 401/403 分支误判成「需重新登录」
+    // （issue #94 的教训）。
+    if looks_like_html_error(&message) || is_html_failure(resp) {
         return RefreshFailure::Temporary;
     }
 
@@ -1317,6 +1327,82 @@ mod tests {
 
         assert!(!apply_refresh_response(&mut account, &resp));
         assert!(!has_relogin_marker(&account), "网关错误页不得写标记");
+    }
+
+    /// 真实链路回归（issue #189）：`http_request` 分类出的 HTML 失败对象进刷新分级后，
+    /// 仍然是「暂时失败」——**不是** `Revoked`，且原因文案里没有网页正文。
+    ///
+    /// 分类器把文案换成了固定短句（不再含 `<`），所以判定必须靠 `failureKind`；
+    /// 这条用例钉住「换了文案也没把 401 登录页判成吊销」。
+    #[test]
+    fn classified_login_page_keeps_temporary_grading() {
+        let login_page = crate::modules::config::failure_response(
+            401,
+            "<!DOCTYPE html><html><body><form id=\"login\">扫码登录</form></body></html>",
+        );
+        assert!(crate::modules::config::is_html_failure(&login_page));
+
+        let failure = classify_refresh_failure(&login_page);
+        assert_eq!(
+            failure,
+            RefreshFailure::Temporary,
+            "401 的登录页是「暂时失败」，不是吊销：{login_page}"
+        );
+        assert!(!failure.marks_relogin());
+
+        let mut account = json!({"id": "acc-classified-html", "refresh_token": "old-rt"});
+        assert!(!apply_refresh_response(&mut account, &login_page));
+        assert!(
+            !has_relogin_marker(&account),
+            "HTML 登录页不得写 needs_relogin"
+        );
+
+        let reason = account
+            .get("refresh_failed_reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(reason.contains("暂时失败"), "{reason}");
+        assert!(!reason.contains('<'), "原因文案不得含标签：{reason}");
+        assert!(
+            !reason.to_ascii_lowercase().contains("<html"),
+            "原因文案不得含 <html：{reason}"
+        );
+    }
+
+    /// 同一套分类器不能把**正常 JSON** 的 401 判丢：吊销依旧是吊销。
+    ///
+    /// 与上一条用例成对：证明「净化文案」只影响 HTML 分支，业务码分支一个都没动。
+    #[test]
+    fn classified_json_unauthorized_still_marks_relogin() {
+        let json_401 = crate::modules::config::sanitize_error_payload(
+            401,
+            json!({"code": 401, "message": "Unauthorized"}),
+        );
+        assert_eq!(
+            classify_refresh_failure(&json_401),
+            RefreshFailure::Revoked,
+            "JSON 里的 401 必须仍然是吊销：{json_401}"
+        );
+
+        let mut account = json!({"id": "acc-json-401", "refresh_token": "old-rt"});
+        assert!(!apply_refresh_response(&mut account, &json_401));
+        assert!(has_relogin_marker(&account));
+    }
+
+    /// JSON 里夹带整页 HTML（`{"code":401,"message":"<html>…"}`）：按网页处理，
+    /// 不写标记，文案换成固定短句。
+    #[test]
+    fn json_error_carrying_html_stays_temporary() {
+        let wrapped = crate::modules::config::sanitize_error_payload(
+            401,
+            json!({"code": 401, "message": "<html><body>扫码登录</body></html>"}),
+        );
+        let failure = classify_refresh_failure(&wrapped);
+        assert_eq!(
+            failure,
+            RefreshFailure::Temporary,
+            "夹带网页的 401 不得判成吊销：{wrapped}"
+        );
     }
 
     /// 已带标记时又遇暂时失败：标记与原因原样保留（复核失败不能反过来洗白或改写）。
