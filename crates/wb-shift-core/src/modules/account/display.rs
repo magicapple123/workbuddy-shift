@@ -68,7 +68,85 @@ pub fn account_meta(acc: &Value) -> Value {
         "isEnterprise": is_enterprise_account(acc),
         // 档位随元数据下发，供宿主按档位过滤列表（缺省国内版，历史数据零迁移）。
         "variant": variant_of(acc).as_str(),
+        // 「最近切换」（issue #184）：本地字段，旧账号库没有 → `null`，前端据此不显示徽标。
+        // 两个字段必须成对判断：`lastUsedAt` 缺失就等于「从未记录」，不显示「从未」这种噪音。
+        "lastUsedAt": last_used_at(acc),
+        "lastUsedClient": last_used_client(acc),
     })
+}
+
+/// 「最后使用」来源端的已知取值（与前端 `LAST_USED_CLIENT_LABELS` 一一对应）。
+///
+/// 只在**切换已生效之后**由 [`touch_last_used`] 写入。未知标签不会进账号库
+/// （时间戳照写、来源端留空），避免未来新增客户端时把老版本前端读不懂的值写进去。
+pub const LAST_USED_CLIENTS: [&str; 7] = [
+    "workbuddy",
+    "codebuddy-ide",
+    "codebuddy-cn-ide",
+    "vscode",
+    "jetbrains",
+    "cli",
+    "rotate",
+];
+
+/// 下发用的「最后使用时刻」：缺失 / 非数字 / 非正数一律 `null`（= 从未记录）。
+fn last_used_at(acc: &Value) -> Value {
+    match acc.get("lastUsedAt").and_then(Value::as_i64) {
+        Some(ms) if ms > 0 => Value::Number(ms.into()),
+        _ => Value::Null,
+    }
+}
+
+/// 下发用的来源端标签：不认识的取值折叠为 `null`（时间戳仍下发，只是没有来源文案）。
+fn last_used_client(acc: &Value) -> Value {
+    match get_str(acc, "lastUsedClient") {
+        Some(client) if LAST_USED_CLIENTS.contains(&client.as_str()) => Value::String(client),
+        _ => Value::Null,
+    }
+}
+
+/// 记录一次「账号被使用」：写入 `lastUsedAt`（毫秒）与 `lastUsedClient`（来源端标签）。
+///
+/// **只在切换已经生效之后调用**（认证文件 / 插件 secret 已经落盘），用于驱动账号卡片上的
+/// 「最近切换」徽标与「最后使用」排序。调用约定：
+///
+/// - **写失败只影响展示**：返回值必须被忽略（`let _ = ...`），不得回滚切换结果、
+///   不得让切换报错——徽标丢一次远比「账号已切过去却提示失败」轻；
+/// - 先读整库再整体原子写回，与 [`update_account_display`] 同一条路径，不另建存储；
+/// - 只写 `lastUsedAt` / `lastUsedClient` 两个键，不碰 token 与官方字段；
+///   二者都在 [`LOCAL_ACCOUNT_FIELDS`] 里，刷新 Token / 扫码重登 / 导入备份都会保留。
+pub fn touch_last_used(account_id: &str, client: &str) -> Result<(), String> {
+    let mut accounts = load_accounts();
+    touch_last_used_in(&mut accounts, account_id, client, now_ms())?;
+    save_accounts(&accounts).map_err(|error| error.to_string())
+}
+
+/// [`touch_last_used`] 的内存实现（不落盘、`now` 由调用方注入，便于单测）。
+///
+/// 账号不存在或记录损坏时返回错误且不修改任何记录（调用方必须忽略该错误）。
+pub fn touch_last_used_in(
+    accounts: &mut [Value],
+    account_id: &str,
+    client: &str,
+    now: i64,
+) -> Result<(), String> {
+    let index = accounts
+        .iter()
+        .position(|a| get_str(a, "id").as_deref() == Some(account_id))
+        .ok_or_else(|| "账号不存在".to_string())?;
+    let obj = accounts[index]
+        .as_object_mut()
+        .ok_or_else(|| "账号记录损坏".to_string())?;
+    obj.insert("lastUsedAt".to_string(), Value::Number(now.max(0).into()));
+    // 未知来源端只写时间戳：宁可少一个标签，也不把未来版本的客户端名写进账号库。
+    obj.insert(
+        "lastUsedClient".to_string(),
+        match LAST_USED_CLIENTS.iter().find(|known| **known == client) {
+            Some(known) => Value::String((*known).to_string()),
+            None => Value::Null,
+        },
+    );
+    Ok(())
 }
 
 /// 取非空字符串字段；空/缺失返回 None。

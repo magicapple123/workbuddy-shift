@@ -154,6 +154,9 @@
                 "createdAt": 1_763_654_321_000_i64,
                 "expiresAt": null,
             }),
+            // issue #184「最近切换」：官方资料里没有这两个键，必须整对保留。
+            "lastUsedAt" => json!(1_763_654_321_000_i64),
+            "lastUsedClient" => json!("vscode"),
             other => panic!(
                 "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在本不变量测试里补一条样例值，\
                  并确认三处写回路径都会保留它"

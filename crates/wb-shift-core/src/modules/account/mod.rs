@@ -43,6 +43,10 @@ fn has_unexpired_plain_token(acc: &Value) -> bool {
 /// 否则「刷新 Token」会拿官方数据把整条记录覆盖掉、用户刚填的东西直接消失。
 /// R5-04 的 `mark` 就是踩了这个坑：漏掉一处，标记在刷新后被冲掉（见两处 `preserve_mark` 单测）。
 ///
+/// `lastUsedAt` / `lastUsedClient`（issue #184「最近切换」）同理：切换时写入，官方资料
+/// 重采（刷新 Token / 扫码重登 / 导入备份）都必须保留，否则每刷新一次官方资料，卡片上的
+/// 「最近切换」徽标就会集体消失。写入入口只有 [`display::touch_last_used`]。
+///
 /// 白名单的一致性由 `tests/store.rs` 的 `local_account_fields_*` 不变量测试守住：
 /// 加字段而忘了给样例值时，那条测试会直接失败并指出字段名。
 ///
@@ -51,7 +55,13 @@ fn has_unexpired_plain_token(acc: &Value) -> bool {
 /// 「`incoming` 缺键就用旧值补回」——把它们当本地字段加进来，续期成功删掉的标记会被旧值
 /// 复活，表现为「换了 Token 还是显示需重新登录」，且无编译错误、无运行时报错、无日志。
 /// 该反向约束由 `refresh::tests::marker_fields_are_not_local_account_fields` 求交守住。
-pub const LOCAL_ACCOUNT_FIELDS: [&str; 3] = ["note", "displayField", "mark"];
+pub const LOCAL_ACCOUNT_FIELDS: [&str; 5] = [
+    "note",
+    "displayField",
+    "mark",
+    "lastUsedAt",
+    "lastUsedClient",
+];
 
 /// 把 `existing` 里的本地字段补进 `incoming`：`incoming` 已有的键保持原样（以新数据为准）。
 ///
@@ -79,8 +89,8 @@ mod store;
 
 pub use display::{
     account_display_name, account_meta, build_auth_headers, display_value, envelope_token_error,
-    get_str, mark_meta, update_account_display, update_account_display_in, MARK_COLORS,
-    MARK_TEXT_MAX_CHARS,
+    get_str, mark_meta, touch_last_used, touch_last_used_in, update_account_display,
+    update_account_display_in, LAST_USED_CLIENTS, MARK_COLORS, MARK_TEXT_MAX_CHARS,
 };
 pub use identity::{
     enterprise_id_of, is_enterprise_account, save_collected_account, secret_value,

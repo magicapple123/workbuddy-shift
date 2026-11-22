@@ -470,3 +470,109 @@
 
         std::fs::remove_dir_all(&test_dir).expect("temporary account store should clean up");
     }
+
+    // -----------------------------------------------------------------------
+    // issue #184「最近切换」：lastUsedAt / lastUsedClient 的写入与保留
+    // -----------------------------------------------------------------------
+
+    /// 旧账号库（没有这两个键）下发 `null`：前端据此不显示徽标，不出现「从未」噪音。
+    #[test]
+    fn account_meta_reports_null_when_last_used_is_absent() {
+        let acc = account("a-1", Some("uid-1"), "小明", None);
+        let meta = account_meta(&acc);
+        assert!(meta["lastUsedAt"].is_null());
+        assert!(meta["lastUsedClient"].is_null());
+    }
+
+    /// 写入助手：只写这两个键，时间戳与来源端都按入参落库，其余字段原样保留。
+    #[test]
+    fn touch_last_used_writes_timestamp_and_client_only() {
+        let mut accounts = vec![account("a-1", Some("uid-1"), "小明", None)];
+        let before = accounts[0].clone();
+
+        touch_last_used_in(&mut accounts, "a-1", "vscode", 1_763_654_321_000)
+            .expect("known account should be touched");
+
+        assert_eq!(accounts[0]["lastUsedAt"], 1_763_654_321_000_i64);
+        assert_eq!(accounts[0]["lastUsedClient"], "vscode");
+        // 除这两个键外，账号记录必须逐字段不变（不碰 token / 官方数据）。
+        let mut expected = before.clone();
+        expected["lastUsedAt"] = json!(1_763_654_321_000_i64);
+        expected["lastUsedClient"] = json!("vscode");
+        assert_eq!(accounts[0], expected);
+    }
+
+    /// 未知来源端（未来版本的客户端名）只写时间戳，来源端留空：老版本前端读不懂的值不入库。
+    #[test]
+    fn touch_last_used_ignores_unknown_client_label() {
+        let mut accounts = vec![account("a-1", Some("uid-1"), "小明", None)];
+        touch_last_used_in(&mut accounts, "a-1", "atom-plugin", 42).expect("account exists");
+
+        assert_eq!(accounts[0]["lastUsedAt"], 42);
+        assert!(accounts[0]["lastUsedClient"].is_null());
+    }
+
+    /// 账号不存在时返回错误且不改动任何记录（调用方忽略错误即可，不影响切换结果）。
+    #[test]
+    fn touch_last_used_on_missing_account_does_not_mutate() {
+        let mut accounts = vec![account("a-1", Some("uid-1"), "小明", None)];
+        let before = accounts.clone();
+
+        assert!(touch_last_used_in(&mut accounts, "nope", "workbuddy", 42).is_err());
+        assert_eq!(accounts, before);
+    }
+
+    /// 官方资料重采（刷新 Token）保留 `lastUsedAt/lastUsedClient`。
+    #[test]
+    fn refresh_upsert_preserves_last_used() {
+        let mut existing = account("a-1", Some("uid-1"), "小明", None);
+        existing["lastUsedAt"] = json!(1_763_654_321_000_i64);
+        existing["lastUsedClient"] = json!("jetbrains");
+        let mut accounts = vec![existing];
+
+        // 官方刷新对象天然没有这两个键。
+        upsert_account_in(
+            &mut accounts,
+            &json!({"id": "a-1", "uid": "uid-1", "access_token": "refreshed"}),
+        );
+
+        assert_eq!(accounts[0]["lastUsedAt"], 1_763_654_321_000_i64);
+        assert_eq!(accounts[0]["lastUsedClient"], "jetbrains");
+        assert_eq!(accounts[0]["access_token"], "refreshed", "官方字段仍应更新");
+    }
+
+    /// 扫码重登 / 自动导入本机登录态同样保留 `lastUsedAt/lastUsedClient`。
+    #[test]
+    fn collected_upsert_preserves_last_used() {
+        let mut existing = account("a-1", Some("uid-1"), "小明", None);
+        existing["lastUsedAt"] = json!(1_763_654_321_000_i64);
+        existing["lastUsedClient"] = json!("rotate");
+        let mut accounts = vec![existing];
+
+        let saved = upsert_collected_account(
+            &mut accounts,
+            json!({"uid": "uid-1", "nickname": "小明（官方更新）", "access_token": "collected"}),
+        );
+
+        assert_eq!(saved["lastUsedAt"], 1_763_654_321_000_i64);
+        assert_eq!(saved["lastUsedClient"], "rotate");
+    }
+
+    /// 改备注（`update_account_display`）不得抹掉「最近切换」。
+    #[test]
+    fn display_update_preserves_last_used() {
+        let mut accounts = vec![account("a-1", Some("uid-1"), "小明", None)];
+        touch_last_used_in(&mut accounts, "a-1", "workbuddy", 1_763_654_321_000)
+            .expect("account exists");
+
+        update_account_display_in(&mut accounts, "a-1", &json!({"note": "工作号"}))
+            .expect("note update should apply");
+
+        assert_eq!(accounts[0]["note"], "工作号");
+        assert_eq!(accounts[0]["lastUsedAt"], 1_763_654_321_000_i64);
+        assert_eq!(accounts[0]["lastUsedClient"], "workbuddy");
+        // 下发口径与落库口径一致。
+        let meta = account_meta(&accounts[0]);
+        assert_eq!(meta["lastUsedAt"], 1_763_654_321_000_i64);
+        assert_eq!(meta["lastUsedClient"], "workbuddy");
+    }
