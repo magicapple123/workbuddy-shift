@@ -39,6 +39,16 @@ export function AccountCard(props: AccountCardProps) {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [rateLimits, markExpiresAt]);
+  /**
+   * 「最近切换」徽标（issue #184）按分钟粒度展示（`3 小时前`），单独一个 60s 时钟：
+   * 复用上面那个 1s 倒计时会让所有切过的账号每秒重渲染，没必要。
+   */
+  const lastUsedAt = account.lastUsedAt ?? null;
+  useEffect(() => {
+    if (lastUsedAt === null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [lastUsedAt]);
   const name = displayName(account);
   const avatarClass = avatarTone(name);
   const activeProductCount = [workbuddyActive, codebuddyCliActive, codebuddyCnIdeActive, vscodeExtActive, jetbrainsActive].filter(Boolean).length;

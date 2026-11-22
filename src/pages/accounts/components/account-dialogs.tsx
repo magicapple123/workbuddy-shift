@@ -84,6 +84,8 @@ export function AccountDialogs({ page }: { page: AccountsPageController }) {
         variant={page.variant}
         ideStatus={page.codebuddyCnIde}
         onDone={() => {
+          // 切号成功会写入「最近切换」时间戳（issue #184），必须重拉账号库徽标才会变。
+          void page.fetchAll();
           void page.refreshCodebuddyCnIdeStatus();
         }}
       />
@@ -95,6 +97,7 @@ export function AccountDialogs({ page }: { page: AccountsPageController }) {
         account={page.vscodeSwitchAccount}
         vscodeExtStatus={page.vscodeExt}
         onDone={() => {
+          void page.fetchAll();
           void page.refreshVscodeExtStatus();
         }}
       />
@@ -106,6 +109,7 @@ export function AccountDialogs({ page }: { page: AccountsPageController }) {
         account={page.jetbrainsSwitchTarget}
         jetbrainsStatus={page.jetbrains}
         onDone={() => {
+          void page.fetchAll();
           void page.refreshJetbrainsStatus();
         }}
       />

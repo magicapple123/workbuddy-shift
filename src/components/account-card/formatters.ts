@@ -1,4 +1,10 @@
-import type { AccountMark, CreditExpiry, CreditResource, TravelStatus } from "@/lib/types";
+import type {
+  AccountMark,
+  CreditExpiry,
+  CreditResource,
+  LastUsedClient,
+  TravelStatus,
+} from "@/lib/types";
 
 export function formatCreditExpiry(ts: number | null): string {
   if (!ts) return "长期有效";
@@ -184,4 +190,68 @@ export function truncateMarkText(text: string): string {
   const chars = [...text];
   if (chars.length <= MARK_MENU_TEXT_MAX) return text;
   return `${chars.slice(0, MARK_MENU_TEXT_MAX).join("")}…`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 「最近切换」（issue #184）                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 来源端标签 → 用户可读文案。与后端 `account::display::LAST_USED_CLIENTS` 一一对应。
+ *
+ * 缺键时的兜底由 [`lastUsedClientLabel`] 负责（未知标签显示「其它客户端」），
+ * 因此这里只列已知取值，新增客户端时两侧一起改。
+ */
+export const LAST_USED_CLIENT_LABELS: Record<LastUsedClient, string> = {
+  workbuddy: "WorkBuddy",
+  "codebuddy-ide": "CodeBuddy IDE",
+  "codebuddy-cn-ide": "CodeBuddy CN IDE",
+  vscode: "VS Code 插件",
+  jetbrains: "JetBrains IDE",
+  cli: "CodeBuddy CLI",
+  rotate: "自动轮换",
+};
+
+/**
+ * 来源端文案：未知标签（更新的后端写入、或记录被手改）降级为「其它客户端」。
+ *
+ * `null` / 空串返回 `null`，调用方据此省略「来自…」那一段，不显示「来自 null」。
+ */
+export function lastUsedClientLabel(client?: string | null): string | null {
+  const key = client?.trim();
+  if (!key) return null;
+  return LAST_USED_CLIENT_LABELS[key as LastUsedClient] ?? "其它客户端";
+}
+
+/**
+ * 「最近切换」的相对时间：`刚刚` / `12 分钟前` / `3 小时前` / `2 天前`；更早给绝对时刻。
+ *
+ * - 只有「过去」方向：`lastUsedAt` 比 `now` 还新（系统时钟回拨）按「刚刚」处理，不出现
+ *   「-3 分钟前」；
+ * - 缺失 / 非有限数返回 `null`（= 从未记录，调用方不渲染徽标，也不显示「从未」）。
+ */
+export function formatLastUsedAgo(lastUsedAt: number | null | undefined, now: number): string | null {
+  if (typeof lastUsedAt !== "number" || !Number.isFinite(lastUsedAt) || lastUsedAt <= 0) return null;
+  const elapsedMs = now - lastUsedAt;
+  if (elapsedMs < 60_000) return "刚刚";
+  const totalMinutes = Math.floor(elapsedMs / 60_000);
+  if (totalMinutes < 60) return `${totalMinutes} 分钟前`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours} 小时前`;
+  const totalDays = Math.floor(totalHours / 24);
+  // 一个月以内用天数；再久就给出绝对时刻，避免「剩 400 天前」这种没有信息量的文案。
+  if (totalDays <= 30) return `${totalDays} 天前`;
+  return formatMarkClock(lastUsedAt);
+}
+
+/**
+ * 徽标的读屏文案：`最近切换：3 小时前，来自 VS Code 插件`。
+ *
+ * 没有来源端时只说时间（`最近切换：3 小时前`），不硬编码「未知来源」。
+ */
+export function lastUsedAriaLabel(lastUsedAt: number, now: number, client?: string | null): string {
+  const ago = formatLastUsedAgo(lastUsedAt, now);
+  if (!ago) return "最近切换";
+  const label = lastUsedClientLabel(client);
+  return label ? `最近切换：${ago}，来自 ${label}` : `最近切换：${ago}`;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AccountMeta, CreditExpiry, RateLimitEntry } from "@/lib/types";
+import { formatLastUsedAgo } from "@/components/account-card/formatters";
 import {
   creditPriorityRank,
   DEFAULT_SORT,
@@ -418,5 +419,117 @@ describe("sortAccounts 标记", () => {
     ];
     const result = sortAccounts(expired, { key: "mark", dir: "desc" }, inputs());
     expect(ids(result.ordered)).toEqual(["expired", "live"]);
+  });
+});
+
+/**
+ * issue #184：「最后使用」按 `lastUsedAt`（本机切换生效时刻）比较。
+ *
+ * 语义要求与「标记」一致：**缺值恒排最后，与方向无关**；同值保持传入顺序。
+ */
+describe("sortAccounts 最后使用", () => {
+  const accounts = [
+    account("week", { lastUsedAt: now - 7 * 86_400_000, lastUsedClient: "rotate" }),
+    account("never"),
+    account("hour", { lastUsedAt: now - 3_600_000, lastUsedClient: "vscode" }),
+    account("minute", { lastUsedAt: now - 60_000, lastUsedClient: "workbuddy" }),
+  ];
+
+  it("默认降序：刚切过的在前，无记录的恒末尾", () => {
+    const result = sortAccounts(accounts, { key: "lastUsed", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["minute", "hour", "week", "never"]);
+  });
+
+  it("升序同样把无记录的放最后（不会因为方向翻转顶到最前）", () => {
+    const result = sortAccounts(accounts, { key: "lastUsed", dir: "asc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["week", "hour", "minute", "never"]);
+  });
+
+  it("同值稳定：时间戳完全相同的账号保持原有顺序", () => {
+    const tied = [
+      account("a", { lastUsedAt: now - 60_000 }),
+      account("b", { lastUsedAt: now - 60_000 }),
+      account("c", { lastUsedAt: now - 60_000 }),
+    ];
+    const result = sortAccounts(tied, { key: "lastUsed", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["a", "b", "c"]);
+  });
+
+  it("不依赖积分就绪：积分还在加载也能按最后使用排", () => {
+    const result = sortAccounts(accounts, { key: "lastUsed", dir: "desc" }, inputs({ creditLoadingMap: { hour: true } }));
+    expect(result.ready).toBe(false);
+    expect(ids(result.ordered)).toEqual(["minute", "hour", "week", "never"]);
+  });
+
+  it("默认方向是 desc，且读回旧偏好不受影响", () => {
+    expect(nextSortState({ key: "name", dir: "asc" }, "lastUsed")).toEqual({ key: "lastUsed", dir: "desc" });
+    expect(parseSort('{"key":"lastUsed","dir":"asc"}')).toEqual({ key: "lastUsed", dir: "asc" });
+    expect(parseSort("lastUsed")).toEqual({ key: "lastUsed", dir: "desc" });
+  });
+
+  it("缺失 / 非数字的 lastUsedAt 按缺值处理", () => {
+    const dirty = [
+      account("nan", { lastUsedAt: Number.NaN }),
+      account("ok", { lastUsedAt: now - 60_000 }),
+      account("nullish", { lastUsedAt: null }),
+    ];
+    const result = sortAccounts(dirty, { key: "lastUsed", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["ok", "nan", "nullish"]);
+  });
+
+  /**
+   * `lastUsedAt: 0` 与「从未记录」同义：后端（`account/display.rs`）已经把非正数归一成
+   * `null`，前端不能把漏网的 `0` 当成「1970 年用过」—— 升序时它会顶到最前，
+   * 而卡片上又不显示任何徽标，用户看到的排序就自相矛盾。
+   */
+  it("lastUsedAt 为 0 按「从未使用」处理：不参与排序、不显示徽标", () => {
+    const zeroed = [
+      account("zero", { lastUsedAt: 0 }),
+      account("used", { lastUsedAt: now - 60_000 }),
+      account("never", { lastUsedAt: null }),
+    ];
+    // 升序 / 降序都把 `0` 与 `null` 一起放到最后，且保持原来的相对顺序。
+    expect(ids(sortAccounts(zeroed, { key: "lastUsed", dir: "asc" }, inputs()).ordered)).toEqual([
+      "used",
+      "zero",
+      "never",
+    ]);
+    expect(ids(sortAccounts(zeroed, { key: "lastUsed", dir: "desc" }, inputs()).ordered)).toEqual([
+      "used",
+      "zero",
+      "never",
+    ]);
+    // 徽标（卡片右侧「最后使用」）：`<= 0` 视为从未 → 文案为 null，chip 整体不渲染。
+    expect(formatLastUsedAgo(0, now)).toBeNull();
+    expect(formatLastUsedAgo(-1, now)).toBeNull();
+    expect(formatLastUsedAgo(now - 60_000, now)).not.toBeNull();
+  });
+});
+
+/** 「添加时间」按官方 `createdAt` 比较；同样缺值恒末尾、同值稳定。 */
+describe("sortAccounts 添加时间", () => {
+  const accounts = [
+    account("old", { createdAt: now - 90 * 86_400_000 }),
+    account("unknown", { createdAt: null }),
+    account("new", { createdAt: now - 86_400_000 }),
+  ];
+
+  it("默认降序：新加的账号在前，未知时刻恒末尾", () => {
+    const result = sortAccounts(accounts, { key: "createdAt", dir: "desc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["new", "old", "unknown"]);
+  });
+
+  it("升序同样把未知时刻放最后", () => {
+    const result = sortAccounts(accounts, { key: "createdAt", dir: "asc" }, inputs());
+    expect(ids(result.ordered)).toEqual(["old", "new", "unknown"]);
+  });
+
+  it("同值稳定且默认方向是 desc", () => {
+    const tied = [
+      account("a", { createdAt: now - 1_000 }),
+      account("b", { createdAt: now - 1_000 }),
+    ];
+    expect(ids(sortAccounts(tied, { key: "createdAt", dir: "desc" }, inputs()).ordered)).toEqual(["a", "b"]);
+    expect(nextSortState({ key: "name", dir: "asc" }, "createdAt")).toEqual({ key: "createdAt", dir: "desc" });
   });
 });

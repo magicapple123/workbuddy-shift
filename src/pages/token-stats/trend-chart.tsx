@@ -237,13 +237,14 @@ export function TrendChart({ source }: { source: TokenStatsSource }) {
   useEffect(() => {
     if (modelFilter !== "all" && !modelOptions.includes(modelFilter)) setModelFilter("all");
   }, [modelFilter, modelOptions]);
-  const dailySeries = modelFilter === "all"
-    ? source.daily
-    : source.dailyByModel?.[modelFilter] ?? [];
-  const points = useMemo(
-    () => fillRangePoints(rangePoints(dailySeries, range), range),
-    [range, dailySeries],
-  );
+  // 序列必须在 `useMemo` 内部算：写成外层的三元表达式时 `? … : []` 每次都产生新数组，
+  // 依赖它的 `useMemo` 就每次渲染都重算（`react-hooks/exhaustive-deps` 的历史 warning）。
+  // 计算逻辑与依赖项（modelFilter / range / 两份源数据）与改写前完全等价。
+  const points = useMemo(() => {
+    const dailySeries =
+      modelFilter === "all" ? source.daily : source.dailyByModel?.[modelFilter] ?? [];
+    return fillRangePoints(rangePoints(dailySeries, range), range);
+  }, [modelFilter, range, source.daily, source.dailyByModel]);
   const totals = useMemo(() => rangeTotals(points), [points]);
   const chartData: TrendChartPoint[] = points.map((point) => ({
     ...point,

@@ -93,7 +93,7 @@ export function useAccountsPage() {
   const travelAvailable = variantSupportsTravel(variant);
   const enabledTools = useSupportedTools();
   const [compact, toggleCompact] = useCompactMode();
-  /** 排序偏好（localStorage `accounts.sort`）：七项单选 + 同一项再点反转。 */
+  /** 排序偏好（localStorage `accounts.sort`）：九项单选 + 同一项再点反转。 */
   const [sort, setSort] = usePersistedPreferenceState(SORT_PREFERENCE);
   /** 点击某个维度：非当前项切到该维度（用其默认方向），当前项只翻转方向。 */
   const onSortChange = useCallback(
@@ -212,6 +212,15 @@ export function useAccountsPage() {
         toast.error("Token 刷新失败", {
           description: `${label}：需重新登录${res.needsReloginReason ? `（${res.needsReloginReason}）` : ""}`,
         });
+      } else if (res.refreshSkipped) {
+        // 抢不到凭据写入锁时 core 直接放弃刷新（issue #202）：既没打接口也没写盘，
+        // 绝不能报「已刷新」，否则用户以为令牌已续期，实际一个字节都没变。
+        toast.warning("稍后重试（未写入任何凭据）", {
+          description: res.refreshSkippedReason,
+        });
+        // 列表照旧刷新（诊断字段可能变化），但到此为止，绝不落进成功提示。
+        void fetchAll();
+        return;
       } else {
         toast.success("Token 已刷新", { description: label });
       }

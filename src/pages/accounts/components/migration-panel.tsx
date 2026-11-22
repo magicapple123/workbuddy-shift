@@ -2,7 +2,10 @@ import { ExternalLink, FileDown, FileUp, QrCode } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { Button } from "@/components/ui/button";
+import * as api from "@/lib/api";
 import type { WbVariant } from "@/lib/types";
+
+import { EncryptedBackupActions } from "./encrypted-backup-actions";
 
 interface Props {
   variant: WbVariant;
@@ -10,10 +13,22 @@ interface Props {
   onAdd: () => void;
   onImport: () => void;
   onExport: () => void;
+  /** 加密导入完成后刷新账号列表（加密导入不经预览勾选，只能靠回调通知页面）。 */
+  onEncryptedImported?: () => void;
 }
 
-/** 「添加与迁移账号」面板：OAuth 接入、导入备份、导出账号。 */
-export function AccountMigrationPanel({ variant, accountCount, onAdd, onImport, onExport }: Props) {
+/** 「添加与迁移账号」面板：OAuth 接入、导入备份、导出账号（含加密导入/导出）。 */
+export function AccountMigrationPanel({
+  variant,
+  accountCount,
+  onAdd,
+  onImport,
+  onExport,
+  onEncryptedImported,
+}: Props) {
+  // 加密导入/导出要本机绝对路径（保存/打开对话框产物），WebUI 与演示模式没有等价入口。
+  const showEncrypted = api.isDesktop() && !api.isDemoMode();
+
   return (
     <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-[0_6px_20px_rgba(15,23,42,.025)]">
       <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
@@ -55,6 +70,10 @@ export function AccountMigrationPanel({ variant, accountCount, onAdd, onImport, 
               <FileDown />导出
             </Button>
           </DemoAction>
+          {/* issue #186：加密导入/导出只在桌面端出现（需要本机绝对路径）。 */}
+          {showEncrypted ? (
+            <EncryptedBackupActions accountCount={accountCount} onImported={onEncryptedImported} />
+          ) : null}
         </div>
       </div>
     </div>

@@ -1,5 +1,13 @@
 import { Fragment, type ReactNode } from "react";
-import { CalendarCheck2, CalendarDays, CalendarOff, Gauge, PlaneTakeoff, Star } from "lucide-react";
+import {
+  CalendarCheck2,
+  CalendarDays,
+  CalendarOff,
+  Gauge,
+  History,
+  PlaneTakeoff,
+  Star,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -14,9 +22,12 @@ import type {
 
 import { chipClass } from "./chip-class";
 import {
+  formatLastUsedAgo,
   formatRateLimitClock,
   formatRateLimitRemaining,
   jetbrainsTooltip,
+  lastUsedAriaLabel,
+  lastUsedClientLabel,
   travelTooltip,
   vscodeExtTooltip,
 } from "./formatters";
@@ -28,7 +39,8 @@ import { selectCompactStatusChips, STATUS_PRIORITY, type StatusChipDescriptor } 
 export { chipClass };
 
 /**
- * 卡片头部的状态 chip 区：标记 / 企业版 / 签到 / 旅行 / 限额 / 失效 / 建议优先 / 多端在用。
+ * 卡片头部的状态 chip 区：标记 / 企业版 / 签到 / 旅行 / 最近切换 / 限额 / 失效 /
+ * 建议优先 / 多端在用。
  *
  * R5-05 起把「一串条件 JSX」重构成数据数组 `StatusChipDescriptor[]`：
  * - 非紧凑卡：全部渲染，顺序与改造前一致（视觉零变化）；
@@ -144,7 +156,19 @@ export function AccountStatusChips({
     });
   }
 
-  // 6）模型限额（直接影响当前任务）。
+  // 6）最近切换（issue #184）：本机最后一次把该账号切到某个客户端。
+  //    没有任何记录（旧账号库 / 从未切换过）时**不渲染**，也不显示「从未」这类噪音。
+  const lastUsed = lastUsedChip(account, now, compact);
+  if (lastUsed) {
+    chips.push({
+      key: "lastUsed",
+      priority: STATUS_PRIORITY.lastUsed,
+      detail: lastUsed.label,
+      node: lastUsed.node,
+    });
+  }
+
+  // 7）模型限额（直接影响当前任务）。
   const limits = rateLimitInfo(rateLimits, now, rateLimitBorrowed);
   if (limits) {
     chips.push({
@@ -155,7 +179,7 @@ export function AccountStatusChips({
     });
   }
 
-  // 7）需重新登录 / Token 已过期（阻断使用）。
+  // 8）需重新登录 / Token 已过期（阻断使用）。
   const reloginLabel = account.needsRelogin
     ? "需重新登录"
     : typeof account.expiresAt === "number" && account.expiresAt < Date.now()
@@ -170,7 +194,7 @@ export function AccountStatusChips({
     });
   }
 
-  // 8）建议优先使用（有即将到期积分）。
+  // 9）建议优先使用（有即将到期积分）。
   if (creditPriority) {
     chips.push({
       key: "creditPriority",
@@ -189,7 +213,7 @@ export function AccountStatusChips({
     });
   }
 
-  // 9）多端在用汇总（非紧凑，纯信息）。
+  // 10）多端在用汇总（非紧凑，纯信息）。
   if (!compact && activeProductCount >= 2) {
     chips.push({
       key: "multiTool",
@@ -232,6 +256,62 @@ function activeMarkOf(account: AccountMeta, now: number): AccountMark | null {
   if (!mark) return null;
   if (typeof mark.expiresAt === "number" && mark.expiresAt <= now) return null;
   return mark;
+}
+
+/**
+ * 「最近切换」chip（issue #184）：显式相对时间 + hover 说明来源端。
+ *
+ * - 没有任何记录（`lastUsedAt` 缺失 / 非正数）返回 `null`：卡片上什么都不显示，
+ *   不出现「从未切换」；
+ * - 非紧凑卡：`⟳ 3 小时前`（图标 + 相对时间），hover 给「最近切换：3 小时前 · 来自 VS Code 插件」；
+ * - 紧凑卡：只留图标，文案全部进 tooltip（账号名优先，不给纯信息 chip 让位）。
+ *
+ * `label` 是读屏与 `+N` tooltip 共用的纯文本，保证视觉与读屏拿到同一份信息。
+ */
+function lastUsedChip(
+  account: AccountMeta,
+  now: number,
+  compact: boolean,
+): { node: ReactNode; label: string } | null {
+  const lastUsedAt = account.lastUsedAt;
+  const ago = formatLastUsedAgo(lastUsedAt, now);
+  // `ago` 为空即「从未记录」：徽标整体不渲染（`lastUsedAt` 的合法性由 `ago` 一并判定）。
+  if (!ago || typeof lastUsedAt !== "number") return null;
+  const label = lastUsedAriaLabel(lastUsedAt, now, account.lastUsedClient);
+  const source = lastUsedClientLabel(account.lastUsedClient);
+  const tooltip = source ? `最近切换：${ago} · 来自 ${source}` : `最近切换：${ago}`;
+
+  if (compact) {
+    return {
+      label,
+      node: statusIconChip({
+        icon: <History className="size-3.5" />,
+        label,
+        tooltip,
+        variant: "secondary",
+        muted: true,
+      }),
+    };
+  }
+
+  return {
+    label,
+    node: (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge
+            variant="secondary"
+            className={cn(chipClass, "gap-1 px-1.5 text-muted-foreground")}
+            aria-label={label}
+          >
+            <History className="size-3.5" aria-hidden="true" />
+            {ago}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent side="top">{tooltip}</TooltipContent>
+      </Tooltip>
+    ),
+  };
 }
 
 export function statusIconChip({

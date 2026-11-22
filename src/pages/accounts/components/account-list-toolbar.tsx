@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, Columns3, RefreshCw, Rows3 } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Columns3, RefreshCw, Rows3, Sparkles } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { Badge } from "@/components/ui/badge";
@@ -28,12 +28,18 @@ interface Props {
   refreshLabel: string;
   demoMode: boolean;
   onRefresh: () => void;
-  /** 当前排序（七项单选 + 同项反转）。 */
+  /** 当前排序（九项单选 + 同项反转）。 */
   sort: SortState;
   /** 点击某个维度：非当前项=切换并按默认方向，当前项=只翻转方向。 */
   onSortChange: (key: SortKey) => void;
   /** 限额监听开关；`false` 时「额度恢复时间」置灰（`null`=配置未读到，不禁用）。 */
   rateLimitEnabled: boolean | null;
+  /** 「每日活跃」正在跑：按钮禁用并显示进度态（结果面板在工具栏下方）。 */
+  dailyActivityBusy: boolean;
+  /** 账号库为空时禁用「每日活跃」（没有账号可跑）。 */
+  dailyActivityDisabled: boolean;
+  /** 打开「每日活跃」二次确认框（确认后才真正发请求）。 */
+  onRunDailyActivity: () => void;
 }
 
 interface SortOption {
@@ -43,13 +49,16 @@ interface SortOption {
   hint: string;
 }
 
-/** 七个排序维度的文案（顺序即菜单顺序）。 */
+/** 九个排序维度的文案（顺序即菜单顺序）。 */
 const SORT_OPTIONS: readonly SortOption[] = [
   { key: "default", label: "默认", hint: "按积分优先级" },
+  // issue #184：账号一多就看不出「刚切过哪个」，放在默认项之后，最容易被发现。
+  { key: "lastUsed", label: "最后使用", hint: "刚切过的在前" },
   { key: "rateLimitRecovery", label: "额度恢复时间", hint: "最快恢复在前" },
   { key: "creditExpiry", label: "积分到期时间", hint: "最快到期在前" },
   { key: "creditRemaining", label: "剩余积分", hint: "多到少" },
   { key: "creditUpdated", label: "最近更新", hint: "新到旧" },
+  { key: "createdAt", label: "添加时间", hint: "新加的在前" },
   { key: "name", label: "名称", hint: "拼音升序" },
   // R5-04 第七项：按标记的创建时刻排（默认降序 = 最近标记的在前）。
   { key: "mark", label: "标记", hint: "最近标记在前" },
@@ -68,7 +77,7 @@ function directionIcon(dir: SortState["dir"]) {
 /**
  * 账号列表工具栏：标题 + 计数 + 排序 + 紧凑模式 + 刷新全部积分/签到。
  *
- * 排序是「七项单选 + 同一项再点反转」：点击非当前项切到该维度并按默认方向，
+ * 排序是「九项单选 + 同一项再点反转」：点击非当前项切到该维度并按默认方向，
  * 点击当前项只翻转方向且菜单不关闭（方便连点比较两个方向）。
  */
 export function AccountListToolbar({
@@ -84,6 +93,9 @@ export function AccountListToolbar({
   sort,
   onSortChange,
   rateLimitEnabled,
+  dailyActivityBusy,
+  dailyActivityDisabled,
+  onRunDailyActivity,
 }: Props) {
   const rateLimitSortDisabled = rateLimitEnabled === false;
 
@@ -185,6 +197,42 @@ export function AccountListToolbar({
               </Button>
             </TooltipTrigger>
             <TooltipContent side="top">{compact ? "切换为宽松模式" : "切换为紧凑模式"}</TooltipContent>
+          </Tooltip>
+          {/*
+            国际版每日活跃（issue #214）：紧邻「刷新并签到」，但**完全独立**——它不做签到，
+            而是给每个国际版账号跑一轮网页会话。点击只开二次确认框，确认后才发请求；
+            进行中禁用并显示进度态（结果面板在工具栏下方，失败不清空已有结果行）。
+          */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <DemoAction>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 gap-1.5 rounded-lg px-2"
+                    disabled={dailyActivityDisabled || dailyActivityBusy}
+                    onClick={onRunDailyActivity}
+                    aria-label={
+                      dailyActivityBusy ? "每日活跃：正在运行" : "每日活跃（国际版，手动触发）"
+                    }
+                    aria-busy={dailyActivityBusy || undefined}
+                  >
+                    <Sparkles className={dailyActivityBusy ? "animate-pulse" : undefined} />
+                    <span className="hidden sm:inline">
+                      {dailyActivityBusy ? "运行中…" : "每日活跃"}
+                    </span>
+                  </Button>
+                </DemoAction>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {demoMode
+                ? "演示模式下不可操作"
+                : dailyActivityBusy
+                  ? "正在为账号逐个跑会话，完成前不能重复触发"
+                  : "为国际版账号跑一轮每日活跃会话（国内版账号会标注「不支持」）"}
+            </TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>

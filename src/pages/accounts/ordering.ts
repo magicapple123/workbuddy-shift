@@ -30,17 +30,19 @@ export function creditPriorityRank(credit?: CreditExpiry): number {
 }
 
 /* -------------------------------------------------------------------------- */
-/* 排序维度（七项单选 + 同一项再点反转）                                        */
+/* 排序维度（九项单选 + 同一项再点反转）                                        */
 /* -------------------------------------------------------------------------- */
 
 /**
  * 账号卡片排序维度。
  *
  * - `default`：现有的积分优先级排序（即将到期 > 已过期 > 正常）。
+ * - `lastUsed`：「最后使用」——本机最后一次把账号切到某个客户端的时刻（issue #184）。
  * - `rateLimitRecovery`：「额度恢复时间」——受限模型中最快恢复的时刻。
  * - `creditExpiry`：「积分到期时间」——仍有剩余的资源里最早到期时刻。
  * - `creditRemaining`：「剩余积分」——当前剩余积分总量。
  * - `creditUpdated`：「最近更新」——积分采集时刻（卡片右下「18:33 更新」）。
+ * - `createdAt`：「添加时间」——账号进入本机账号库的时刻（官方 `createdAt`）。
  * - `name`：显示名（中文按拼音，数字按数值）。
  * - `mark`：账号标记的创建时刻（R5-04，第七项）——最近标记的在前。
  *
@@ -48,10 +50,12 @@ export function creditPriorityRank(credit?: CreditExpiry): number {
  */
 export type SortKey =
   | "default"
+  | "lastUsed"
   | "rateLimitRecovery"
   | "creditExpiry"
   | "creditRemaining"
   | "creditUpdated"
+  | "createdAt"
   | "name"
   | "mark";
 
@@ -62,13 +66,15 @@ export interface SortState {
   dir: SortDirection;
 }
 
-/** 七项排序维度的固定迭代顺序（菜单与解析共用）。 */
+/** 九项排序维度的固定迭代顺序（菜单与解析共用）。 */
 export const SORT_KEYS: readonly SortKey[] = [
   "default",
+  "lastUsed",
   "rateLimitRecovery",
   "creditExpiry",
   "creditRemaining",
   "creditUpdated",
+  "createdAt",
   "name",
   "mark",
 ];
@@ -80,10 +86,14 @@ export const SORT_KEYS: readonly SortKey[] = [
  */
 export const SORT_DEFAULT_DIRECTION: Record<SortKey, SortDirection> = {
   default: "asc",
+  // 「刚切过哪个」是最新一次使用，默认新到旧。
+  lastUsed: "desc",
   rateLimitRecovery: "asc",
   creditExpiry: "asc",
   creditRemaining: "desc",
   creditUpdated: "desc",
+  // 「添加时间」与「最近更新」同向：新加的账号在前。
+  createdAt: "desc",
   name: "asc",
   // 「最近标记的在前」是打过标记之后的第一诉求，默认方向与「最近更新」一致。
   mark: "desc",
@@ -202,6 +212,30 @@ const zhNameCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: 
 /** 维度取值类型：数字按大小比，字符串按中文显示名规则比。 */
 type SortMetric = number | string;
 
+/**
+ * 时间戳类字段的取值：缺失 / `null` / 非有限数（含 `NaN`）一律视为缺值。
+ *
+ * 「有值 / 无值」的分组由调用方负责把缺值排到最后，这里只保证脏数据不会参与大小比较
+ * （`NaN` 参与比较会让整个排序结果不可预测）。
+ */
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * 「最后使用」时间戳的取值：缺失 / `null` / 非有限数 / **非正数**一律视为「从未记录」。
+ *
+ * 后端 `account/display.rs` 已经把 `ms <= 0` 归一成 `null`，但旧账号库、手工改过的 JSON
+ * 与其它宿主仍可能给出 `0`。前端三处必须同口径（否则同一份数据在不同地方说法不同）：
+ * - 排序（这里）：`0` 当缺值 → 恒排最后，不会被升序顶到最前；
+ * - 卡片徽标（`formatLastUsedAgo`）：`<= 0` → `null` → 徽标整体不渲染；
+ * - 「从未使用」文案：与徽标同源，不额外造一个「0 秒前」。
+ */
+function lastUsedOrNull(value: number | null | undefined): number | null {
+  const ms = finiteOrNull(value);
+  return ms !== null && ms > 0 ? ms : null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* 默认排序（原 orderAccountsByCredit，行为与字节不变）                         */
 /* -------------------------------------------------------------------------- */
@@ -256,7 +290,7 @@ export function orderAccountsByCredit(
 }
 
 /* -------------------------------------------------------------------------- */
-/* 七项排序入口                                                                 */
+/* 九项排序入口                                                                 */
 /* -------------------------------------------------------------------------- */
 
 /** 排序所需的全部信号快照（都是账号页已有的映射，避免排序层再连 store）。 */
@@ -286,9 +320,9 @@ function needsCreditReady(key: SortKey): boolean {
 /**
  * 按当前排序偏好排列账号卡片。
  *
- * - `default` 直接复用 `orderAccountsByCredit`（行为完全一致）。
+ * - `default` 直接复用 `orderAccountsByCredit`（行为完全一致），也是缺省值。
  * - 积分类维度（剩余积分 / 积分到期）在积分未全部就绪时保持后端顺序，避免卡片乱跳；
- *   名称 / 最近更新 / 恢复时间不依赖积分就绪。
+ *   名称 / 最近更新 / 最后使用 / 添加时间 / 恢复时间不依赖积分就绪。
  * - **缺值恒排最后，与方向无关**：先按「有值 / 无值」分组再在组内按方向比较，
  *   否则升序时「没有限额」的账号会冲到最前面。同分保持传入顺序（稳定）。
  * - `priorityAccountId` 始终按默认排序的语义给出（「建议优先使用」徽标不随排序变化）。
@@ -306,6 +340,10 @@ export function sortAccounts(
   const now = inputs.now ?? Date.now();
   const metricOf = (account: AccountMeta): SortMetric | null => {
     switch (sort.key) {
+      case "lastUsed":
+        // 「最后使用」直接读后端下发的时间戳；旧账号库没有记录 → null → 恒排最后
+        // （卡片上也不显示徽标，两者口径一致）。`0` / 负数与缺失同义，见 `lastUsedOrNull`。
+        return lastUsedOrNull(account.lastUsedAt);
       case "rateLimitRecovery":
         return soonestRateLimitResetAt(inputs.rateLimitMap[account.id], now);
       case "creditExpiry":
@@ -314,6 +352,9 @@ export function sortAccounts(
         return creditRemainingValue(inputs.creditMap[account.id]);
       case "creditUpdated":
         return inputs.creditUpdatedAtMap[account.id] ?? null;
+      case "createdAt":
+        // 「添加时间」用官方 `createdAt`（账号进入本机账号库的时刻）。
+        return finiteOrNull(account.createdAt);
       case "name": {
         const name = displayName(account).trim();
         return name.length > 0 ? name : null;

@@ -22,6 +22,7 @@ export type StatusChipKey =
   | "creditPriority"
   | "checkinDone"
   | "travel"
+  | "lastUsed"
   | "enterprise"
   | "multiTool";
 
@@ -49,10 +50,15 @@ export const STATUS_PRIORITY: Record<StatusChipKey, number> = {
   checkinDone: 7,
   /** 旅行状态，纯信息。 */
   travel: 8,
+  /**
+   * 「最近切换」（issue #184）：纯信息，但比身份属性更贴近「我刚做了什么」，
+   * 所以排在 `enterprise` 之前——紧凑卡只剩一个空槽时优先留下它。
+   */
+  lastUsed: 9,
   /** 身份属性。 */
-  enterprise: 9,
+  enterprise: 10,
   /** 多端在用汇总。 */
-  multiTool: 10,
+  multiTool: 11,
 };
 
 /** 紧凑卡固定 3 个状态槽（含标记）。 */
