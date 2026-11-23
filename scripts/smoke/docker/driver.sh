@@ -154,7 +154,11 @@ smoke_group "K1 docker pull"
 # 并白烧一次处置。查不到工作流时（手动验收老 tag / 本地跑 / 无 gh）退回短重试，语义不变。
 TAG="v${VERSION}"
 BUILD_WAIT_SECONDS="${SMOKE_DOCKER_BUILD_WAIT_SECONDS:-2700}"
-PULL_ATTEMPTS="${SMOKE_DOCKER_PULL_ATTEMPTS:-6}"
+# pull 的重试窗口要盖住「manifest 可见 ≠ 立刻能拉」这段 GHCR 传播/限流延迟。
+# v0.3.2 实测：`docker manifest inspect` 18:46 就成功，18:51 的 `docker pull` 仍失败，
+# 19:22 用同一份镜像重跑才绿。旧的 6 次 × 20s ≈ 100s 完全盖不住，于是每次发版都可能
+# 假红一次、再人工重跑。18 次 × 20s ≈ 340s，仍远小于 job 的 40 分钟预算。
+PULL_ATTEMPTS="${SMOKE_DOCKER_PULL_ATTEMPTS:-18}"
 PULL_INTERVAL_SECONDS="${SMOKE_DOCKER_PULL_INTERVAL_SECONDS:-20}"
 
 # 该 tag 上最近一次 push 触发的 `docker.yml` 结论，形如 `in_progress/-`、`completed/success`。
