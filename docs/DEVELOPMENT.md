@@ -43,7 +43,7 @@ pnpm install
 pnpm run tauri dev          # 开发模式（默认进沙箱，不碰真实数据）
 pnpm run dev                # 只起 Vite 前端（1420 端口；桌面开发用 tauri dev）
 pnpm test                   # 前端单元测试（vitest）
-pnpm run lint               # ESLint（含 react-hooks；warnings 上限 10）
+pnpm run lint               # ESLint（含 react-hooks；warnings 上限 9，棘轮）
 pnpm run typecheck          # tsc strict
 pnpm run build              # 生产构建（tsc + vite build，产物 dist/）
 pnpm run build:app          # 构建 debug .app（含前端资源补丁，仅 macOS）
@@ -83,6 +83,7 @@ pnpm run build
 
 # 内置悬浮窗前端（workspace 成员）
 pnpm --filter workbuddy-shift-companion-ui run typecheck
+pnpm --filter workbuddy-shift-companion-ui run test          # 入口冒烟（happy-dom，issue #5）
 pnpm --filter workbuddy-shift-companion-ui run build:embed
 
 # 仓库级契约与静态规则（CI 同样执行）
@@ -106,8 +107,9 @@ cargo +1.95 check -p wb-shift-core -p wb-shift-server -p companion-core -p compa
   server / desktop / companion-desktop 测试、`cargo fmt --all`、clippy、前端 build、
   companion-ui typecheck/build:embed 在 macOS lint job 上执行；Linux 与 Windows job
   各自跑对应 cfg 的 core+server clippy（Linux 另含 companion-core/runtime）；
-  `pnpm run lint` / `pnpm run typecheck` / `pnpm test` 在 ubuntu job；`msrv` job 用 1.95
-  检查四个不依赖 Tauri/webkit 的 crate。
+  `pnpm run lint` / `pnpm run typecheck` / `pnpm test` 与 companion-ui 的入口冒烟测试
+  （`pnpm --filter workbuddy-shift-companion-ui run test`）在 ubuntu 的 `frontend-tests`
+  job；`msrv` job 用 1.95 检查四个不依赖 Tauri/webkit 的 crate。
 - `cargo fmt --all` 覆盖整个 workspace，CI 用同样的 `cargo fmt --all -- --check`。
   内置会话悬浮窗的 clippy 已纳入 CI：Linux runner 检查 `companion-core`/`companion-runtime`，
   macOS lint job 检查 `companion-core`/`companion-runtime`/`companion-desktop`；

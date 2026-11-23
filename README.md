@@ -215,7 +215,7 @@ pnpm install            # 根目录一次装完根工程与 companion-ui
 pnpm run tauri dev      # 前端（Vite）+ 桌面壳；首次会构建内置悬浮窗资源
 
 pnpm run typecheck      # tsc strict
-pnpm run lint           # ESLint，warnings 上限 10（棘轮，新增即失败）
+pnpm run lint           # ESLint，warnings 上限 9（棘轮，新增即失败）
 pnpm test               # 前端单元测试（vitest）
 pnpm run build          # 生产构建：先清悬浮窗演示产物（build-companion.mjs clean），再 tsc + vite build
 

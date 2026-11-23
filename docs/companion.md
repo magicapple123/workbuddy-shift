@@ -126,6 +126,46 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
 （宿主传入 `manage_autostart: false`）。打包进去的是固定版本的页面与运行时，运行时不会
 下载可执行代码。
 
+## 入口模块初始化顺序（改动 `desktop/rail.tsx` 前必读）
+
+两个入口页面（`desktop.html` → `src/desktop/rail.tsx`、`desktop-settings.html` →
+`src/desktop/settings.tsx`）都在**模块顶层**直接挂载 React。这类文件有一条硬约束：
+
+> **顶层副作用（`void boot(...)`）必须写在模块最末尾，位于它引用到的所有顶层
+> `let` / `const` / `class` 绑定之后。**
+
+原因是 TDZ 会伪装成「什么都没有发生」：`boot()` 是 `async`，但它在第一个 `await`
+之前会同步执行 `productionOptions()`，而后者要写 `let stopAttention`。调用写在声明之前
+就会抛 `ReferenceError: Cannot access '…' before initialization`；因为异常发生在 async
+函数里，`void boot(...)` 把它吞成 **unhandled promise rejection**——控制台只有一条
+「Uncaught (in promise)」，脚本其他部分全部正常，`<main id="desktop-rail">` 永远没有
+子节点。悬浮窗是 `transparent(true)`，所以用户看到的是「完全没有悬浮栏」而不是报错窗口
+（GitHub issue #5：0.2.x–0.3.0 三个版本一直如此；演示构建走 `createDemoRailOptions()`
+不经过 `productionOptions`，所以网页演示和设置页都正常，只有真实悬浮栏空白）。
+
+门禁有两道，**覆盖范围不同**（都必要，但不能互相替代）：
+
+1. **写法——两个入口文件都覆盖**：`eslint.config.js` 对这两个入口文件开启
+   `@typescript-eslint/no-use-before-define`（`functions/classes/variables/enums/typedefs`
+   全开）。不放开到全仓库——历史代码里「先用后声明」的写法很多，全量开启会成片报错，
+   反而逼人加 disable。`pnpm run lint` 在 CI 的 `frontend-tests` job 里执行。
+2. **行为——目前只覆盖 `rail.tsx`**：`companion-ui/src/desktop/rail.smoke.test.tsx`
+   （`pnpm --filter workbuddy-shift-companion-ui run test`，happy-dom，
+   配置见 `companion-ui/vitest.config.ts`）。它**真实求值**入口模块——不 mock
+   `boot` / `productionOptions`——先挂 `process.on('unhandledRejection')`，然后断言
+   `#desktop-rail` 的 `childElementCount > 0` 且捕获列表为空。判据是「症状」而
+   不是「某一种写法」，所以 ESLint 规则将来被放宽或出现新的顶层顺序陷阱时它仍然有效。
+   happy-dom 21 没有 `EventSource`，测试里给了一个只含 `onmessage` / `onerror` /
+   `close` 的 stub（非 Tauri 环境下生产 transport 就是 `new EventSource('/events')`）；
+   stub 同时记录构造过的地址，用来证明跑的是 `productionOptions()` 那条生产装配路径。
+
+**`settings.tsx` 为什么没有行为门禁**：它目前是纯**同步**挂载
+（`if (container) createRoot(container).render(<SettingsForm />)`，全程没有 `async`
+函数），这类代码抛错会当场冒到控制台，不存在「异常被 async 吞成静默 rejection」的形态，
+行为测试能证明的东西已经被 ESLint 那条写法规则覆盖。**若哪天给它加了 async 挂载
+（例如先 `await` 配置再渲染），必须同时补一份和 rail 同形态的冒烟测试**——那正是
+issue #5 的复发条件。
+
 ## 公开演示中的悬浮栏
 
 `npm run build:demo` 会额外构建组件的网页演示版本，让访客不安装也能看到悬浮栏：

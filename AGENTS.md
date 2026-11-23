@@ -197,7 +197,9 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
 | 生产代码不得 `lock().unwrap()` | `node scripts/check-rust-locks.mjs` | test.yml · lint job |
 | 宿主层零 `unwrap/expect` | crate 级 clippy deny + `-D warnings` | 本机 + CI clippy |
 | 共享 clippy lint | `[workspace.lints]` + 各 crate 继承 | `cargo clippy` |
-| 前端 hooks/未使用变量/类型问题 | `pnpm run lint`（ESLint，warnings ≤ 10） | test.yml · frontend-tests |
+| 前端 hooks/未使用变量/类型问题 | `pnpm run lint`（ESLint，warnings ≤ 9） | test.yml · frontend-tests |
+| 悬浮窗入口模块「顶层副作用早于模块绑定初始化」（TDZ 被 async 吞成静默失败） | 同上 `pnpm run lint`：`@typescript-eslint/no-use-before-define` 仅对 `companion-ui/src/desktop/{rail,settings}.tsx` 开启，理由见 `docs/companion.md` | test.yml · frontend-tests |
+| 悬浮窗入口冒烟（真实求值 `desktop/rail.tsx`，容器真的挂上 React 子节点且无 unhandled rejection） | `pnpm --filter workbuddy-shift-companion-ui run test`（happy-dom，`companion-ui/vitest.config.ts`） | test.yml · frontend-tests |
 | 前端类型 | `pnpm run typecheck`（tsc strict） | 本机 + CI |
 | 版本单一来源 | `node scripts/check-versions.mjs` | 本机 + CI |
 | Tauri JS 包与 Rust crate 版本配对 | 同上脚本（`checkTauriPairing`） | 本机 + CI |
@@ -214,7 +216,7 @@ companion-core → companion-runtime → companion-desktop → src-tauri（仅�
   `cargo fmt --all -- --check`、三个 clippy 目标、
   `cargo test -p wb-shift-core`（本机 Windows GNU：891 通过；平台 cfg 会增减）、
   `cargo test -p wb-shift-server`、companion 两个 test、`pnpm test`、`pnpm run typecheck`、
-  `pnpm run lint`、`pnpm run build`、`pnpm --filter workbuddy-shift-companion-ui run typecheck/build:embed`、
+  `pnpm run lint`、`pnpm run build`、`pnpm --filter workbuddy-shift-companion-ui run typecheck/test/build:embed`、
   `node scripts/check-versions.mjs`、`node scripts/check-command-routes.mjs`、
   `node scripts/check-api-contract.mjs`、`node scripts/check-rust-locks.mjs`、
   `node scripts/check-structure.mjs`、`node scripts/check-companion-contract.mjs`。
