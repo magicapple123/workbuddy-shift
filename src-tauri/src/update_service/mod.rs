@@ -201,6 +201,16 @@ mod tests {
     use std::sync::MutexGuard;
 
     /// 快照 / BUSY / PACKAGE 都是进程级单例，用例之间必须串行。
+    ///
+    /// **凡是会写全局状态的用例都必须先 `let _guard = lock();`**：`reset()` 之外，
+    /// `mark_ready_to_restart` / `apply_check_result` / `begin_check` / `begin_download` /
+    /// `fail_signature` / `fail` / `advance_progress` / `BusyGuard` / `MENU_PROGRESS_BUCKET`
+    /// 都会改这些单例。漏锁不会稳定报错，而是和并发的另一个用例互相踩——2026-11 CI 上
+    /// `signature_failure_requires_manual_install` 偶发 `left: Some("1.2.3")`、本机复现
+    /// `check_result_carries_notes_…` 偶发 `left: Some(notes)` 都是同一个原因：唯一漏锁的
+    /// `snapshot_serializes_camel_case_contract` 中途调了 `mark_ready_to_restart("1.2.3")`，
+    /// 触发 `apply_check_result` 的 Downloading / ReadyToRestart 早退，把别人的快照顶掉。
+    /// 纯函数用例（`percent_of` / `download_tooltip` / `notify_decision`）不读写全局，不需要锁。
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock() -> MutexGuard<'static, ()> {
@@ -538,6 +548,13 @@ mod tests {
     /// 事件 / 命令负载的字段契约（前端 `UpdateSnapshot` 按此解析）。
     #[test]
     fn snapshot_serializes_camel_case_contract() {
+        // 末段 `mark_ready_to_restart("1.2.3")` 会写全局快照（并顺手改
+        // `MENU_PROGRESS_BUCKET`），不持锁就会和并发用例互踩：CI 上
+        // `signature_failure_requires_manual_install` 因此偶发拿到 `left: Some("1.2.3")`。
+        // 本条断言只依赖局部构造的 `UpdateSnapshot::idle()` 与
+        // `mark_ready_to_restart` 的返回值（它无条件覆盖 phase / latest / percent），
+        // 不读进入时的全局状态，所以不需要先 `reset()`。
+        let _guard = lock();
         let value = serde_json::to_value(UpdateSnapshot::idle()).unwrap();
         assert_eq!(value["phase"], json!("idle"));
         assert_eq!(value["latest"], json!(null));
