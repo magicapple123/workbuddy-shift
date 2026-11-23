@@ -40,4 +40,26 @@ export default tseslint.config(
       ],
     },
   },
+  // 入口模块的「顶层副作用早于模块绑定初始化」门禁（GitHub issue #5）。
+  //
+  // companion-ui 的两个入口在模块顶层直接挂载 React。这类文件里，顶层调用一旦写在
+  // `let` / `const` / `class` 声明之前，就可能在 async 函数里撞上 TDZ，而
+  // `void boot(...)` 把异常吞成 unhandled rejection——页面静默失败、`#desktop-rail`
+  // 永远为空。0.2.x 到 0.3.0 的「看不到会话悬浮栏」正是 `let stopAttention` 写在
+  // `void boot(container)` 之后导致的（见 docs/companion.md 的「入口模块初始化顺序」）。
+  //
+  // 只对这两个入口文件开启（不放开到全仓库）：历史代码里「先用后声明」的写法很多，
+  // 全量开启会成片报错，反而逼人加 disable。入口文件本来就该保持“无顶层顺序依赖”，
+  // 这条约束在这里成本最低、收益最直接。
+  {
+    files: ["companion-ui/src/desktop/rail.tsx", "companion-ui/src/desktop/settings.tsx"],
+    rules: {
+      // 用 TS 版规则而不是核心 `no-use-before-define`：后者不认 TS 的类型引用，
+      // 在 `.tsx` 上容易把类型位置误报成运行时引用。
+      "@typescript-eslint/no-use-before-define": [
+        "error",
+        { functions: true, classes: true, variables: true, enums: true, typedefs: true },
+      ],
+    },
+  },
 );

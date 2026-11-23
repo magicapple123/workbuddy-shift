@@ -19,9 +19,6 @@ disableNativeContentDrag();
  */
 const stopThemeWatch = watchTheme();
 
-const container = document.getElementById('desktop-rail');
-if (container) void boot(container);
-
 /** Set only for the production wiring; the demo build has no real stream. */
 let stopAttention: (() => void) | null = null;
 
@@ -61,3 +58,17 @@ async function boot(target: HTMLElement) {
   }, {once: true});
   controller.start();
 }
+
+/**
+ * 挂载放在模块**最末尾**，不能提前。
+ *
+ * `boot()` 虽然是 async，但它在第一个 `await` 之前会同步执行
+ * `productionOptions(target)`，而后者要写 `stopAttention`。如果这个调用写在
+ * `let stopAttention` 之前，模块顶层就会撞上 TDZ：抛错发生在 async 函数里，
+ * 变成 unhandled promise rejection，页面静默失败——`#desktop-rail` 永远没有子节点，
+ * 窗口又是 `transparent(true)`，用户看到的是「完全没有悬浮栏」（issue #5，0.2.x–0.3.0）。
+ * 放在末尾可以保证所有顶层绑定都已初始化；ESLint 对这两个入口文件开了
+ * `@typescript-eslint/no-use-before-define` 兜底（见 eslint.config.js）。
+ */
+const container = document.getElementById('desktop-rail');
+if (container) void boot(container);
