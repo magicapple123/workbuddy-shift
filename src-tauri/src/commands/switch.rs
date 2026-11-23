@@ -31,10 +31,13 @@ pub async fn switch_account(
     // 入参形状由 core 校验（缺 groupId / previewToken / mode 一律拒绝）；这里只做透传，
     // 不在命令层做业务判定。
     let sync_selections = session::parse_sync_selections(sync_selections.as_ref())?;
+    // 切换流程会 move 走 app（进度回调），复位要用的句柄先留一份。
+    #[cfg(desktop)]
+    let rearm_app = app.clone();
     let progress: switch::ProgressFn = Box::new(move |message| {
         let _ = app.emit("switch-progress", json!({ "message": message }));
     });
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         switch::switch_account(
             Some(&progress),
             &account_id,
@@ -45,5 +48,13 @@ pub async fn switch_account(
         )
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    // 切换会关掉再重启 WorkBuddy，悬浮栏依赖的采集连接随之中断。成功之后复位一次：
+    // 用户开着悬浮窗就让它重新接上，关着就什么都不做（见 `companion::rearm`）。
+    #[cfg(desktop)]
+    {
+        let _ =
+            tauri::async_runtime::spawn_blocking(move || crate::companion::rearm(&rearm_app)).await;
+    }
+    result
 }

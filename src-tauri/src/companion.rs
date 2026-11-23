@@ -48,10 +48,14 @@ pub fn get_companion_enabled(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub async fn set_companion_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub async fn set_companion_enabled(
+    app: AppHandle,
+    enabled: bool,
+    source: Option<String>,
+) -> Result<bool, String> {
     #[cfg(not(desktop))]
     {
-        let _ = (app, enabled);
+        let _ = (app, enabled, source);
         return Err("此平台不支持悬浮窗".into());
     }
     #[cfg(desktop)]
@@ -59,6 +63,8 @@ pub async fn set_companion_enabled(app: AppHandle, enabled: bool) -> Result<bool
         if crate::is_screenshot_demo() {
             return Err("演示模式不启用悬浮窗".into());
         }
+        // 参数 `enabled` 会遮蔽同名函数，这里显式走模块路径。
+        let previous = crate::companion::enabled(&app);
         let host = app.clone();
         let confirmed = tauri::async_runtime::spawn_blocking(move || {
             companion_desktop::set_enabled(&host, enabled)
@@ -66,6 +72,18 @@ pub async fn set_companion_enabled(app: AppHandle, enabled: bool) -> Result<bool
         .await
         .map_err(|error| error.to_string())??;
         crate::tray::refresh_tray_menu(&app);
+        // 只记录「真的变了」的切换：悬浮窗被谁关掉一直是靠猜的（issue #5 之后两次
+        // 无主关闭只能从 toast 反推），带上来源就能在下一次直接定位。
+        if previous != confirmed {
+            wb_shift_core::modules::error_log::record(
+                "backend",
+                "悬浮窗开关已变更",
+                &format!(
+                    "{previous} → {confirmed}，来源={}",
+                    source.as_deref().unwrap_or("unknown")
+                ),
+            );
+        }
         Ok(confirmed)
     }
 }
@@ -92,6 +110,24 @@ pub async fn open_companion_settings(app: AppHandle) -> Result<(), String> {
 pub fn toggle_rail(app: &AppHandle) {
     if enabled(app) {
         companion_desktop::toggle_rail(app);
+    }
+}
+
+/// 账号切换后的复位：切换会关掉并重启 WorkBuddy，悬浮栏依赖的采集连接随之中断。
+///
+/// 重放一次 `set_enabled(true)` 即可——窗口还在就只是 `show()`，采集器会自己重连；
+/// 用户把悬浮窗关着时根本不会走到这里（`enabled()` 为假直接返回），不会违背他的选择。
+#[cfg(desktop)]
+pub fn rearm(app: &AppHandle) {
+    if !enabled(app) {
+        return;
+    }
+    if let Err(error) = companion_desktop::set_enabled(app, true) {
+        wb_shift_core::modules::error_log::record(
+            "backend",
+            "切换账号后重新拉起悬浮窗失败",
+            &error,
+        );
     }
 }
 

@@ -32,7 +32,7 @@ export function CompanionFooter() {
   async function onToggle() {
     if (enabled === null) return;
     try {
-      const confirmed = await changeCompanionEnabled(!enabled);
+      const confirmed = await changeCompanionEnabled(!enabled, "footer");
       toast.success(confirmed ? "已启用会话悬浮窗" : "已关闭会话悬浮窗");
     } catch (cause) {
       toast.error("悬浮窗设置失败", { description: api.asError(cause) });

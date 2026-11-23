@@ -65,11 +65,11 @@ export async function reloadCompanionEnabled() {
   await refresh();
 }
 
-export async function changeCompanionEnabled(enabled: boolean): Promise<boolean> {
+export async function changeCompanionEnabled(enabled: boolean, source?: string): Promise<boolean> {
   if (state.busy || state.enabled === null) throw new Error("悬浮窗状态尚未就绪");
   publish({ ...state, busy: true, error: null });
   try {
-    const confirmed = await api.setCompanionEnabled(enabled);
+    const confirmed = await api.setCompanionEnabled(enabled, source);
     publish({ enabled: confirmed, busy: false, error: null });
     return confirmed;
   } catch (error) {

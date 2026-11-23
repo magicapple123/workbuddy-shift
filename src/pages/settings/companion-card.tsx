@@ -12,7 +12,7 @@ export function CompanionCard() {
 
   async function onToggle(next: boolean) {
     try {
-      const confirmed = await changeCompanionEnabled(next);
+      const confirmed = await changeCompanionEnabled(next, "settings");
       toast.success(confirmed ? "已启用会话悬浮窗" : "已关闭会话悬浮窗");
     } catch (cause) {
       toast.error("悬浮窗设置失败", { description: api.asError(cause) });

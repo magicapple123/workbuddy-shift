@@ -302,11 +302,15 @@ export function getCompanionEnabled(): Promise<boolean> {
   }
 }
 
-/** 返回后端确认的最终状态，不在前端单独持久化。 */
-export function setCompanionEnabled(enabled: boolean): Promise<boolean> {
+/**
+ * 返回后端确认的最终状态，不在前端单独持久化。
+ *
+ * `source` 只用于后端审计（`error.log` 记一条「谁把它关了」），不影响行为。
+ */
+export function setCompanionEnabled(enabled: boolean, source?: string): Promise<boolean> {
   try {
     requireCompanionDesktop();
-    return call("set_companion_enabled", { enabled });
+    return call("set_companion_enabled", { enabled, source });
   } catch (error) {
     return Promise.reject(error);
   }
