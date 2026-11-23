@@ -204,8 +204,9 @@ mod tests {
     ///
     /// **凡是会写全局状态的用例都必须先 `let _guard = lock();`**：`reset()` 之外，
     /// `mark_ready_to_restart` / `apply_check_result` / `begin_check` / `begin_download` /
-    /// `fail_signature` / `fail` / `advance_progress` / `BusyGuard` / `MENU_PROGRESS_BUCKET`
-    /// 都会改这些单例。漏锁不会稳定报错，而是和并发的另一个用例互相踩——2026-11 CI 上
+    /// `fail_signature` / `fail` / `advance_progress` / `remember_notified_version` /
+    /// `should_rebuild_menu`（写 `MENU_PROGRESS_BUCKET`）/ `BusyGuard` 都会改这些单例。
+    /// 漏锁不会稳定报错，而是和并发的另一个用例互相踩——2026-11 CI 上
     /// `signature_failure_requires_manual_install` 偶发 `left: Some("1.2.3")`、本机复现
     /// `check_result_carries_notes_…` 偶发 `left: Some(notes)` 都是同一个原因：唯一漏锁的
     /// `snapshot_serializes_camel_case_contract` 中途调了 `mark_ready_to_restart("1.2.3")`，
