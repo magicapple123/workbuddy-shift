@@ -215,3 +215,8 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm test
+      # companion-ui 的入口冒烟测试（GitHub issue #5）：happy-dom + 真实求值
+      # desktop/rail.tsx，断言 #desktop-rail 真的挂上 React 子节点、且没有
+      # unhandled rejection。与根 `pnpm test` 分开跑：根 vitest.config.ts 是 node
+      # 环境且只收 `src/**/*.test.ts`，companion-ui 需要 happy-dom 与自己的配置。
+      - run: pnpm --filter workbuddy-shift-companion-ui run test
