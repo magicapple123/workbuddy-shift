@@ -600,17 +600,37 @@ jobs:
       # 不等就派发验收，docker 形态会拿到 C（pull 失败）并白烧一次 C 类处置（v0.2.6 实测踩到：
       # Release 20:54 转正、验收 20:57 开跑，镜像还在构建，docker 全红并开了 issue）。
       - name: Wait for container image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME#v}"
-          for i in $(seq 1 60); do
+          TAG="${GITHUB_REF_NAME}"
+          # 窗口必须容得下 docker.yml 的真实耗时：v0.3.0 用了 61 分钟、v0.3.1 用了 55 分钟
+          # （多架构 buildx + 缓存冷启动），而旧窗口只有 20 分钟 —— 于是每一次发版都会先
+          # 超时、再派发一次注定 docker 记 C 的验收（v0.3.1 就这样开了 issue #6）。
+          # 225 × 20s = 75 分钟；同时盯 docker.yml 的状态，它已经结束且没有镜像时不必空等。
+          MAX=225
+          for i in $(seq 1 $MAX); do
             if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
               echo "镜像已就绪：$IMAGE（等待 $((i * 20 - 20))s）"
               exit 0
             fi
-            echo "等待镜像（$i/60）：$IMAGE"
+            STATE=$(gh run list --workflow=docker.yml --limit 1 \
+              --json headBranch,status,conclusion \
+              -q ".[] | select(.headBranch == \"$TAG\") | \"\(.status) \(.conclusion)\"" 2>/dev/null | head -1 || true)
+            case "$STATE" in
+              "completed success")
+                # workflow 绿了但 manifest 还不可见：多给两轮让 registry 传播，再放弃。
+                ;;
+              "completed "*)
+                echo "::warning::docker.yml 已结束（${STATE}）但 $IMAGE 仍不可见，提前派发验收"
+                exit 0
+                ;;
+            esac
+            echo "等待镜像（$i/$MAX，已 $((i * 20 - 20))s，docker.yml: ${STATE:-未找到}）：$IMAGE"
             sleep 20
           done
-          echo "::warning::等待 20 分钟仍未看到 $IMAGE，仍会派发验收（docker 形态将记 C）"
+          echo "::warning::等待 75 分钟仍未看到 $IMAGE，仍会派发验收（docker 形态将记 C）"
 
       # 必须显式派发：GitHub 的防递归规则下，用 GITHUB_TOKEN 造成的 release:published
       # **不会**触发新的 workflow run（只有人工/第三方发布才会）。v0.2.6 首次发版即踩到：
