@@ -66,7 +66,8 @@ async function boot(target: HTMLElement) {
  * `productionOptions(target)`，而后者要写 `stopAttention`。如果这个调用写在
  * `let stopAttention` 之前，模块顶层就会撞上 TDZ：抛错发生在 async 函数里，
  * 变成 unhandled promise rejection，页面静默失败——`#desktop-rail` 永远没有子节点，
- * 窗口又是 `transparent(true)`，用户看到的是「完全没有悬浮栏」（issue #5，0.2.x–0.3.0）。
+ * 窗口又是 `transparent(true)`，用户看到的是「完全没有悬浮栏」（issue #5，0.2.4–0.3.0；
+ * 0.2.0–0.2.3 的 `boot()` 是 `createRailController()` 空参调用，碰不到 `stopAttention`）。
  * 放在末尾可以保证所有顶层绑定都已初始化；ESLint 对这两个入口文件开了
  * `@typescript-eslint/no-use-before-define` 兜底（见 eslint.config.js）。
  */

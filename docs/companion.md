@@ -140,8 +140,11 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
 函数里，`void boot(...)` 把它吞成 **unhandled promise rejection**——控制台只有一条
 「Uncaught (in promise)」，脚本其他部分全部正常，`<main id="desktop-rail">` 永远没有
 子节点。悬浮窗是 `transparent(true)`，所以用户看到的是「完全没有悬浮栏」而不是报错窗口
-（GitHub issue #5：0.2.x–0.3.0 三个版本一直如此；演示构建走 `createDemoRailOptions()`
-不经过 `productionOptions`，所以网页演示和设置页都正常，只有真实悬浮栏空白）。
+（GitHub issue #5：0.2.4 – 0.3.0 四个正式版一直如此——`productionOptions()` 与
+`let stopAttention` 是 2026-11-21 的 round5-09（`6b56558`）才引入的，0.2.0 – 0.2.3 的
+`boot()` 是 `createRailController()` 空参调用，碰不到那个绑定，所以不受影响；
+演示构建走 `createDemoRailOptions()` 不经过 `productionOptions`，所以网页演示和
+设置页都正常，只有真实悬浮栏空白）。
 
 门禁有两道，**覆盖范围不同**（都必要，但不能互相替代）：
 
@@ -158,6 +161,7 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
    happy-dom 21 没有 `EventSource`，测试里给了一个只含 `onmessage` / `onerror` /
    `close` 的 stub（非 Tauri 环境下生产 transport 就是 `new EventSource('/events')`）；
    stub 同时记录构造过的地址，用来证明跑的是 `productionOptions()` 那条生产装配路径。
+   （`settings.tsx` 目前只有写法门禁：它同步挂载、没有 async boot，行为门禁暂不覆盖）
 
 **`settings.tsx` 为什么没有行为门禁**：它目前是纯**同步**挂载
 （`if (container) createRoot(container).render(<SettingsForm />)`，全程没有 `async`
