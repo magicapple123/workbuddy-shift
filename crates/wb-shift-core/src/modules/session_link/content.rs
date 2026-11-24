@@ -586,9 +586,12 @@ pub fn is_strict_ordered_extension(prefix: &[String], full: &[String]) -> bool {
 ///
 /// 只取时间戳、**不参与分歧判定**：判定口径仍是 `line_digests` /
 /// `comparable_line_digests`，这里的结果只用于维护 `sessions.last_activity_at`
-/// （客户端侧栏展示的「活跃时间」）。因此坏行、空行、缺字段、非整数/负数一律跳过，
+/// （客户端侧栏展示的「活跃时间」）。因此坏行、空行、缺字段、非整数/非正数一律跳过，
 /// 不让「某一行的时间戳写坏了」升级成整篇内容不可读；返回 `None` 表示这篇正文
 /// 一个可用时间戳都没有，调用方据此事保持原有行为。
+///
+/// 「可用」的定义只有一处：正数毫秒。0（1970）与负数都不是真实活动时间——复制与会话
+/// 同步两条写路径都从这里取值，口径必须一致，不能一条写 1970、另一条当没有。
 ///
 /// 逐行 `serde_json` 解析而不是先整篇归一：时间戳与内容校验是两条独立的口径，
 /// 内容校验失败（`normalize_jsonl` 返回 Err）时这里仍可能拿到时间戳。
@@ -604,7 +607,8 @@ pub fn latest_record_timestamp(text: &str) -> Option<i64> {
     latest
 }
 
-/// 单行记录的毫秒时间戳；坏行、空行、缺 `timestamp`、负数与非整数一律 `None`。
+/// 单行记录的毫秒时间戳；坏行、空行、缺 `timestamp`、**非正数（0 与负数）**与非整数
+/// 一律 `None`。
 ///
 /// 用「只声明一个字段」的结构体反序列化，而不是建 `Value` 树：正文动辄上千行，
 /// 未知字段由 serde 直接跳过，不必为每行分配整棵 JSON 树（与 `normalize_jsonl`
@@ -615,8 +619,11 @@ pub fn record_timestamp_of(line: &str) -> Option<i64> {
         return None;
     }
     let probe: TimestampProbe = serde_json::from_str(line).ok()?;
-    // 负的毫秒时间戳不可能来自客户端；0（1970）仍是合法值，保留。
-    probe.timestamp.filter(|value| *value >= 0)
+    // 只有正数才是真实的活动时间：0 是 1970，不是「刚活跃过」，写进
+    // `sessions.last_activity_at` 会让侧栏显示成 1970 年；负数更不可能来自客户端。
+    // 这里统一过滤，复制与同步两条写路径因此共用同一套「可用时间」口径
+    // （同步侧 `clamp_incoming_activity` 的同名过滤只是防御，不承担判定）。
+    probe.timestamp.filter(|value| *value > 0)
 }
 
 /// `record_timestamp_of` 的解析目标：只关心 `timestamp` 一个字段。

@@ -152,6 +152,10 @@ const OPERATION_KIND_SYNC: &str = "sync";
 /// 复制（`copy/db.rs`）与同步（`exec/write.rs`）共用这一份口径：客户端的
 /// `sessions.last_activity_at` 驱动侧栏「活跃时间」，只能往前走——回退会让用户以为
 /// 最近的对话没发生过。`None` 表示「没有这个候选」，不参与比较（不是 0）。
+///
+/// 本函数只做数值比较，**不判断候选是否可用**：0/负数在解析层
+/// （`record_timestamp_of` 只认正数）与写库层（`clamp_incoming_activity`）已被过滤，
+/// 调用方传进来的应当已是可用时间。
 fn advance_activity_at(current: Option<i64>, candidate: Option<i64>) -> Option<i64> {
     match (current, candidate) {
         (Some(current), Some(candidate)) => Some(current.max(candidate)),

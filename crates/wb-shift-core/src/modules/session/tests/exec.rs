@@ -856,10 +856,13 @@ fn advance_activity_at_takes_the_larger_candidate() {
     // 只有一侧有值：取那一侧，缺失的一侧不参与比较（None ≠ 0）。
     assert_eq!(advance_activity_at(None, Some(20)), Some(20));
     assert_eq!(advance_activity_at(Some(20), None), Some(20));
+    // 本函数只做数值比较，不判断「候选是否可用」：0 的过滤在解析层
+    // （`record_timestamp_of` 只认正数）与写库层（`clamp_incoming_activity`）完成。
+    // 这条断言钉住的是「辅助函数不把数字当假值」，不是「0 可以写进活跃时间」。
     assert_eq!(
         advance_activity_at(None, Some(0)),
         Some(0),
-        "0 是合法毫秒值，不能因为「假值」被当成缺失"
+        "辅助函数不把 0 当缺失；可用性由调用方保证"
     );
     // 两边都没有：仍是 None（调用方据此不写这一列，而不是写 0）。
     assert_eq!(advance_activity_at(None, None), None);

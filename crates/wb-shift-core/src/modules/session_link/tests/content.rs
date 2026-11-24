@@ -538,8 +538,9 @@ fn latest_record_timestamp_handles_crlf_null_and_nested_keys() {
     // `timestamp` 为 null / 顶层没有该键：都不算有效时间。
     assert_eq!(latest_record_timestamp("{\"timestamp\":null}\n"), None);
     assert_eq!(latest_record_timestamp("{\"type\":\"user\"}\n"), None);
-    // 0（1970）是合法毫秒值，不能当坏值丢掉。
-    assert_eq!(latest_record_timestamp("{\"timestamp\":0}\n"), Some(0));
+    // 0（1970）不是真实活动时间：复制与同步都按「没有可用时间」处理，不能一边写
+    // 1970、一边当缺失（同一份正文在两条写路径上必须得到同一结论）。
+    assert_eq!(latest_record_timestamp("{\"timestamp\":0}\n"), None);
     // 只认**顶层**字段：嵌套对象里的同名键不参与（那是消息内容，不是记录时间）。
     assert_eq!(
         latest_record_timestamp("{\"_meta\":{\"timestamp\":999999},\"timestamp\":5}\n"),
@@ -552,9 +553,10 @@ fn latest_record_timestamp_handles_crlf_null_and_nested_keys() {
 
 /// 单行版本与文本版本口径一致；非对象行（数组、标量）一律 None，不 panic。
 #[test]
-fn record_timestamp_of_accepts_only_top_level_non_negative_integers() {
+fn record_timestamp_of_accepts_only_top_level_positive_integers() {
     assert_eq!(record_timestamp_of("{\"timestamp\":1795507310875}"), Some(1795507310875));
-    assert_eq!(record_timestamp_of("{\"timestamp\":0}"), Some(0));
+    // 0 是 1970，不是活动时间：与 `latest_record_timestamp`、复制/同步写库共用同一口径。
+    assert_eq!(record_timestamp_of("{\"timestamp\":0}"), None);
     assert_eq!(record_timestamp_of("{\"timestamp\":-1}"), None);
     assert_eq!(record_timestamp_of("{\"timestamp\":1.5e3}"), None);
     assert_eq!(record_timestamp_of("[{\"timestamp\":1}]"), None);
