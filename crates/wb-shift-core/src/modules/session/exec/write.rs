@@ -99,6 +99,11 @@ pub(in crate::modules::session) struct StatusChange<'a> {
 /// **只前进不回退**（目标侧可能已经比来源更新）。`None` 表示本次不写这一列——只同步
 /// 归档（正文零写入）与「旧清单没有该字段」都走这一支：保持现值，不报错，也不回读目标
 /// 正文（那会引入 TOCTOU）。
+///
+/// **候选值先夹到本次写入时间戳**（`new_updated_at` 就是本次 `updated_at` 的取值，语义
+/// 上等于「现在」），夹完再取 max，见 [`clamp_incoming_activity`]：来源机时钟超前、或
+/// 正文里混进一条未来时间戳时，写进目标行的活跃时间不能跑到未来——`max()` 语义会让这个
+/// 未来值**永久粘住**，之后每次同步都比不过它，列表里这条会话会一直顶在最前面。
 pub(in crate::modules::session) fn update_target_session_row(
     paths: &SessionPaths,
     target: &OperationMember,
@@ -128,7 +133,10 @@ pub(in crate::modules::session) fn update_target_session_row(
     } else {
         None
     };
-    let expected_activity = advance_activity_at(before_activity, incoming_activity_at);
+    let expected_activity = advance_activity_at(
+        before_activity,
+        clamp_incoming_activity(incoming_activity_at, new_updated_at),
+    );
 
     // 状态写入用条件 UPDATE：目标在事务内被改为活跃态/被取消归档时 affected 为 0，
     // 事务外的一次读取不能替代事务内的条件。
@@ -216,6 +224,25 @@ pub(in crate::modules::session) fn update_target_session_row(
     tx.commit()
         .map_err(|error| format!("会话数据提交失败：{error}"))?;
     Ok(())
+}
+
+/// 把「本次待写入正文的最新时间戳」夹到本次写入时间戳以内（含 0/负值的废弃候选）。
+///
+/// 返回 `None` 表示候选不参与本次比较——调用方据此保持目标行现值，与「本次不写这一列」
+/// （`None` 入参）走同一条 `advance_activity_at` 分支。
+///
+/// **只夹候选，不夹目标侧现值**：`max(现值, 候选)` 的「只前进不回退」是既有语义，目标行
+/// 若已经比本次写入时间还大（第三方写入 / 上一轮同步夹出来的未来值 / 用户机器时钟回拨），
+/// 把现值也一起夹小就是**回退**——用户会看到「最近的对话没发生过」。夹候选只保证「本次
+/// 不新增一个未来值」，已有的未来值留给客户端自己用真实活动覆盖，本工具既不制造它、也不
+/// 单方面抹掉它。
+///
+/// 0 与负值不参与比较：毫秒时间戳为 0 是 1970，不是「刚活跃过」，写进去会让侧栏显示成
+/// 1970 年；`None` 的语义（本次不写该列）不受影响。
+fn clamp_incoming_activity(candidate: Option<i64>, new_updated_at: i64) -> Option<i64> {
+    candidate
+        .filter(|timestamp| *timestamp > 0)
+        .map(|timestamp| timestamp.min(new_updated_at))
 }
 
 /// 读取目标行的 `last_activity_at`；NULL（客户端从未写过）与「行不存在」都返回 None。

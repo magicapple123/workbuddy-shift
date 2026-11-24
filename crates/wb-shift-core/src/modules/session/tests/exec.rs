@@ -1259,3 +1259,78 @@ fn sync_recovery_advances_activity_from_manifest() {
     );
     assert_eq!(env.body_files().len(), 2, "重放不得产生第二份副本");
 }
+
+/// 正文带来的时间戳远在未来（来源机时钟超前，或正文里混进一条未来时间的记录）→
+/// 写入值必须夹到本次写入时间戳，不能停在未来。
+///
+/// 为什么必须夹：`max(现值, 候选)` 语义会让未来值**永久粘住**——之后每次同步的候选都
+/// 比不过它，这条会话会一直顶在列表最前面，用户既改不回来也看不见原因。
+///
+/// 为什么夹的是候选而不是最终结果：目标侧**已有**的更大值必须原样保留（只前进不回退），
+/// 否则「上一次夹出来的值 / 第三方写进去的值」会在下一次同步时被改小。
+#[test]
+fn sync_clamps_future_incoming_activity_to_this_write() {
+    let env = ready_env_with_status("sync-activity-future");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    env.set_activity(&target_id, ACTIVITY_SOURCE_STALE);
+    // 「一天以后」的记录：本次同步取的 now_ms() 一定早于它，夹取才有可观测的效果。
+    let future = now_ms() + 86_400_000;
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", future);
+
+    let first_preview = preview(&env, "uid-b");
+    let group = &first_preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{first_preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    let new_updated_at = report["synced"][0]["updatedAt"]
+        .as_i64()
+        .expect("同步结果必须带本次写入时间戳");
+    assert!(
+        new_updated_at < future,
+        "本用例前提：本次写入时间戳必须早于正文里的未来时间戳"
+    );
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(new_updated_at),
+        "超出本次写入时间的候选必须被夹到本次写入时间戳，不能落到未来"
+    );
+
+    // 再同步一次：候选仍是未来值，现值已是上一轮夹出来的值。既不得报错，也不得回退。
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", future + 1_000);
+    let second_preview = preview(&env, "uid-b");
+    let group = &second_preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{second_preview}");
+    let token = group["previewToken"].as_str().unwrap().to_string();
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert!(
+        report.get("needsRecovery").is_none(),
+        "第二轮不得留下未完成操作：{report}"
+    );
+    assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    let second_updated_at = report["synced"][0]["updatedAt"].as_i64().unwrap();
+    let after = env
+        .activity_of(&target_id)
+        .expect("第二轮同步后活跃时间不得变回 NULL");
+    assert!(
+        after >= new_updated_at,
+        "第二轮同步不得把现值改小：{after} < {new_updated_at}"
+    );
+    assert!(
+        after <= second_updated_at,
+        "第二轮同步同样不得把活跃时间写到未来：{after} > {second_updated_at}"
+    );
+}
