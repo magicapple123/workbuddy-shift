@@ -3259,6 +3259,116 @@ fn copy_into_legacy_db_without_activity_column_still_works() {
     assert!(updated_at > 2000, "updated_at 仍写本次复制时刻");
 }
 
+/// 源行的活跃时间是负数（列被人手改坏 / 早期写入缺陷）→ 当成「没有候选」，用正文时间。
+///
+/// 负数经过 `min(copy_now)` 之后仍是负数，副本会显示成 1969 年；这里要求它被丢弃，
+/// 而不是原样搬过去。
+#[test]
+fn copy_ignores_negative_source_activity() {
+    let env = ready_env("activity-negative");
+    env.add_activity_column();
+    env.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_NEWEST]),
+    );
+    env.set_activity("sess-1", -1);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&env.first_copy_id(&report)),
+        Some(ACTIVITY_BODY_NEWEST),
+        "负值必须当成缺失，退回正文时间"
+    );
+}
+
+/// 复制在「正文未写、行未写」处中断 → 恢复补写正文后，活跃时间按**本次补写的那份
+/// 正文**取值，而不是沿用源行的旧值；恢复只跑一次，不产生第二份副本。
+///
+/// 这是 `recover_copy_operation` 里唯一带正文时间的分支（`BodyCheck::Absent`）：
+/// 另两个分支拿不到待写入正文，只能沿用源值（见该函数注释）。缺这条用例时，
+/// 「恢复了正文、活跃时间却仍冻结」不会有任何断言报警。
+#[test]
+fn copy_recovery_backfills_activity_from_restored_body() {
+    let env = ready_env("activity-copy-recovery");
+    env.add_activity_column();
+    env.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_EARLY, ACTIVITY_BODY_NEWEST]),
+    );
+    env.set_activity("sess-1", ACTIVITY_SOURCE_STALE);
+    let paths = env.paths();
+    // 空关联存储：真实现场是「首次复制刚建好操作记录就被中断」，此时同步记录主文件
+    // 还不存在，恢复会按「有未完成痕迹但主文件缺失」直接拒绝，走不到补写分支。
+    session_link::with_link_store_write(&paths, |_| Ok(())).unwrap();
+
+    // 手工留下一条「刚建好、正文与数据库行都还没写」的操作记录：比先跑一次完整复制
+    // 再把阶段回退更接近真实中断现场（此时关联存储里也还没有任何组）。
+    session_link::save_operation(
+        &paths,
+        &Operation {
+            version: session_link::OPERATION_VERSION,
+            operation_id: "op-copy-activity".to_string(),
+            kind: "copy".to_string(),
+            variant: WbVariant::Cn,
+            source_variant: None,
+            group_id: "g-copy-activity".to_string(),
+            source: OperationMember {
+                account_id: None,
+                uid: "uid-a".to_string(),
+                session_id: "sess-1".to_string(),
+            },
+            target: OperationMember {
+                account_id: None,
+                uid: "uid-b".to_string(),
+                session_id: "new-copy-activity".to_string(),
+            },
+            // 待写入正文的摘要由恢复自己按当前源内容重算，这里不用预先写对。
+            expected_content_digest: String::new(),
+            expected_record_count: 0,
+            phase: OpPhase::Prepared,
+            backup: None,
+            lifecycle_version: None,
+            cleanup_state: None,
+            last_error: None,
+            aux_skipped: false,
+            created_at: 1,
+            updated_at: 1,
+        },
+    )
+    .unwrap();
+
+    let recovery = recover_pending_session_operations_at(&paths, WbVariant::Cn);
+    assert_eq!(
+        recovery.recovered.len(),
+        1,
+        "{:?}",
+        recovery.needs_recovery
+    );
+    assert!(recovery.is_clean(), "{:?}", recovery.needs_recovery);
+    assert_eq!(
+        env.activity_of("new-copy-activity"),
+        Some(ACTIVITY_BODY_NEWEST),
+        "恢复补写的正文里有更新的时间戳，活跃时间必须跟着正文走（不得停在源行旧值）"
+    );
+    assert_eq!(
+        env.activity_of("sess-1"),
+        Some(ACTIVITY_SOURCE_STALE),
+        "源行一字不动"
+    );
+
+    let again = recover_pending_session_operations_at(&paths, WbVariant::Cn);
+    assert!(again.is_clean(), "{:?}", again.needs_recovery);
+    assert!(again.recovered.is_empty(), "已完成的操不得被再重放一次");
+    assert_eq!(env.body_files().len(), 2, "恢复不得产生第二份副本");
+    assert_eq!(env.rows_for("uid-b"), vec!["new-copy-activity".to_string()]);
+    assert_eq!(
+        env.activity_of("new-copy-activity"),
+        Some(ACTIVITY_BODY_NEWEST),
+        "重放幂等：值不变"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 项目归属失败不再静默（复制报告带 `spaceNote`）
 // ---------------------------------------------------------------------------

@@ -842,6 +842,29 @@ fn sync_link_commit_failure_keeps_pending_then_recovers() {
 // 同步时的「最后活跃时间」（`sessions.last_activity_at`）
 // ---------------------------------------------------------------------------
 
+/// 复制与同步共用的口径 `advance_activity_at`：取较大值，`None` 表示「没有候选」。
+///
+/// 四个分支里有两个（`(None, Some)` / `(None, None)`）只有「目标行是 NULL」的现场才
+/// 走得到，而那种现场在端到端用例里只能间接观察；这里把口径本身钉住，避免有人把
+/// `None` 当成 0（1970）参与比较——那会把 NULL 写成 0，侧栏显示成 1970 年。
+#[test]
+fn advance_activity_at_takes_the_larger_candidate() {
+    // 两边都有：取较大值（只前进不回退），与大小顺序无关。
+    assert_eq!(advance_activity_at(Some(10), Some(20)), Some(20));
+    assert_eq!(advance_activity_at(Some(20), Some(10)), Some(20));
+    assert_eq!(advance_activity_at(Some(20), Some(20)), Some(20));
+    // 只有一侧有值：取那一侧，缺失的一侧不参与比较（None ≠ 0）。
+    assert_eq!(advance_activity_at(None, Some(20)), Some(20));
+    assert_eq!(advance_activity_at(Some(20), None), Some(20));
+    assert_eq!(
+        advance_activity_at(None, Some(0)),
+        Some(0),
+        "0 是合法毫秒值，不能因为「假值」被当成缺失"
+    );
+    // 两边都没有：仍是 None（调用方据此不写这一列，而不是写 0）。
+    assert_eq!(advance_activity_at(None, None), None);
+}
+
 /// 往正文末尾追加一条带毫秒时间戳的记录（模拟来源账号继续对话）。
 fn append_record_with_timestamp(path: &Path, cid: &str, timestamp: i64) {
     let mut text = std::fs::read_to_string(path).unwrap();
@@ -1029,4 +1052,210 @@ fn recovery_with_old_manifest_without_activity_field_still_succeeds() {
         "旧清单缺字段时必须跳过写该列、保持现值"
     );
     assert!(session_link::pending_operations(&env.paths, WbVariant::Cn).is_empty());
+}
+
+/// 动态 SET 子句的组合矩阵：`last_activity_at` 列存在与否 × 本次是否写状态 × 本次
+/// 是否带活跃时间，四种写入组合都要「参数与占位符逐一对应」，未参与本次写入的列
+/// 不得被改成 NULL。
+///
+/// 直接调用写库函数而不是走整条同步链路：这条 SQL 是按列存在性拼出来的，绑定顺序
+/// 错了不会报错，只会静默串位置（状态写成时间戳、时间写成状态文本），必须逐组合
+/// 用「两个可选列同时参与」的这一档把它钉住。
+#[test]
+fn update_target_session_row_covers_all_column_combinations() {
+    let incoming = 1_700_000_009_000;
+    let stale = 1_600_000_000_000;
+    let new_updated_at = 1_800_000_000_000;
+    for with_column in [false, true] {
+        for with_status in [false, true] {
+            for with_activity in [false, true] {
+                let case =
+                    format!("列={with_column} 状态={with_status} 活跃时间={with_activity}");
+                let env = Env::new(&format!(
+                    "write-matrix-{with_column}-{with_status}-{with_activity}"
+                ));
+                env.create_db_with_status();
+                env.set_login("uid-b");
+                env.add_session("sess-9", "uid-b", "标题九");
+                env.set_status("sess-9", "completed");
+                if with_column {
+                    env.add_activity_column();
+                    env.set_activity("sess-9", stale);
+                }
+                let target = session_link::OperationMember {
+                    account_id: None,
+                    uid: "uid-b".to_string(),
+                    session_id: "sess-9".to_string(),
+                };
+                let change = with_status.then_some(StatusChange {
+                    before: "completed".to_string(),
+                    after: "archived",
+                });
+
+                let result = update_target_session_row(
+                    &env.paths(),
+                    &target,
+                    new_updated_at,
+                    None,
+                    change.as_ref(),
+                    with_activity.then_some(incoming),
+                );
+
+                assert!(result.is_ok(), "{case}：写入失败 {result:?}");
+                assert_eq!(
+                    session_row(&env, "sess-9").3,
+                    Some(new_updated_at),
+                    "{case}：updated_at 必须恒写"
+                );
+                assert_eq!(
+                    env.status_of("sess-9").as_deref(),
+                    Some(if with_status { "archived" } else { "completed" }),
+                    "{case}：status 只应在本次要求写时才变（未写的列不得被清空）"
+                );
+                let expected_activity = if with_column {
+                    // 给了时间就取 max（只前进不回退），没给就保持现值。
+                    Some(if with_activity {
+                        incoming.max(stale)
+                    } else {
+                        stale
+                    })
+                } else {
+                    // 老库没有这一列：不写、不报错，列本身也不该被创建。
+                    None
+                };
+                assert_eq!(
+                    env.activity_of("sess-9"),
+                    expected_activity,
+                    "{case}：活跃时间取值与写入条件不符"
+                );
+            }
+        }
+    }
+}
+
+/// 正文模式的归档副作用：`status` 与 `last_activity_at` 在同一条 UPDATE 里写，
+/// 两个可选列同时参与时不得串位置。
+#[test]
+fn sync_writes_activity_and_status_in_one_update() {
+    let env = ready_env_with_status("sync-activity-with-status");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    // 来源追加一条带时间戳的记录（判定变快进），来源已归档、目标仍在终态白名单。
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", ACTIVITY_BODY_NEWEST);
+    env.set_status("sess-1", "archived");
+    env.set_status(&target_id, "completed");
+    env.set_activity(&target_id, ACTIVITY_SOURCE_STALE);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    assert_eq!(
+        group["archiveAction"], "statusOnly",
+        "本用例前提：本次要随正文归档（两个可选列同时参与 SET）{preview}"
+    );
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.status_of(&target_id).as_deref(),
+        Some("archived"),
+        "状态照旧写入"
+    );
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST),
+        "活跃时间必须单独落到时间列，不与状态串位置"
+    );
+}
+
+/// 目标行的活跃时间是 NULL（客户端从未写过这一列）→ 首次写入本次正文的最新时间。
+///
+/// 反面断言同样重要：不得为了「有个值」而写 0（1970）或干脆留 NULL。
+#[test]
+fn sync_first_writes_activity_when_target_is_null() {
+    let env = ready_env_with_status("sync-activity-null");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    env.clear_activity(&target_id);
+    assert_eq!(env.activity_of(&target_id), None, "本用例前提：目标行是 NULL");
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", ACTIVITY_BODY_NEWEST);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST),
+        "NULL 的目标行必须写入正文时间，不能写 0、也不能继续留 NULL"
+    );
+}
+
+/// 恢复重放：本次时间戳来自清单里那份已核验的待写入正文，不重新读目标文件。
+///
+/// 覆盖「数据库阶段中断 → 恢复补完」：断点处目标正文已是本次内容、行还未写库，
+/// 恢复必须把活跃时间按清单补上；再跑一次恢复不得重复推进、不得产生第二份副本。
+#[test]
+fn sync_recovery_advances_activity_from_manifest() {
+    let env = ready_env_with_status("sync-activity-replay");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    env.set_activity(&target_id, ACTIVITY_SOURCE_STALE);
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", ACTIVITY_BODY_NEWEST);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    install_block_update_trigger(&env);
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["needsRecovery"], true, "{report}");
+    drop_block_update_trigger(&env);
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_SOURCE_STALE),
+        "写库阶段失败时活跃时间不得被改"
+    );
+
+    let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+    assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery.needs_recovery);
+    assert!(recovery.is_clean(), "{:?}", recovery.needs_recovery);
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST),
+        "恢复必须按清单里的待写入正文时间补写活跃时间"
+    );
+
+    let again = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+    assert!(again.is_clean(), "{:?}", again.needs_recovery);
+    assert!(again.recovered.is_empty(), "已完成的操不得被再重放一次");
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST),
+        "重放幂等：值不变、不报错"
+    );
+    assert_eq!(env.body_files().len(), 2, "重放不得产生第二份副本");
 }
