@@ -271,6 +271,9 @@ pub(in crate::modules::session) fn ensure_row_copyable(
 /// 项目归属列不做「原样搬运」：[`map_target_space_id`] 负责把 `space_id` 换成目标
 /// 账号自己的 space（同账号体系跨账号复制时源 id 在目标账号下不存在），
 /// `project_id` 一律写 NULL（跨账号的外键引用一定悬空）。
+///
+/// 时间列的口径：`updated_at` 写本次（副本是刚产生的），`last_activity_at` 取
+/// max(源值, 目标正文最新时间戳) 并被本次时间夹住（见下方分支注释）。
 pub(in crate::modules::session) fn insert_session_copy(
     source_paths: &SessionPaths,
     target_paths: &SessionPaths,
@@ -322,6 +325,10 @@ pub(in crate::modules::session) fn insert_session_copy(
     // 行级校验必须在**任何写库动作之前**：否则「复制被拒」时目标账号已经多出一条
     // 0 会话的孤儿 space 行（QA-E1）。循环里不再重复校验。
     ensure_row_copyable(&source_row)?;
+
+    // 「最后活跃时间」以正文为准，且必须在事务之外取：正文可能上百 MB，在写事务里
+    // 做这次扫描会把写锁拖到秒级（客户端可能同时开着别的写连接）。
+    let body_latest_at = latest_body_timestamp(target_paths, new_cid);
 
     // 「建 space（父行）→ 插会话（子行）」是一次父子写入：放进同一事务，任一失败
     // 整体回滚，绝不留下本次新建的孤儿 space。synchronous 已在上面的连接上确认。
@@ -379,6 +386,21 @@ pub(in crate::modules::session) fn insert_session_copy(
             // 更新时间仍写本次：这一列驱动客户端「最近更新」排序，副本沿用源的旧值会
             // 沉到列表底部，用户切号后看不到刚复制过来的会话。
             "updated_at" => rusqlite::types::Value::Integer(copy_now),
+            // 活跃时间不能沿用源行：客户端侧栏的「活跃时间」读的就是这一列，而源行的值
+            // 可能远早于正文最后一条消息（正文一直在更新、这一列没人维护），副本会
+            // 永远显示成旧时间。取 max(源值, 正文最新) 且用 copy_now 夹住——源机时钟
+            // 超前时不能让副本的活跃时间跑到未来。源值为 NULL、缺列或正文取不到时间
+            // 时退回「沿用源值 / NULL」，不报错（老库兼容）。
+            "last_activity_at" => {
+                let from_row = match &value {
+                    rusqlite::types::Value::Integer(number) if *number >= 0 => Some(*number),
+                    _ => None,
+                };
+                match advance_activity_at(from_row, body_latest_at) {
+                    Some(timestamp) => rusqlite::types::Value::Integer(timestamp.min(copy_now)),
+                    None => rusqlite::types::Value::Null,
+                }
+            }
             "deleted_at" => rusqlite::types::Value::Null,
             // 行状态与正文口径必须一致：正文末条已归一到 completed（见
             // [`normalize_copy_tail`]），行还写着 working/active 客户端照样显示思考中。

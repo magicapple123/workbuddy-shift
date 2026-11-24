@@ -500,3 +500,65 @@ fn bounded_cache_evicts_oldest_half_when_full() {
     assert_eq!(cache.get(&4), Some(40));
     assert_eq!(cache.get(&5), Some(50));
 }
+
+// ---------------------------------------------------------------------------
+// 正文记录的毫秒时间戳（`sessions.last_activity_at` 的来源，不参与分歧判定）
+// ---------------------------------------------------------------------------
+
+/// 取的是**最大**时间戳而不是最后一行：坏行、空行、缺字段、负数、浮点与字符串
+/// 时间戳全部跳过（渲染不了的时间戳不该让整篇正文判成不可读）。
+#[test]
+fn latest_record_timestamp_takes_max_and_skips_bad_lines() {
+    let text = concat!(
+        "{\"id\":\"a\",\"timestamp\":1795507310875,\"type\":\"message\"}\n",
+        "not json at all\n",
+        "{\"id\":\"b\",\"timestamp\":1795507319999,\"type\":\"function_call\"}\n",
+        "{\"id\":\"c\",\"type\":\"message\"}\n",
+        "\n",
+        "{\"id\":\"d\",\"timestamp\":-1}\n",
+        "{\"id\":\"e\",\"timestamp\":1795507319500.5}\n",
+        "{\"id\":\"f\",\"timestamp\":\"1795507320000\"}\n",
+        "{\"id\":\"g\",\"timestamp\":1795507311500,\"type\":\"message\"}\n",
+    );
+    assert_eq!(
+        latest_record_timestamp(text),
+        Some(1795507319999),
+        "必须取最大时间戳，且跳过坏行/负数/浮点/字符串形态"
+    );
+}
+
+/// 容忍真实数据的几类形态：CRLF 行尾、`timestamp` 为 null、0 值、嵌套同名键。
+#[test]
+fn latest_record_timestamp_handles_crlf_null_and_nested_keys() {
+    // CRLF：行尾 `\r` 不能影响解析。
+    assert_eq!(
+        latest_record_timestamp("{\"timestamp\":123}\r\n{\"timestamp\":456}\r\n"),
+        Some(456)
+    );
+    // `timestamp` 为 null / 顶层没有该键：都不算有效时间。
+    assert_eq!(latest_record_timestamp("{\"timestamp\":null}\n"), None);
+    assert_eq!(latest_record_timestamp("{\"type\":\"user\"}\n"), None);
+    // 0（1970）是合法毫秒值，不能当坏值丢掉。
+    assert_eq!(latest_record_timestamp("{\"timestamp\":0}\n"), Some(0));
+    // 只认**顶层**字段：嵌套对象里的同名键不参与（那是消息内容，不是记录时间）。
+    assert_eq!(
+        latest_record_timestamp("{\"_meta\":{\"timestamp\":999999},\"timestamp\":5}\n"),
+        Some(5)
+    );
+    // 空正文 / 只有空行。
+    assert_eq!(latest_record_timestamp(""), None);
+    assert_eq!(latest_record_timestamp("\n\n"), None);
+}
+
+/// 单行版本与文本版本口径一致；非对象行（数组、标量）一律 None，不 panic。
+#[test]
+fn record_timestamp_of_accepts_only_top_level_non_negative_integers() {
+    assert_eq!(record_timestamp_of("{\"timestamp\":1795507310875}"), Some(1795507310875));
+    assert_eq!(record_timestamp_of("{\"timestamp\":0}"), Some(0));
+    assert_eq!(record_timestamp_of("{\"timestamp\":-1}"), None);
+    assert_eq!(record_timestamp_of("{\"timestamp\":1.5e3}"), None);
+    assert_eq!(record_timestamp_of("[{\"timestamp\":1}]"), None);
+    assert_eq!(record_timestamp_of("null"), None);
+    assert_eq!(record_timestamp_of(""), None);
+    assert_eq!(record_timestamp_of("   "), None);
+}

@@ -3077,3 +3077,238 @@ fn copy_falls_back_to_copy_time_when_source_created_at_is_null() {
         "回退值必须落在本次复制之后：{created_at} < {before}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 复制时的「最后活跃时间」（`sessions.last_activity_at`）
+// ---------------------------------------------------------------------------
+//
+// 客户端侧栏每条会话的「活跃时间」读的就是这一列。正文一直在更新，这一列却从来
+// 没人维护，于是副本的活跃时间冻结在源行的旧值上，正文却是最新的。
+
+/// 正文里两条记录的毫秒时间戳（2023-11，一定早于「现在」）。
+const ACTIVITY_BODY_EARLY: i64 = 1_700_000_000_000;
+const ACTIVITY_BODY_NEWEST: i64 = 1_700_000_009_000;
+/// 源行停更的旧值（2020-09）。
+const ACTIVITY_SOURCE_STALE: i64 = 1_600_000_000_000;
+
+/// 带毫秒时间戳的正文：先一条**没有** `timestamp` 的用户消息（真实正文里大量如此），
+/// 再按 `stamps` 逐行写记录。
+fn body_with_timestamps(cid: &str, stamps: &[i64]) -> String {
+    let mut text = format!(
+        "{}\n",
+        json!({"type": "user", "sessionId": cid, "text": "你好"})
+    );
+    for stamp in stamps {
+        text.push_str(
+            &json!({
+                "type": "message",
+                "role": "assistant",
+                "sessionId": cid,
+                "timestamp": stamp
+            })
+            .to_string(),
+        );
+        text.push('\n');
+    }
+    text
+}
+
+/// 正文最新时间晚于源行 → 副本取正文时间（缺陷主现场：源列停在很早以前）。
+#[test]
+fn copy_uses_newest_body_timestamp_for_activity() {
+    let env = ready_env("activity-body-newer");
+    env.add_activity_column();
+    env.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_EARLY, ACTIVITY_BODY_NEWEST]),
+    );
+    env.set_activity("sess-1", ACTIVITY_SOURCE_STALE);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let target_id = env.first_copy_id(&report);
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST),
+        "活跃时间必须以正文最后一条记录为准，不能沿用源行的旧值"
+    );
+    assert_eq!(
+        env.activity_of("sess-1"),
+        Some(ACTIVITY_SOURCE_STALE),
+        "源行一字不动：维护活跃时间只作用于副本"
+    );
+}
+
+/// 正文最新时间早于源行 → 取源值，不回退（源行可能比正文更新，改小就是丢信息）。
+#[test]
+fn copy_keeps_source_activity_when_body_is_older() {
+    let env = ready_env("activity-body-older");
+    env.add_activity_column();
+    env.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_EARLY, ACTIVITY_BODY_NEWEST]),
+    );
+    env.set_activity("sess-1", ACTIVITY_BODY_NEWEST + 500);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_BODY_NEWEST + 500),
+        "正文更旧时必须保留源值（只前进不回退）"
+    );
+}
+
+/// 正文时间戳超过当前时刻（源机时钟超前）→ 被本次复制时间夹住，不能顶到未来。
+#[test]
+fn copy_clamps_future_body_timestamp_to_copy_time() {
+    let env = ready_env("activity-future");
+    env.add_activity_column();
+    let future = now_ms() + 3_600_000;
+    env.add_body("sess-1", &body_with_timestamps("sess-1", &[future]));
+    let before = now_ms();
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let after = now_ms();
+    let activity = env
+        .activity_of(&env.first_copy_id(&report))
+        .expect("正文有时间戳时必须写值");
+    assert!(
+        activity >= before && activity <= after,
+        "超过当前时刻的时间戳必须被复制时刻夹住：{activity} 不在 [{before}, {after}]"
+    );
+    assert!(activity < future, "副本的活跃时间不得停在未来");
+}
+
+/// 正文一个时间戳都没有（旧客户端只写正文不写时间）→ 沿用源值，不报错。
+#[test]
+fn copy_falls_back_to_source_activity_without_body_timestamps() {
+    let env = ready_env("activity-no-timestamps");
+    env.add_activity_column();
+    env.set_activity("sess-1", ACTIVITY_SOURCE_STALE);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&env.first_copy_id(&report)),
+        Some(ACTIVITY_SOURCE_STALE),
+        "正文取不到时间时保持原有行为（沿用源值）"
+    );
+}
+
+/// 目标库是老库（没有 `last_activity_at` 列）→ 不报错，其它列照常写入。
+#[test]
+fn copy_into_legacy_db_without_activity_column_still_works() {
+    let source = ready_env("activity-legacy-src");
+    let target = ready_env("activity-legacy-dst");
+    source.add_activity_column();
+    source.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_NEWEST]),
+    );
+    source.set_activity("sess-1", ACTIVITY_SOURCE_STALE);
+    // 目标库确实没有这一列（默认建表就没有，正是老库形态）。
+    let target_conn = Connection::open(target.paths.workbuddy_db()).unwrap();
+    assert!(
+        !column_exists(&target_conn, "sessions", "last_activity_at"),
+        "本用例的前提是目标库没有该列"
+    );
+    drop(target_conn);
+
+    let outcome = insert_session_copy(
+        &source.paths(),
+        &target.paths(),
+        "new-legacy-activity",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, DbCopyOutcome::Inserted { .. }),
+        "{outcome:?}"
+    );
+    let conn = Connection::open(target.paths.workbuddy_db()).unwrap();
+    let (title, updated_at): (String, i64) = conn
+        .query_row(
+            "SELECT title, updated_at FROM sessions WHERE id = 'new-legacy-activity'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "标题一", "缺列不得影响其它列的搬运");
+    assert!(updated_at > 2000, "updated_at 仍写本次复制时刻");
+}
+
+// ---------------------------------------------------------------------------
+// 项目归属失败不再静默（复制报告带 `spaceNote`）
+// ---------------------------------------------------------------------------
+
+/// 源会话指着源账号的 space，但源 space 在两边都查不到（老库没有 spaces 表 / 库损坏）
+/// → 副本如实写 NULL，并在报告里说明「未归入任何项目」。
+#[test]
+fn copy_reports_space_note_when_source_space_missing() {
+    let env = space_env("space-gone", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    // 源 space 行消失（会话仍指着它的 id）：这正是「目标里看不到副本在哪个项目」的成因。
+    Connection::open(&db)
+        .unwrap()
+        .execute("DELETE FROM spaces WHERE id = 'src-space'", [])
+        .unwrap();
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    assert_eq!(session_space(&db, &new_id), None, "取不到归属就如实写 NULL");
+    assert_eq!(
+        report["copied"][0]["spaceNote"], SPACE_UNASSIGNED_NOTE,
+        "必须让用户知道副本没进任何项目"
+    );
+}
+
+/// 源 space 的 `device_id` 取不到、目标账号又没有可兜底的设备标识 → 建不出分组，
+/// 同样要带上诊断（另一种「副本不在项目里」的成因）。
+#[test]
+fn copy_reports_space_note_when_target_space_cannot_be_created() {
+    let env = space_env("space-no-device", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    // 空字符串按缺失处理（`row_text` 会 trim 后判空）；目标账号一个 space 都没有，
+    // 临时目录下也没有 `.workbuddy/device-id` → 三级兜底全部失效。
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE spaces SET device_id = '' WHERE id = 'src-space'", [])
+        .unwrap();
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+    assert_eq!(session_space(&db, &new_id), None);
+    assert!(
+        space_row_ids(&db, "uid-b").is_empty(),
+        "设备标识取不到时不得造可疑空项目"
+    );
+    assert_eq!(
+        report["copied"][0]["spaceNote"], SPACE_UNASSIGNED_NOTE,
+        "建不出分组也要说明原因"
+    );
+}
+
+/// 源会话本来就没有项目（`space_id` 为 NULL）→ 正常情况，**不**发诊断。
+#[test]
+fn copy_keeps_quiet_when_source_has_no_project() {
+    let env = space_env("space-none", "D:\\Proj\\A", "D:\\Proj");
+    let db = env.paths.workbuddy_db();
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE sessions SET space_id = NULL WHERE id = 'sess-1'", [])
+        .unwrap();
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(session_space(&db, &env.first_copy_id(&report)), None);
+    assert!(
+        report["copied"][0].get("spaceNote").is_none(),
+        "源本来没有项目属于正常情况，不该报警：{report}"
+    );
+}

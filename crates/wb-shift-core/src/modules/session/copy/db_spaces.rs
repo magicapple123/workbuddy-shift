@@ -45,6 +45,17 @@ pub(in crate::modules::session) struct SpaceLookup {
 pub(in crate::modules::session) const SPACE_AMBIGUOUS_NOTE: &str =
     "目标账号有多个空间绑定该目录，已按目录新建分组";
 
+/// 源会话**有**项目归属却没能落到目标账号任何分组时写进复制报告的诊断。
+///
+/// 两种成因共用一条文案（对用户是同一件事：副本没进项目）：
+/// - 源 space 在两边都查不到（跨档库丢失 / 老库没有 `spaces` 表）；
+/// - 目标账号取不到可用的 `device_id`，新建分组失败（`insert_target_space` 返回 None）。
+///
+/// 不报警就等于「会话在列表里，用户按项目怎么都找不到，也没有任何解释」。
+/// 源会话本身没有项目（`space_id` 为 NULL）是正常情况，**不**发这条诊断。
+pub(in crate::modules::session) const SPACE_UNASSIGNED_NOTE: &str =
+    "目标账号里未能定位或新建项目分组，副本未归入任何项目";
+
 /// 读取一行 space（列名 + 值，按表自身列序）。
 ///
 /// 不写死列名：老版本客户端可能没有 `device_id` / `source_kind` 这些列，
@@ -489,11 +500,14 @@ fn bind_space_folders(
 /// 指向一个不存在的 space，客户端于是把会话归到「最近」而不是项目里。
 ///
 /// 返回语义（R5-20 起按**路径优先**匹配）：
-/// - 源 `space_id` 为空 → `Ok((None, None))`：目标写 NULL，**不**新建 space；
+/// - 源 `space_id` 为空 → `Ok((None, None))`：目标写 NULL，**不**新建 space，也不发诊断
+///   （源会话本来就没有项目，属于正常情况）；
 /// - 目标账号有空间绑定同一目录（唯一命中）→ 用它的 id；
 /// - 同一目录命中多个空间 → `ambiguous`，退回同名兜底，仍未命中则新建并带诊断；
 /// - 都没有 → 为目标账号插一条同构 space 行（含 `space_folders`），用新 id；
-/// - 源 space 查不到（跨档库丢失 / 老库没有 spaces 表）→ `Ok((None, None))`，如实写 NULL。
+/// - 源 space 查不到（跨档库丢失 / 老库没有 spaces 表）或新建失败 → `Ok((None,
+///   Some(SPACE_UNASSIGNED_NOTE)))`：如实写 NULL，但把原因带回复制报告——用户看到
+///   「未归入任何项目」才知道为什么在「项目」里找不到副本。
 pub(in crate::modules::session) fn map_target_space_id(
     conn: &Connection,
     source_paths: &SessionPaths,
@@ -507,13 +521,19 @@ pub(in crate::modules::session) fn map_target_space_id(
         return Ok((None, None));
     };
     let Some(meta) = read_source_space_meta(conn, source_paths, same_db, &space_id) else {
-        return Ok((None, None));
+        return Ok((None, Some(SPACE_UNASSIGNED_NOTE)));
     };
     let lookup = find_target_space_id(conn, target_uid, &meta, cwd);
     if let Some(existing) = lookup.id {
         return Ok((Some(existing), None));
     }
-    let note = lookup.ambiguous.then_some(SPACE_AMBIGUOUS_NOTE);
-    let created = insert_target_space(conn, target_paths, target_uid, &meta, cwd)?;
-    Ok((created, note))
+    // 新建失败（三级 device_id 兜底全部取不到 / 目标库没有 spaces 表）时同样要有诊断：
+    // 这是「用户在项目里看不到副本」的另一半成因，静默 NULL 等于让问题再次隐身。
+    let Some(created) = insert_target_space(conn, target_paths, target_uid, &meta, cwd)? else {
+        return Ok((None, Some(SPACE_UNASSIGNED_NOTE)));
+    };
+    Ok((
+        Some(created),
+        lookup.ambiguous.then_some(SPACE_AMBIGUOUS_NOTE),
+    ))
 }

@@ -66,11 +66,12 @@ pub use copy::{
 };
 pub use paths::{workbuddy_db_path, LinkNamespace, SessionPaths};
 use query::*;
+pub(crate) use query::{
+    advance_activity_at, current_user_uid_at, find_project_jsonl, latest_body_timestamp,
+    list_sessions_for_user_at, open_db, table_exists,
+};
 pub use query::{
     current_user_uid, list_sessions_for_account, list_sessions_for_user, session_copy_supported_at,
-};
-pub(crate) use query::{
-    current_user_uid_at, find_project_jsonl, list_sessions_for_user_at, open_db, table_exists,
 };
 // 会话行存活索引与「组内是否还有存活成员」判定：`session_groups` 的列表过滤与批量清理复用。
 pub(crate) use query::LiveSessionRows;

@@ -837,3 +837,109 @@ fn sync_link_commit_failure_keeps_pending_then_recovers() {
     assert_eq!(operations[0].phase, OpPhase::Completed);
     assert_eq!(env.body_files().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// 同步时的「最后活跃时间」（`sessions.last_activity_at`）
+// ---------------------------------------------------------------------------
+
+/// 往正文末尾追加一条带毫秒时间戳的记录（模拟来源账号继续对话）。
+fn append_record_with_timestamp(path: &Path, cid: &str, timestamp: i64) {
+    let mut text = std::fs::read_to_string(path).unwrap();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(
+        &json!({
+            "type": "message",
+            "role": "assistant",
+            "sessionId": cid,
+            "timestamp": timestamp
+        })
+        .to_string(),
+    );
+    text.push('\n');
+    std::fs::write(path, &text).unwrap();
+}
+
+/// 目标行比正文旧 → 同步把活跃时间推进到本次正文的最新记录。
+#[test]
+fn sync_advances_activity_to_incoming_body_timestamp() {
+    let env = ready_env_with_status("sync-activity-forward");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    // 目标行停在很早以前（客户端一直没维护这一列的真实形态）。
+    env.set_activity(&target_id, 1_000);
+    let newest = 1_700_000_000_000;
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", newest);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(newest),
+        "同步必须把活跃时间推进到本次正文的最新记录"
+    );
+}
+
+/// 目标行比正文新（目标侧刚用过）→ 同步不得把它改小：活跃时间只前进不回退。
+#[test]
+fn sync_never_lowers_existing_target_activity() {
+    let env = ready_env_with_status("sync-activity-keep");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    let target_newer = 1_700_000_900_000;
+    env.set_activity(&target_id, target_newer);
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", 1_700_000_000_000);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(target_newer),
+        "目标侧更新时必须保留原值，不得回退"
+    );
+}
+
+/// 老库没有 `last_activity_at` 列 → 同步照常写 `updated_at`，不因缺列报错。
+#[test]
+fn sync_without_activity_column_still_updates_row() {
+    let env = ready_env_with_status("sync-activity-legacy");
+    let (group_id, token, target_id) = fast_forward_scene(&env);
+    let updated_before = session_row(&env, &target_id).3;
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    let updated_after = session_row(&env, &target_id).3;
+    assert_eq!(
+        updated_after,
+        Some(report["synced"][0]["updatedAt"].as_i64().unwrap()),
+        "缺列时 updated_at 必须照常写入"
+    );
+    assert_ne!(updated_after, updated_before, "本次保存必须推进 updated_at");
+}

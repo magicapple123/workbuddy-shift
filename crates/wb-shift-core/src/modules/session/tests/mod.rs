@@ -177,6 +177,40 @@ impl Env {
         .unwrap();
     }
 
+    /// 给 `sessions` 补 `last_activity_at` 列（真实库有该列，默认建表没有）。
+    ///
+    /// 默认建表刻意不含它：老库兼容用例靠「没有这一列」证明代码不写死该列。
+    fn add_activity_column(&self) {
+        let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 直接写一行的 `last_activity_at`（构造「目标侧更新/更旧」的现场）。
+    fn set_activity(&self, id: &str, at: i64) {
+        let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+        conn.execute(
+            "UPDATE sessions SET last_activity_at = ?1 WHERE id = ?2",
+            rusqlite::params![at, id],
+        )
+        .unwrap();
+    }
+
+    /// 一行的 `last_activity_at`；列不存在或值为 NULL 都按 None 处理。
+    fn activity_of(&self, id: &str) -> Option<i64> {
+        let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+        conn.query_row(
+            "SELECT last_activity_at FROM sessions WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
     fn status_of(&self, id: &str) -> Option<String> {
         let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
         conn.query_row("SELECT status FROM sessions WHERE id = ?1", [id], |row| {

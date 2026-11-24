@@ -92,6 +92,11 @@ pub(in crate::modules::session) struct StatusChange<'a> {
 /// 更新目标会话行：`updated_at` 恒写，状态只在本次获得授权时按前置值条件写入。
 ///
 /// 只改 updated_at（与本次状态）；sessionId、标题与 custom_title 必须与覆盖前一致（R4）。
+///
+/// 目标表有 `last_activity_at` 列时一并维护它（客户端侧栏的「活跃时间」读的就是这一列）：
+/// 取值 max(目标行当前值, 本次写入正文的最新记录时间戳)，**只前进不回退**——目标侧可能
+/// 已经比来源更新，把它改小等于让用户在列表里看不到最近发生的对话。老库没有该列时
+/// 不写（SQL 按列存在性拼接），不报错。
 pub(in crate::modules::session) fn update_target_session_row(
     paths: &SessionPaths,
     target: &OperationMember,
@@ -99,6 +104,9 @@ pub(in crate::modules::session) fn update_target_session_row(
     before: Option<&SyncBackupRow>,
     status_change: Option<&StatusChange<'_>>,
 ) -> Result<(), String> {
+    // 正文最新时间戳在**事务之前**取：正文可能上百 MB，在写事务里做这次扫描会把
+    // 写锁拖到秒级。取不到（文件缺失/没有时间戳）时保持目标行原值，不报错。
+    let body_latest_at = latest_body_timestamp(paths, &target.session_id);
     let mut conn = open_db(&paths.workbuddy_db(), false)
         .ok_or_else(|| "会话数据无法打开，未同步".to_string())?;
     if !table_exists(&conn, "sessions") {
@@ -109,38 +117,72 @@ pub(in crate::modules::session) fn update_target_session_row(
     let tx = conn
         .transaction()
         .map_err(|error| format!("会话数据事务开启失败：{error}"))?;
+    // 老库没有 `last_activity_at`：整列都不碰，其余列照常写（与复制侧「列取交集」同口径）。
+    let has_activity = column_exists(&tx, "sessions", "last_activity_at");
+    // 写入前先读出当前值：只前进不回退，所以期望值要在这里算出来，不能交给 SQL 里的
+    // MAX()——回读校验需要一个确定的期望值，而不是「比一下大小」。
+    let before_activity = if has_activity {
+        read_activity_at(&tx, &target.session_id)?
+    } else {
+        None
+    };
+    let expected_activity = advance_activity_at(before_activity, body_latest_at);
+
     // 状态写入用条件 UPDATE：目标在事务内被改为活跃态/被取消归档时 affected 为 0，
     // 事务外的一次读取不能替代事务内的条件。
-    let affected = match status_change {
+    // SET 子句按列存在性拼接（老库可能没有 status / last_activity_at 之一或都没有），
+    // 占位符按拼接顺序绑定；WHERE 条件最后追加，参数顺序与字符串顺序必须一致。
+    let mut sets: Vec<&str> = vec!["updated_at = ?"];
+    let mut params: Vec<rusqlite::types::Value> =
+        vec![rusqlite::types::Value::Integer(new_updated_at)];
+    if has_activity {
+        sets.push("last_activity_at = ?");
+        params.push(match expected_activity {
+            Some(timestamp) => rusqlite::types::Value::Integer(timestamp),
+            None => rusqlite::types::Value::Null,
+        });
+    }
+    if let Some(change) = status_change {
+        sets.push("status = ?");
+        params.push(rusqlite::types::Value::Text(change.after.to_string()));
+    }
+    let mut sql = format!(
+        "UPDATE sessions SET {} WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        sets.join(", ")
+    );
+    params.push(rusqlite::types::Value::Text(target.session_id.clone()));
+    params.push(rusqlite::types::Value::Text(target.uid.clone()));
+    if let Some(change) = status_change {
         // `status = after` 这一支是幂等重放：数据库已提交但阶段标记未推进时，恢复会
         // 再跑一次本函数。前置值不匹配就不写——现场漂移出来的活跃态、未知值都不会
         // 命中这两个条件（`active` 作为**记录在案**的前置值可以写，那是可归档的
         // 历史残留态，见 `ARCHIVE_TARGET_TERMINAL_STATUSES`）。
-        Some(change) => tx.execute(
-            "UPDATE sessions SET updated_at = ?1, status = ?2 \
-             WHERE id = ?3 AND user_id = ?4 AND deleted_at IS NULL \
-             AND (status = ?5 OR status = ?6)",
-            rusqlite::params![
-                new_updated_at,
-                change.after,
-                target.session_id,
-                target.uid,
-                change.before,
-                change.after
-            ],
-        ),
-        None => tx.execute(
-            "UPDATE sessions SET updated_at = ?1 \
-             WHERE id = ?2 AND user_id = ?3 AND deleted_at IS NULL",
-            rusqlite::params![new_updated_at, target.session_id, target.uid],
-        ),
+        sql.push_str(" AND (status = ? OR status = ?)");
+        params.push(rusqlite::types::Value::Text(change.before.clone()));
+        params.push(rusqlite::types::Value::Text(change.after.to_string()));
     }
-    .map_err(|error| format!("目标会话记录更新失败：{error}"))?;
+    let affected = tx
+        .execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .map_err(|error| format!("目标会话记录更新失败：{error}"))?;
     if affected != 1 {
         return Err(
             "目标会话记录归属校验失败：会话不存在、不属于目标账号或已被删除，未按成功处理"
                 .to_string(),
         );
+    }
+    // 活跃时间在事务内回读校验：写入后的值必须等于期望值，且不小于写入前（只前进不回退）。
+    // 事务外的读取证明不了本次 UPDATE 的产物。
+    if has_activity {
+        let after_activity = read_activity_at(&tx, &target.session_id)?;
+        if after_activity != expected_activity {
+            return Err("目标会话记录的活跃时间未按本次保存生效，已回滚本次更新".to_string());
+        }
+        if after_activity
+            .zip(before_activity)
+            .is_some_and(|(after, before)| after < before)
+        {
+            return Err("目标会话记录的活跃时间被改小，已回滚本次更新".to_string());
+        }
     }
     match (read_session_row(&tx, &target.session_id)?, before) {
         (None, _) => return Err("目标会话记录保存后不可见，未按成功处理".to_string()),
@@ -172,6 +214,22 @@ pub(in crate::modules::session) fn update_target_session_row(
     tx.commit()
         .map_err(|error| format!("会话数据提交失败：{error}"))?;
     Ok(())
+}
+
+/// 读取目标行的 `last_activity_at`；NULL（客户端从未写过）与「行不存在」都返回 None。
+///
+/// 只服务 [`update_target_session_row`] 的「只前进不回退」与回读校验；调用方必须先用
+/// `column_exists` 确认列存在，否则这里会把缺列报成读取失败。行不存在的情况交给
+/// UPDATE 的 `affected != 1` 统一报错，这里不另造文案。
+fn read_activity_at(conn: &Connection, cid: &str) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT last_activity_at FROM sessions WHERE id = ?1",
+        [cid],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map_err(|error| format!("目标会话记录读取失败：{error}"))
+    .map(Option::flatten)
 }
 
 /// 提交 A/B 新基线与目标成员 lastSyncedAt（定向更新，不触碰其它配对）。
