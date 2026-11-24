@@ -227,11 +227,33 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
 
 三条「驱动口径」约定（看起来像失败，其实不是）：
 
-- **Docker 镜像还在构建**：镜像由 `docker.yml` 用同一个 tag 并行构建，冷缓存下多架构 buildx
-  接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
+- **Docker 镜像还在构建 / 刚推完拉不到**：镜像由 `docker.yml` 用同一个 tag 并行构建，冷缓存下
+  多架构 buildx 接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
   `SMOKE_DOCKER_BUILD_WAIT_SECONDS`，默认 2700s），成功后才拉镜像；构建失败直接判 C 类并写明
-  「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）退回 6×20s 短重试。
+  「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）直接去拉。
+  查这次构建状态用的是 `gh api`（job 只需 **`actions: read`**，只读 run 元数据），每次调用另有
+  20s 单次限时（`SMOKE_DOCKER_BUILD_STATE_API_TIMEOUT_SECONDS`）：超时按「查不到」处理、直接去拉，
+  避免一次半挂的 api 吃掉等构建的预算（不声明 `actions: read` 现在也能跑，但仓库转私有后会**静默**
+  退化成「无构建记录」，把「还在构建」记成 C 类假红）。
   只有在等待超限时才判 C，且 detail 明确写「是构建没结束，不是镜像缺失」。
+  拉取本身还有一层重试：**次数上限 ∩ 时间预算**（`SMOKE_DOCKER_PULL_ATTEMPTS` 默认 24、
+  `SMOKE_DOCKER_PULL_BUDGET_SECONDS` 默认 1200s；间隔 15s 起、逐次翻倍、封顶 60s），每次
+  `docker pull` 另有限时 300s（`SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS`）——这是**单次上限**，
+  预算将尽时按「本次剩余预算」缩到 60s 下限（即末次可能只有 60–299s）。**这些合起来被
+  `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS`（默认 2880s）限死**：加 K2–K7 约 240s，最坏约 53 min，
+  仍在 job 的 `timeout-minutes: 55` 之内 —— job 被超时掐断会让结果 JSON 不完整，比红更糟。
+  单次尝试被这层限时杀掉时，detail 会明写「**单次尝试超时（≈Ns）**」，N 取**末次尝试真实用的**
+  秒数（从 driver 自己写的记账行 `单次限时 <N>s` 里解析），不是固定 300s——预算将尽的那一次
+  可能 60s 就被杀了，写 300s 会让人误以为「网络慢到跑满 5 分钟」，与「预算先到」的处置方向相反；
+  解析不到时才回落到默认上限并写成「≤Ns」。`docker` 的进度条走
+  stderr 且不带换行，被杀时最后一段常未落盘，所以「最后输出」为空或只剩半行是**我们**杀它的结果，
+  不是 docker 沉默——这两种情况的处置方向完全不同，别混。
+  CI 的 `container-docker` job 会先 `docker login ghcr.io`（`GITHUB_TOKEN` + `packages: read`）
+  再跑 driver；登录失败只是退回匿名拉取，driver 不把登录当必要条件（本地 / fork / 无凭据照跑）。
+  失败时 detail 一定带 **docker 自己报的最后一句话**（`denied` / `no such manifest` /
+  `short read … unexpected EOF` 之类）与 `evidence/docker/pull-*.log` 的路径，不必先下 artifact。
+  注意 v0.3.3 那次假红**不是**传播延迟：driver 的等待循环日志被命令替换捕获，拉取整段被静默跳过
+  （详见 `scripts/smoke/docker/driver.sh` 里 `wait_for_docker_build` 的注释）。
 
 - **Linux 主程序怎么选**：deb 里除桌面壳 `/usr/bin/workbuddy-shift-desktop` 外还有
   `/usr/bin/companion-runtime`（悬浮窗 sidecar），`dpkg -L` 按字典序把它排在前面。driver 的
