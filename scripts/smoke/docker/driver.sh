@@ -171,6 +171,11 @@ PULL_BUDGET_SECONDS="${SMOKE_DOCKER_PULL_BUDGET_SECONDS:-1200}"
 # 单次 `docker pull` 的限时：没有它，一次网络黑洞（SYN 黑洞 / TLS 卡住）就能让
 # 「20 分钟预算」变成一句空话，还可能把 job 拖过 55 min。
 PULL_ATTEMPT_TIMEOUT_SECONDS="${SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS:-300}"
+# 单次 `gh api`（查 docker.yml 的 run 状态）的限时：一次正常往返 <1s，但网络半挂
+# （TCP 建连成功、之后无响应）时单次调用能拖到几十秒甚至更久，吃掉的正是「等构建」的
+# 那 2700s 预算——它会让预算算术失真（detail 里写「等了 N 秒」实际含了不可控的空转）。
+# 超时按「这次查不到」处理：调用方本来就把空串当 `no-workflow`（直接去拉），语义不变。
+BUILD_STATE_API_TIMEOUT_SECONDS="${SMOKE_DOCKER_BUILD_STATE_API_TIMEOUT_SECONDS:-20}"
 # 重试口径：次数上限 ∩ 预算上限；两次尝试之间 15s 起、逐次翻倍、封顶 60s。
 # 15+30+60+60+60… 累加到 1200s 约 21 次，与默认次数上限 24 基本贴合
 # （即「先撞预算」的那一档，撞上后日志里会写明是哪一条先到）。
@@ -180,7 +185,8 @@ PULL_ATTEMPT_TIMEOUT_SECONDS="${SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS:-300}"
 #     现在是**初始**间隔（默认 15）；
 #   - 新增 SMOKE_DOCKER_PULL_MAX_INTERVAL_SECONDS（封顶，默认 60）、
 #     SMOKE_DOCKER_PULL_BUDGET_SECONDS（预算，默认 1200）、
-#     SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS（单次限时，默认 300）；
+#     SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS（单次限时，默认 300）、
+#     SMOKE_DOCKER_BUILD_STATE_API_TIMEOUT_SECONDS（查构建状态的单次 api 限时，默认 20）；
 #   - SMOKE_DOCKER_PULL_ATTEMPTS 仍是「总次数上限」，默认 18 → 24。
 # 为什么要盖住十几分钟：`manifest 可见 ≠ 立刻能拉`。仓库匿名拉 ghcr.io 时会命中
 # 令牌/传播缓存与限流窗口，v0.3.2 见过 inspect 与 pull 结论不一致的现场；
@@ -201,13 +207,19 @@ else
 fi
 
 # 该 tag 上最近一次 push 触发的 `docker.yml` 结论，形如 `in_progress/-`、`completed/success`。
-# 查不到（无仓库上下文 / 无 gh / 无对应 run）时输出空串，调用方据此退回短重试。
+# 查不到（无仓库上下文 / 无 gh / 无对应 run / 本次 api 超时）时输出空串，调用方据此退回短重试。
 docker_build_state() {
   [ -n "${GITHUB_REPOSITORY:-}" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
   # `// empty` 是必须的：没有对应 run 时 `.workflow_runs[0]` 是 null，直接取值会渲染成
   # `null/-`，让上游误以为「有个处于未知状态的构建」而一直等到上限。
-  _raw=$(gh api \
+  #
+  # 单次 api 必须带显式限时（`smoke_timeout`，与 `docker pull` 用法一致）：**不让一次 api
+  # 卡住吃掉等待预算**。等待循环每 20s 查一次，网络半挂时一次调用就能拖几十秒，等满 2700s
+  # 的时间里这些空转会被算进「等了 N 秒」，`timeout` detail 里的数字也随之失真。
+  # `|| _raw=""` 是**必须**的：`set -eu` 下超时返回 124（`timeout` 与 `smoke_timeout` 的兜底
+  # 实现都返回 124），没有兜底会直接把 driver 打断（整份结果 JSON 不完整，比红更糟）。
+  _raw=$(smoke_timeout "${BUILD_STATE_API_TIMEOUT_SECONDS}" gh api \
     "repos/${GITHUB_REPOSITORY}/actions/workflows/docker.yml/runs?event=push&branch=${TAG}&per_page=1" \
     --jq '.workflow_runs[0] // empty | "\(.status)/\(.conclusion // "-")"' 2>/dev/null) || _raw=""
   case "${_raw}" in
@@ -270,10 +282,35 @@ wait_for_docker_build() {
   done
 }
 
+# 末次尝试是不是被**我们**的限时杀掉（`smoke_timeout` 在超时时返回 124，与 `timeout` 一致，
+# 也会被 `pull_with_retry` 写进日志行的 `exit=`）。命中时输出一句人话，空则无输出。
+#
+# 为什么需要它：`docker pull` 的进度条走 **stderr 且不带换行**，进程被 `timeout` 杀掉时
+# 缓冲区里没写完的那一段**常常整条丢失** → 日志里只剩我们自己写的 `[smoke]` 记账行。
+# 此时 detail 的「最后输出」只能回落到记账行（或干脆空），读起来像「docker 什么都没说」，
+# 而真实原因是「我们在 300s 时把它杀了」——两者处置方向完全不同，必须自己写出来。
+# 判定只看**末次**的 `exit=`（日志里可能既有超时也有别的失败，读者关心的是最后那一次）。
+pull_timeout_note() { # $1=日志路径 → 单行说明（末次尝试非超时则输出空）
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+  _ptn_last_exit=$(tr -d '\r' <"$1" 2>/dev/null | grep -o 'exit=[0-9]*' | tail -n 1 || true)
+  case "${_ptn_last_exit}" in
+    exit=124)
+      printf '单次尝试超时（%ss 限时被杀；docker 的进度行不带换行，被杀时最后一段常未落盘）' \
+        "${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+      ;;
+  esac
+}
+
 # docker 自己报的最后一句话：拼进 fail 的 detail，让 issue 正文与结论矩阵直接看出是哪一类，
 # 不必先去下载 artifact（issue #14 的正文只有一句「docker pull … 失败」）。
-pull_fail_hint() { # $1=日志路径 → 单行、截尾 240 字符的原始报错
+pull_fail_hint() { # $1=日志路径 [$2=末次尝试被限时杀掉的秒数] → 单行、截尾 240 字符的原始报错
   if [ ! -f "$1" ] || [ ! -s "$1" ]; then
+    if [ -n "${2:-}" ]; then
+      printf '（docker 未输出：单次尝试在 %ss 被限时杀掉，进度走 stderr 且无换行，未落盘）' "$2"
+      return 0
+    fi
     printf '（%s 缺失或为空：拉取没有任何输出）' "$(basename "$1")"
     return 0
   fi
@@ -281,8 +318,14 @@ pull_fail_hint() { # $1=日志路径 → 单行、截尾 240 字符的原始报�
   # detail 要回答的是「docker 说什么」，不是「我们重试了几次」。
   _pfh=$(tr -d '\r' <"$1" 2>/dev/null | grep -v '^\[smoke\]' | grep -v '^[[:space:]]*$' | tail -n 1 || true)
   if [ -z "${_pfh}" ]; then
-    # docker 一个字都没吐（被限时杀掉 / 信号打断）：退回去看最后一行，至少证明「跑过」。
-    _pfh=$(tr -d '\r' <"$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+    if [ -n "${2:-}" ]; then
+      # 一个字都没吐且是**我们**杀的：不要拿 `[smoke]` 记账行冒充 docker 的原话（会被读成
+      # 「docker 说了这句」），直接说明是被限时杀掉、输出未落盘。
+      _pfh="（docker 未输出：单次尝试在 ${2}s 被限时杀掉，进度走 stderr 且无换行，未落盘）"
+    else
+      # docker 一个字都没吐（被限时杀掉 / 信号打断）：退回去看最后一行，至少证明「跑过」。
+      _pfh=$(tr -d '\r' <"$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+    fi
   fi
   _pfh=$(printf '%s' "${_pfh}" | tr '\n' ' ' | tr -s ' ' ' ')
   # 截尾按**字符**做：按字节截会把中文/UTF-8 切成半个字符，detail 里出现乱码比不截更糟。
@@ -322,10 +365,20 @@ pull_fail_class() { # $1=日志路径
 }
 
 # 失败 detail：自证「重试了什么、撞的是次数还是预算、docker 说什么、完整日志在哪」。
+# 末次尝试被单次限时杀掉时额外插一句「单次尝试超时（300s）」，否则读者会把「docker 无输出」
+# 当成 docker 自己的沉默，而真正的原因是我们把它杀了（两者的处置方向完全不同）。
 pull_fail_detail() { # $1=日志路径
-  printf '重试上限 %s 次 / 预算 %ss 用尽 · 归因 %s · 最后输出：%s · 完整日志 evidence/docker/%s（随 smoke-docker artifact 上传）' \
+  _pfd_timeout=$(pull_timeout_note "$1")
+  _pfd_timeout_part=""
+  _pfd_timeout_secs=""
+  if [ -n "${_pfd_timeout}" ]; then
+    _pfd_timeout_part="${_pfd_timeout} · "
+    _pfd_timeout_secs="${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+  fi
+  printf '重试上限 %s 次 / 预算 %ss 用尽 · 归因 %s · %s最后输出：%s · 完整日志 evidence/docker/%s（随 smoke-docker artifact 上传）' \
     "${PULL_ATTEMPTS}" "${PULL_BUDGET_SECONDS}" \
-    "$(pull_fail_class "$1")" "$(pull_fail_hint "$1")" "$(basename "$1")"
+    "$(pull_fail_class "$1")" "${_pfd_timeout_part}" \
+    "$(pull_fail_hint "$1" "${_pfd_timeout_secs}")" "$(basename "$1")"
 }
 
 # 拉取：次数上限 ∩ 时间预算，退避间隔 15s 起、翻倍、封顶 60s。

@@ -231,12 +231,19 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
   多架构 buildx 接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
   `SMOKE_DOCKER_BUILD_WAIT_SECONDS`，默认 2700s），成功后才拉镜像；构建失败直接判 C 类并写明
   「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）直接去拉。
+  查这次构建状态用的是 `gh api`（job 只需 **`actions: read`**，只读 run 元数据），每次调用另有
+  20s 单次限时（`SMOKE_DOCKER_BUILD_STATE_API_TIMEOUT_SECONDS`）：超时按「查不到」处理、直接去拉，
+  避免一次半挂的 api 吃掉等构建的预算（不声明 `actions: read` 现在也能跑，但仓库转私有后会**静默**
+  退化成「无构建记录」，把「还在构建」记成 C 类假红）。
   只有在等待超限时才判 C，且 detail 明确写「是构建没结束，不是镜像缺失」。
   拉取本身还有一层重试：**次数上限 ∩ 时间预算**（`SMOKE_DOCKER_PULL_ATTEMPTS` 默认 24、
   `SMOKE_DOCKER_PULL_BUDGET_SECONDS` 默认 1200s；间隔 15s 起、逐次翻倍、封顶 60s），每次
   `docker pull` 另有限时 300s（`SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS`）。**两者合起来被
   `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS`（默认 2880s）限死**：加 K2–K7 约 240s，最坏约 52 min，
   仍在 job 的 `timeout-minutes: 55` 之内 —— job 被超时掐断会让结果 JSON 不完整，比红更糟。
+  单次尝试被这个 300s 限时杀掉时，detail 会明写「**单次尝试超时（300s）**」：`docker` 的进度条走
+  stderr 且不带换行，被杀时最后一段常未落盘，所以「最后输出」为空或只剩半行是**我们**杀它的结果，
+  不是 docker 沉默——这两种情况的处置方向完全不同，别混。
   CI 的 `container-docker` job 会先 `docker login ghcr.io`（`GITHUB_TOKEN` + `packages: read`）
   再跑 driver；登录失败只是退回匿名拉取，driver 不把登录当必要条件（本地 / fork / 无凭据照跑）。
   失败时 detail 一定带 **docker 自己报的最后一句话**（`denied` / `no such manifest` /

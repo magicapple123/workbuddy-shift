@@ -253,11 +253,18 @@ jobs:
     # 现在 driver 的「等构建 + 拉取」合计被 SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS 卡在 48 min，
     # 加 K2–K7 约 4 min ≈ 52 min，仍在 55 min 之内（算法见 driver.sh 的 K1 预算注释）。
     timeout-minutes: 55
-    # 只取自己需要的两项：job 级 permissions 会**覆盖** workflow 级的写权限，
+    # 只取自己需要的三项：job 级 permissions 会**覆盖** workflow 级的写权限，
     # 这个 job 确实不需要 contents: write / issues: write（driver 恒 exit 0，不写任何仓库状态）。
     permissions:
       contents: read   # actions/checkout 拉源码
       packages: read   # 读 ghcr.io 的镜像（下面的 docker login 用它换拉取凭据）
+      # **只读** workflow run 元数据：driver 的 `docker_build_state` 靠它读 `docker.yml` 该 tag
+      # 的 run 状态，才能在镜像还没推完时「等构建收敛」。缺了它，
+      # `gh api .../workflows/docker.yml/runs` 会被拒（403），driver 按设计把它降级成
+      # 「无构建记录」→ 退化成短重试，把「镜像还在构建」记成 C 类假红。
+      # 公开仓库匿名也能读这些元数据，所以现在不加也能跑；仓库转私有后会**静默**失效
+      # （正是 issue #14 那种「看起来像拉取失败」的现场），所以提前显式声明。
+      actions: read
     if: ${{ needs.preflight.outputs.ok == 'true' }}
     steps:
       - uses: actions/checkout@v4
