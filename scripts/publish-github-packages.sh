@@ -266,12 +266,18 @@ NODEJS
 # 窗口给到 5 分钟（20×15s）：npm 在 publish 成功后会提示「may take a few minutes」，
 # 0.3.0-rc.1 实测在网络正常的情况下仍用了 2 分钟以上才可解析，8×15s 不够。
 # 只在备用渠道上多等几分钟，好过让整个 build run 变红。
+#
+# **必须带 `--prefer-online`**（0.3.2 / 0.3.3 连续两次踩到）：npm 会把 packument
+# 按 `Cache-Control: max-age=300` 缓存 5 分钟，而重试窗口正好也是 5 分钟——publish 前
+# 缓存下来的「没有这个版本」会让 20 次重试全部读到同一份旧 packument，日志看起像
+# 「npmjs 一直没传播」，实际是本地缓存过期时重试已用尽。强制在线校验后，第一次重试
+# 就能拿到新版本。
 pack() { # $1 = 包 spec 或本地目录, $2 = 目的目录
   attempt=1
   max_attempts=20
   while :; do
     if npm pack "$1" --pack-destination "$2" --registry="$NPM_REGISTRY" \
-      --json >"$TMP/pack.json" 2>"$TMP/pack.log"; then
+      --prefer-online --json >"$TMP/pack.json" 2>"$TMP/pack.log"; then
       break
     fi
     if [ "$attempt" -lt "$max_attempts" ] && grep -q "notarget" "$TMP/pack.log"; then
