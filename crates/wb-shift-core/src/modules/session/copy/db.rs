@@ -400,11 +400,12 @@ pub(in crate::modules::session) fn insert_session_copy(
             // 夹住——源机时钟超前时不能让副本的活跃时间跑到未来。
             //
             // 本分支只在源行**确实有**这一列时才进入（列交集之外不存在这个 key），
-            // 所以老库不会凭空多写一个源行没有的列。源值为 NULL 或正文取不到时间时
-            // 退回「沿用源值 / NULL」，不报错。
+            // 所以老库不会凭空多写一个源行没有的列。源值为 NULL、非正数（客户端不可能
+            // 写出的坏值，0 会显示成 1970）或正文取不到时间时退回「沿用源值 / NULL」，
+            // 不报错。正数口径与 `record_timestamp_of` 一致：两条写路径都只认正数。
             "last_activity_at" => {
                 let from_row = match &value {
-                    rusqlite::types::Value::Integer(number) if *number >= 0 => Some(*number),
+                    rusqlite::types::Value::Integer(number) if *number > 0 => Some(*number),
                     _ => None,
                 };
                 match advance_activity_at(from_row, body_latest_at) {

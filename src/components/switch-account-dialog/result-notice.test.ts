@@ -164,3 +164,83 @@ describe("notifySwitchResult：源会话容错修复提示", () => {
     expect(toastMock.success).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("notifySwitchResult：项目归属与账本说明", () => {
+  const SPACE_TITLE = "会话的项目分组需要留意";
+  const AUX_TITLE = "副本不含会话用量记录";
+
+  beforeEach(() => {
+    for (const fn of Object.values(toastMock)) fn.mockReset();
+  });
+
+  /** 复制成功项 + 任意降级说明（缺字段表示没有该类说明）。 */
+  function itemWithNotes(
+    id: string,
+    notes: { sourceRepaired?: string; spaceNote?: string; auxNote?: string },
+  ) {
+    return {
+      id,
+      newId: `${id}-copy`,
+      groupId: `group-${id}`,
+      backup: null,
+      cleanupState: "cleaned" as const,
+      ...notes,
+    };
+  }
+
+  it("有 spaceNote 时给出 warning，文案原样展示", () => {
+    const note = "目标账号里未能定位或新建项目分组，副本未归入任何项目";
+    notifySessionCopy({
+      copied: [itemWithNotes("sess-1", { spaceNote: note })],
+      alreadyLinked: [],
+    });
+
+    const warning = warningWith(SPACE_TITLE);
+    expect(warning?.description).toBe(note);
+    // 复制本身是成功的：只能是 warning，不能升级成 error 或压掉成功摘要。
+    expect(toastMock.error).not.toHaveBeenCalled();
+    expect(toastMock.success).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有说明时不出现这两条提示", () => {
+    notifySessionCopy({ copied: [itemWithNotes("sess-1", {})], alreadyLinked: [] });
+
+    expect(warningWith(SPACE_TITLE)).toBeUndefined();
+    expect(warningWith(AUX_TITLE)).toBeUndefined();
+  });
+
+  it("同一条说明覆盖多个会话时只出现一次并标出数量", () => {
+    const note = "目标账号有多个空间绑定该目录，已按目录新建分组";
+    notifySessionCopy({
+      copied: [itemWithNotes("sess-1", { spaceNote: note }), itemWithNotes("sess-2", { spaceNote: note })],
+      alreadyLinked: [],
+    });
+
+    expect(warningWith(SPACE_TITLE)?.description).toBe(`${note}（2 个会话）`);
+  });
+
+  it("有 auxNote 时单独提示「副本不含用量记录」", () => {
+    const note = "目标客户端不支持会话用量记录，副本不含账本";
+    notifySessionCopy({
+      copied: [itemWithNotes("sess-1", { auxNote: note })],
+      alreadyLinked: [],
+    });
+
+    expect(warningWith(AUX_TITLE)?.description).toBe(note);
+  });
+
+  it("修复、项目归属、账本三类说明并存时互不覆盖", () => {
+    const repaired = "源会话末尾有 1 条不完整记录，已跳过";
+    const space = "目标账号里未能定位或新建项目分组，副本未归入任何项目";
+    const aux = "目标客户端不支持会话用量记录，副本不含账本";
+    notifySessionCopy({
+      copied: [itemWithNotes("sess-1", { sourceRepaired: repaired, spaceNote: space, auxNote: aux })],
+      alreadyLinked: [],
+    });
+
+    expect(warningWith(REPAIR_TITLE)?.description).toBe(repaired);
+    expect(warningWith(SPACE_TITLE)?.description).toBe(space);
+    expect(warningWith(AUX_TITLE)?.description).toBe(aux);
+    expect(toastMock.success).toHaveBeenCalledTimes(1);
+  });
+});

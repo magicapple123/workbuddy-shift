@@ -3282,6 +3282,29 @@ fn copy_ignores_negative_source_activity() {
     );
 }
 
+/// 正文只有 `timestamp = 0`（1970）→ 与同步侧同一口径：当成「没有可用时间」，
+/// 沿用源行的值，不写 0。
+///
+/// 这条钉的是两条写路径的口径一致性：解析层只认正数，所以复制与同步都不会把
+/// 「1970」写进侧栏的活跃时间；反面断言（不得写 0）比「等于源值」更重要。
+#[test]
+fn copy_treats_zero_timestamp_as_missing() {
+    let env = ready_env("activity-zero");
+    env.add_activity_column();
+    env.add_body("sess-1", &body_with_timestamps("sess-1", &[0]));
+    env.set_activity("sess-1", ACTIVITY_SOURCE_STALE);
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let copied = env.first_copy_id(&report);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        env.activity_of(&copied),
+        Some(ACTIVITY_SOURCE_STALE),
+        "0 不是活动时间：必须沿用源值，不能写成 0（侧栏会显示 1970 年）"
+    );
+    assert_ne!(env.activity_of(&copied), Some(0), "不得写 0");
+}
+
 /// 复制在「正文未写、行未写」处中断 → 恢复补写正文后，活跃时间按**本次补写的那份
 /// 正文**取值，而不是沿用源行的旧值；恢复只跑一次，不产生第二份副本。
 ///
