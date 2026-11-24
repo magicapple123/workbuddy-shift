@@ -156,7 +156,7 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 | `smoke/linux/driver.sh` | Linux 验收 L0–L8：`apt` 装依赖 → deb `dpkg -i` 升级（`pkg-upgrade`）→ `xvfb-run` 启动 → AppImage 同路径替换（`appimage-replace`，格子级 `upgradeMode`）+ sha256 比对 + `--appimage-extract-and-run` 启动；主程序带 `companion` 时判**驱动缺陷**（`install` ❌ + 启动 ⛔）而不是启动失败 |
 | `smoke/linux/read-version.sh` | 从 deb 元数据（`dpkg-deb`）或已安装包（`dpkg-query` + `dpkg -L`）读包名 / 版本 / 主程序，输出 JSON（包名不写死）。**主程序选择**：`.desktop` 的 `Exec=` → `/usr/bin` 下排除 `companion-*`、优先 `*-desktop` → 都没有就 `ok=false` 不硬选；`--selftest` / `--from-list` 可离线验证规则 |
 | `smoke/npm/driver.sh` | npm 验收 N1–N6：官方源装 0.2.4 → 升 0.2.5（`npm-upgrade`）→ `serve --no-open` 后 `/api/status` 与 `/` 断言 |
-| `smoke/docker/driver.sh` | 容器验收 K1–K7：`:<ver>` 与 `:latest` digest 相同 → 90s 内 healthy → `/api/status` → `id -u == 1000` → 卷写读（宿主卷目录先 `chmod 0777`，否则 uid 1000 写不进去；失败时落 `id` / `ls -ld` / stderr 到 evidence） |
+| `smoke/docker/driver.sh` | 容器验收 K1–K7：`:<ver>` 与 `:latest` digest 相同 → 90s 内 healthy → `/api/status` → `id -u == 1000` → 卷写读（宿主卷目录先 `chmod 0777`，否则 uid 1000 写不进去；失败时落 `id` / `ls -ld` / stderr 到 evidence）。K1 先轮询该 tag 的 `docker.yml`（上限 `SMOKE_DOCKER_BUILD_WAIT_SECONDS`），再按「次数 ∩ 预算」退避重试拉取（`SMOKE_DOCKER_PULL_ATTEMPTS` / `SMOKE_DOCKER_PULL_BUDGET_SECONDS`），两者合计被 `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS` 卡在 job 超时之内；失败 detail 带 docker 原始报错 + `evidence/docker/pull-*.log`（CI 会先 `docker login ghcr.io`，匿名也能跑） |
 | `smoke/assert-update-log.py` | 断言 `--smoke-self-update` 的 JSONL：按 `pid` 分组取第一个进程、阶段序列齐全且有序、`version` 与目标一致、无 `error`；`--selftest` 用 3 份构造日志自测 |
 
 桌面三端共用的判定口径（写进单元格子的 `category`）：`blocked`(J) 只出现在「进程 20s 内退出 +

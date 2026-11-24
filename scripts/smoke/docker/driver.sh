@@ -151,15 +151,54 @@ smoke_group "K1 docker pull"
 # 镜像由独立的 `docker.yml` 用同一个 tag 触发构建，和本验收是**并行**的两条流水线：
 # 正式版刚发布时镜像常常还在推。多架构 buildx 首次构建实测接近 1 小时（之后走 GHA 层缓存），
 # 因此「短重试」盖不住这个窗口——先等工作流收敛再拉，才不会把「还差二十分钟」记成 C 类
-# 并白烧一次处置。查不到工作流时（手动验收老 tag / 本地跑 / 无 gh）退回短重试，语义不变。
+# 并白烧一次处置。查不到工作流时（手动验收老 tag / 本地跑 / 无 gh）直接去拉，语义不变。
 TAG="v${VERSION}"
+
+# --- 预算（单位 s） -------------------------------------------------------
+# job 的 timeout-minutes 是 55 min = 3300s，必须留够（issue #14 之后重算）：
+#   「等 docker.yml 收敛 + 拉取」≤ TOTAL_WAIT_BUDGET_SECONDS（默认 2880s = 48 min）
+#   + K2–K7（health 上限 90s + api 上限 60s + exec/清理 ~30s，按 240s 预留）
+#   ≈ 3120s = 52 min，仍在 55 min 之内。
+# 实测最坏还要再加 ≤60s：等待循环最后一个 sleep 最多超出上限 20s，拉取的最后一次尝试有
+# 60s 的「单次限时」下限 → 2880 + 60 + 240 ≈ 53 min，仍有余量。
+# job 被超时**掐断**比红更糟：结果 JSON 不完整，triage 只会看到「形态缺失」，
+# 而 driver 的 trap 也来不及把证据落盘。所有等待都以总预算为硬上限。
+TOTAL_WAIT_BUDGET_SECONDS="${SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS:-2880}"
+WAIT_DEADLINE=$((SECONDS + TOTAL_WAIT_BUDGET_SECONDS))
+# 单步上限：等构建 45 min、拉取 20 min，两者再被上面的总预算各截一次。
 BUILD_WAIT_SECONDS="${SMOKE_DOCKER_BUILD_WAIT_SECONDS:-2700}"
-# pull 的重试窗口要盖住「manifest 可见 ≠ 立刻能拉」这段 GHCR 传播/限流延迟。
-# v0.3.2 实测：`docker manifest inspect` 18:46 就成功，18:51 的 `docker pull` 仍失败，
-# 19:22 用同一份镜像重跑才绿。旧的 6 次 × 20s ≈ 100s 完全盖不住，于是每次发版都可能
-# 假红一次、再人工重跑。18 次 × 20s ≈ 340s，仍远小于 job 的 40 分钟预算。
-PULL_ATTEMPTS="${SMOKE_DOCKER_PULL_ATTEMPTS:-18}"
-PULL_INTERVAL_SECONDS="${SMOKE_DOCKER_PULL_INTERVAL_SECONDS:-20}"
+PULL_BUDGET_SECONDS="${SMOKE_DOCKER_PULL_BUDGET_SECONDS:-1200}"
+# 单次 `docker pull` 的限时：没有它，一次网络黑洞（SYN 黑洞 / TLS 卡住）就能让
+# 「20 分钟预算」变成一句空话，还可能把 job 拖过 55 min。
+PULL_ATTEMPT_TIMEOUT_SECONDS="${SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS:-300}"
+# 重试口径：次数上限 ∩ 预算上限；两次尝试之间 15s 起、逐次翻倍、封顶 60s。
+# 15+30+60+60+60… 累加到 1200s 约 21 次，与默认次数上限 24 基本贴合
+# （即「先撞预算」的那一档，撞上后日志里会写明是哪一条先到）。
+#
+# 与旧版的语义差异（写清是因为这些变量可能被 workflow / 人工复验覆盖）：
+#   - SMOKE_DOCKER_PULL_INTERVAL_SECONDS：旧版是**固定**间隔（默认 20），
+#     现在是**初始**间隔（默认 15）；
+#   - 新增 SMOKE_DOCKER_PULL_MAX_INTERVAL_SECONDS（封顶，默认 60）、
+#     SMOKE_DOCKER_PULL_BUDGET_SECONDS（预算，默认 1200）、
+#     SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS（单次限时，默认 300）；
+#   - SMOKE_DOCKER_PULL_ATTEMPTS 仍是「总次数上限」，默认 18 → 24。
+# 为什么要盖住十几分钟：`manifest 可见 ≠ 立刻能拉`。仓库匿名拉 ghcr.io 时会命中
+# 令牌/传播缓存与限流窗口，v0.3.2 见过 inspect 与 pull 结论不一致的现场；
+# 旧的 18 × 20s ≈ 340s 太短。注意：v0.3.3（run 45381735149）的红**不是**这个原因，
+# 那次根本没发起拉取，见 wait_for_docker_build 上方的注释。
+PULL_ATTEMPTS="${SMOKE_DOCKER_PULL_ATTEMPTS:-24}"
+PULL_INTERVAL_SECONDS="${SMOKE_DOCKER_PULL_INTERVAL_SECONDS:-15}"
+PULL_MAX_INTERVAL_SECONDS="${SMOKE_DOCKER_PULL_MAX_INTERVAL_SECONDS:-60}"
+
+smoke_log "K1 预算：等构建 ${BUILD_WAIT_SECONDS}s · 拉取 ${PULL_BUDGET_SECONDS}s · 总等待 ${TOTAL_WAIT_BUDGET_SECONDS}s（job timeout 55 min）"
+# 登录态只影响「是否更容易被限流/拒绝」，不影响流程：CI 的 container-docker job 会先
+# `docker login ghcr.io`（packages: read），本地与无凭据场景继续匿名拉取，两者都必须能跑。
+if [ -f "${DOCKER_CONFIG:-${HOME:-/nonexistent}/.docker}/config.json" ] &&
+  grep -qs 'ghcr\.io' "${DOCKER_CONFIG:-${HOME:-/nonexistent}/.docker}/config.json"; then
+  smoke_log "ghcr 登录态：有（带凭据拉取）"
+else
+  smoke_log "ghcr 登录态：无（匿名拉取，本地 / 无凭据场景）"
+fi
 
 # 该 tag 上最近一次 push 触发的 `docker.yml` 结论，形如 `in_progress/-`、`completed/success`。
 # 查不到（无仓库上下文 / 无 gh / 无对应 run）时输出空串，调用方据此退回短重试。
@@ -177,77 +216,219 @@ docker_build_state() {
   esac
 }
 
-# 等镜像工作流收敛：`ok`（可拉）/ `no-workflow`（查不到，去短重试）/
+# 等镜像工作流收敛：`ok`（可拉）/ `no-workflow`（查不到，直接去拉）/
 # `build-<conclusion>`（构建真的失败）/ `timeout`（等到上限还没完）。
+#
+# ⚠️ 结果写进**全局变量** WAIT_RESULT，诊断日志一律走 stderr，**不要**改回
+# `WAIT_RESULT=$(wait_for_docker_build)`：旧版就是这么踩的，也是 issue #14 的真因——
+#   1. 命令替换会捕获函数内 `smoke_log` 的等待日志，WAIT_RESULT 变成
+#      「[smoke] 等待 docker 镜像构建（in_progress/-…）\nok」这样的多行串；
+#   2. 调用方的 `case` 只有 `ok|no-workflow` / `timeout` / `build-*` 三个分支且**没有兜底**，
+#      多行串一个都不匹配 → 整段拉取被**静默跳过**，PULL_*_OK 保持 no；
+#   3. 于是结果只剩一格「:ver 与 :latest 指向同一 digest：镜像没拉全」，`docker pull` 从未执行、
+#      `pull-*.log` 从未创建（所以 artifact 里也没有），而那条等待日志被吞进变量，
+#      job 日志里只剩下 224 秒空白 —— 现场（run 45381735149）看起来像「pull 重试了 224s 全失败」。
+# 现在：返回值走全局变量 + 日志走 stderr + 调用方补兜底分支（三层都不能少）。
+WAIT_RESULT=""
+WAIT_LIMIT_SECONDS=0
 wait_for_docker_build() {
-  [ "${SMOKE_DOCKER_WAIT_BUILD:-1}" = "1" ] || { printf 'no-workflow'; return 0; }
+  WAIT_RESULT=""
+  WAIT_LIMIT_SECONDS=0
+  if [ "${SMOKE_DOCKER_WAIT_BUILD:-1}" != "1" ]; then
+    WAIT_RESULT="no-workflow"
+    return 0
+  fi
   _start=${SECONDS}
   _last_log=${SECONDS}
+  # 本步上限 = min(等构建上限, 总预算剩余)，早就算好放进 WAIT_LIMIT_SECONDS 供 detail 引用。
+  _limit=${BUILD_WAIT_SECONDS}
+  _left=$((WAIT_DEADLINE - SECONDS))
+  if [ "${_left}" -lt "${_limit}" ]; then
+    _limit=${_left}
+  fi
+  if [ "${_limit}" -lt 0 ]; then
+    _limit=0
+  fi
+  WAIT_LIMIT_SECONDS=${_limit}
   while :; do
     _state=$(docker_build_state)
     case "${_state}" in
-      "") printf 'no-workflow'; return 0 ;;
-      completed/success) printf 'ok'; return 0 ;;
-      completed/*) printf 'build-%s' "${_state#completed/}"; return 0 ;;
+      "") WAIT_RESULT="no-workflow"; return 0 ;;
+      completed/success) WAIT_RESULT="ok"; return 0 ;;
+      completed/*) WAIT_RESULT="build-${_state#completed/}"; return 0 ;;
     esac
-    if [ $((SECONDS - _start)) -ge "${BUILD_WAIT_SECONDS}" ]; then
-      printf 'timeout'
+    if [ $((SECONDS - _start)) -ge "${_limit}" ]; then
+      WAIT_RESULT="timeout"
       return 0
     fi
     if [ $((SECONDS - _last_log)) -ge 60 ]; then
-      smoke_log "等待 docker 镜像构建（${_state}，已等 $((SECONDS - _start))s，上限 ${BUILD_WAIT_SECONDS}s）"
+      smoke_log "等待 docker 镜像构建（${_state}，已等 $((SECONDS - _start))s，上限 ${_limit}s）" >&2
       _last_log=${SECONDS}
     fi
+    # 最多超出上限 20s（最后一个 sleep），已计入总预算裕量。
     sleep 20
   done
 }
 
-pull_with_retry() { # $1=image $2=log
-  _attempt=1
-  while [ "${_attempt}" -le "${PULL_ATTEMPTS}" ]; do
-    if docker pull "$1" >"$2" 2>&1; then
-      return 0
-    fi
-    if [ "${_attempt}" -lt "${PULL_ATTEMPTS}" ]; then
-      printf '[smoke] pull %s 失败（第 %s/%s 次），%ss 后重试\n' \
-        "$1" "${_attempt}" "${PULL_ATTEMPTS}" "${PULL_INTERVAL_SECONDS}" >>"$2"
-      sleep "${PULL_INTERVAL_SECONDS}"
-      _attempt=$((_attempt + 1))
-      continue
-    fi
-    return 1
-  done
+# docker 自己报的最后一句话：拼进 fail 的 detail，让 issue 正文与结论矩阵直接看出是哪一类，
+# 不必先去下载 artifact（issue #14 的正文只有一句「docker pull … 失败」）。
+pull_fail_hint() { # $1=日志路径 → 单行、截尾 240 字符的原始报错
+  if [ ! -f "$1" ] || [ ! -s "$1" ]; then
+    printf '（%s 缺失或为空：拉取没有任何输出）' "$(basename "$1")"
+    return 0
+  fi
+  # 只看 **docker 自己的输出**（过滤掉我们写的 `[smoke]` 记账行），取最后一句：
+  # detail 要回答的是「docker 说什么」，不是「我们重试了几次」。
+  _pfh=$(tr -d '\r' <"$1" 2>/dev/null | grep -v '^\[smoke\]' | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+  if [ -z "${_pfh}" ]; then
+    # docker 一个字都没吐（被限时杀掉 / 信号打断）：退回去看最后一行，至少证明「跑过」。
+    _pfh=$(tr -d '\r' <"$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+  fi
+  _pfh=$(printf '%s' "${_pfh}" | tr '\n' ' ' | tr -s ' ' ' ')
+  # 截尾按**字符**做：按字节截会把中文/UTF-8 切成半个字符，detail 里出现乱码比不截更糟。
+  if [ -n "${SMOKE_PYTHON}" ]; then
+    _pfh=$(
+      printf '%s' "${_pfh}" | "${SMOKE_PYTHON}" -c 'import sys
+text = sys.stdin.read().strip()
+print(text[-240:] if len(text) > 240 else text)' 2>/dev/null || printf '%s' "${_pfh}"
+    )
+  fi
+  printf '%s' "${_pfh:-（日志无可读内容）}"
 }
 
-WAIT_RESULT=$(wait_for_docker_build)
-WAIT_STATE=$(docker_build_state)
+# 一句话归因。**只用于 detail 文案**，不参与 A–I 分类（分类口径由 classify.py 定义）。
+pull_fail_class() { # $1=日志路径
+  if [ ! -f "$1" ]; then
+    printf 'unknown（日志文件不存在，驱动缺陷）'
+    return 0
+  fi
+  _pfc=$(tr -d '\r' <"$1" 2>/dev/null || true)
+  case "${_pfc}" in
+    *denied* | *unauthorized* | *"authentication required"* | *"incorrect username or password"*)
+      printf 'auth（凭据/令牌被拒，容器仓库鉴权）'
+      ;;
+    *"manifest unknown"* | *"no such manifest"* | *"not found"*)
+      printf 'manifest（该 tag 的 manifest 不存在）'
+      ;;
+    *toomanyrequests* | *"rate limit"* | *"429 Too Many"*)
+      printf 'rate-limit（仓库拉取限流）'
+      ;;
+    *"TLS handshake timeout"* | *"connection reset"* | *"i/o timeout"* | *"no such host"* | *EOF* | *"temporary failure"* | *"dial tcp"*)
+      printf 'network（DNS/TLS/连接层）'
+      ;;
+    "") printf 'unknown（拉取无任何输出，可能是 CLI 层被信号打断）' ;;
+    *) printf 'unknown（见日志最后几行原文）' ;;
+  esac
+}
+
+# 失败 detail：自证「重试了什么、撞的是次数还是预算、docker 说什么、完整日志在哪」。
+pull_fail_detail() { # $1=日志路径
+  printf '重试上限 %s 次 / 预算 %ss 用尽 · 归因 %s · 最后输出：%s · 完整日志 evidence/docker/%s（随 smoke-docker artifact 上传）' \
+    "${PULL_ATTEMPTS}" "${PULL_BUDGET_SECONDS}" \
+    "$(pull_fail_class "$1")" "$(pull_fail_hint "$1")" "$(basename "$1")"
+}
+
+# 拉取：次数上限 ∩ 时间预算，退避间隔 15s 起、翻倍、封顶 60s。
+# 日志**追加**写入 evidence 下的文件（每次尝试的 docker 原文都在），并在开头写一行口径，
+# 保证「文件一定存在且不空」——证据文件缺失时，结论里的「见 xxx.log」就是一句假话。
+pull_with_retry() { # $1=镜像 $2=日志路径；成功 return 0，次数或预算用尽 return 1
+  _pull_start=${SECONDS}
+  # 本次拉取的截止时间 = min(本地预算, 总等待预算)，后者的裕量留给 K2–K7。
+  _pull_deadline=$((SECONDS + PULL_BUDGET_SECONDS))
+  if [ "${_pull_deadline}" -gt "${WAIT_DEADLINE}" ]; then
+    _pull_deadline=${WAIT_DEADLINE}
+  fi
+  _attempt=1
+  _interval=${PULL_INTERVAL_SECONDS}
+  {
+    printf '[smoke] pull %s\n' "$1"
+    printf '[smoke] 口径：次数上限 %s · 初始间隔 %ss（×2 封顶 %ss）· 预算 %ss · 单次限时 %ss\n' \
+      "${PULL_ATTEMPTS}" "${PULL_INTERVAL_SECONDS}" "${PULL_MAX_INTERVAL_SECONDS}" \
+      "${PULL_BUDGET_SECONDS}" "${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+  } >"$2"
+  while [ "${_attempt}" -le "${PULL_ATTEMPTS}" ]; do
+    # 单次限时取「本次尝试剩余预算」（最少 60s）：否则一次网络黑洞能把预算与 job 超时都击穿。
+    _attempt_timeout=${PULL_ATTEMPT_TIMEOUT_SECONDS}
+    _left=$((_pull_deadline - SECONDS))
+    if [ "${_left}" -lt 60 ]; then
+      _left=60
+    fi
+    if [ "${_left}" -lt "${_attempt_timeout}" ]; then
+      _attempt_timeout=${_left}
+    fi
+    # 注意：`$?` 必须在 if 之前/之内取。`if cmd; then …; fi` 之后 `$?` 是**复合命令**的退出码
+    # （无 else 分支时恒为 0），用它写 detail 会把「拉取失败」记成 exit=0。
+    _rc=0
+    smoke_timeout "${_attempt_timeout}" docker pull "$1" >>"$2" 2>&1 || _rc=$?
+    if [ "${_rc}" -eq 0 ]; then
+      printf '[smoke] pull %s 成功（第 %s 次尝试，累计用时 %ss）\n' \
+        "$1" "${_attempt}" "$((SECONDS - _pull_start))" >>"$2"
+      return 0
+    fi
+    # 「累计」是本次 pull 的总耗时，不是单次——排查时要能一眼分清「单次限时」和「总共烧了多久」。
+    printf '[smoke] pull %s 失败（第 %s/%s 次，exit=%s，单次限时 %ss，累计用时 %ss）\n' \
+      "$1" "${_attempt}" "${PULL_ATTEMPTS}" "${_rc}" "${_attempt_timeout}" \
+      "$((SECONDS - _pull_start))" >>"$2"
+    if [ "${_attempt}" -ge "${PULL_ATTEMPTS}" ]; then
+      printf '[smoke] 已到次数上限 %s 次，停止重试\n' "${PULL_ATTEMPTS}" >>"$2"
+      return 1
+    fi
+    if [ $((SECONDS + _interval)) -ge "${_pull_deadline}" ]; then
+      printf '[smoke] 预算先到（已用 %ss，预算 %ss，下次间隔 %ss），停止重试\n' \
+        "$((SECONDS - _pull_start))" "${PULL_BUDGET_SECONDS}" "${_interval}" >>"$2"
+      return 1
+    fi
+    printf '[smoke] %ss 后重试\n' "${_interval}" >>"$2"
+    sleep "${_interval}"
+    _interval=$((_interval * 2))
+    if [ "${_interval}" -gt "${PULL_MAX_INTERVAL_SECONDS}" ]; then
+      _interval=${PULL_MAX_INTERVAL_SECONDS}
+    fi
+    _attempt=$((_attempt + 1))
+  done
+  return 1
+}
+
+wait_for_docker_build
+# 拉取是否被前置条件挡住（构建没收敛）。非空即「不拉」，且原因一定写进 detail。
+PULL_BLOCK_REASON=""
 case "${WAIT_RESULT}" in
-  ok|no-workflow) ;;
+  ok | no-workflow) ;;
   timeout)
+    WAIT_STATE=$(docker_build_state)
+    PULL_BLOCK_REASON="docker.yml 在 ${WAIT_LIMIT_SECONDS}s 内未结束（${WAIT_STATE:-无记录}）"
     smoke_fail pull C "docker 镜像在验收窗口内构建完成" \
-      "等了 ${BUILD_WAIT_SECONDS}s，docker.yml 仍未结束（${WAIT_STATE:-无记录}）；如需放宽用 SMOKE_DOCKER_BUILD_WAIT_SECONDS"
+      "等了 ${WAIT_LIMIT_SECONDS}s，docker.yml 仍未结束（${WAIT_STATE:-无记录}）；如需放宽用 SMOKE_DOCKER_BUILD_WAIT_SECONDS（硬上限 SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS）"
     ;;
   build-*)
+    PULL_BLOCK_REASON="docker.yml 结论 ${WAIT_RESULT#build-}，镜像不会出现"
     smoke_fail pull C "docker 镜像构建成功" \
       "docker.yml 未成功（${WAIT_RESULT#build-}），镜像不会出现；先修镜像构建，不必改验收"
     ;;
+  *)
+    # 兜底分支：**绝不能**少。旧版没有它，一次「未识别的状态」就让整段拉取被静默跳过，
+    # 结果格只剩「镜像没拉全」——这是 issue #14 假红的直接放大器。宁可照拉，多烧几分钟。
+    smoke_warn "wait_for_docker_build 返回未识别状态 '${WAIT_RESULT}'，按「可拉」继续（驱动缺陷，已在 detail 记录）"
+    smoke_log "WAIT_RESULT 未识别：${WAIT_RESULT:-空}"
+    ;;
 esac
+
 PULL_VERSIONED_OK="no"
 PULL_LATEST_OK="no"
-if [ "${WAIT_RESULT}" = "ok" ] || [ "${WAIT_RESULT}" = "no-workflow" ]; then
+if [ -n "${PULL_BLOCK_REASON}" ]; then
+  smoke_log "跳过拉取：${PULL_BLOCK_REASON}（上面已记 C 类 fail，不重复记）"
+else
   if pull_with_retry "${VERSIONED}" "${EVID}/pull-versioned.log"; then
     PULL_VERSIONED_OK="yes"
     smoke_pass pull "docker pull ${VERSIONED}"
   else
-    smoke_fail pull C "docker pull ${VERSIONED}" \
-      "manifest 缺失或网络失败（已重试 ${PULL_ATTEMPTS} 次），见 pull-versioned.log"
+    smoke_fail pull C "docker pull ${VERSIONED}" "$(pull_fail_detail "${EVID}/pull-versioned.log")"
   fi
   if pull_with_retry "${LATEST}" "${EVID}/pull-latest.log"; then
     PULL_LATEST_OK="yes"
     smoke_pass pull "docker pull ${LATEST}"
   else
-    smoke_fail pull C "docker pull ${LATEST}" \
-      "manifest 缺失或网络失败（已重试 ${PULL_ATTEMPTS} 次），见 pull-latest.log"
+    smoke_fail pull C "docker pull ${LATEST}" "$(pull_fail_detail "${EVID}/pull-latest.log")"
   fi
 fi
 
@@ -264,7 +445,13 @@ if [ "${PULL_VERSIONED_OK}" = "yes" ] && [ "${PULL_LATEST_OK}" = "yes" ]; then
       "versioned='${DIGEST_VERSIONED}' latest='${DIGEST_LATEST}'"
   fi
 else
-  smoke_fail pull C ":${VERSION} 与 :latest 指向同一 digest" "镜像没拉全，无法比较 digest"
+  if [ -n "${PULL_BLOCK_REASON}" ]; then
+    smoke_fail pull C ":${VERSION} 与 :latest 指向同一 digest" \
+      "未拉取（${PULL_BLOCK_REASON}），无法比较 digest"
+  else
+    smoke_fail pull C ":${VERSION} 与 :latest 指向同一 digest" \
+      "镜像没拉全，无法比较 digest（见上面 pull 格与 evidence/docker/pull-*.log）"
+  fi
 fi
 smoke_endgroup
 

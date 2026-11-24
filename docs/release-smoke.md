@@ -227,11 +227,22 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
 
 三条「驱动口径」约定（看起来像失败，其实不是）：
 
-- **Docker 镜像还在构建**：镜像由 `docker.yml` 用同一个 tag 并行构建，冷缓存下多架构 buildx
-  接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
+- **Docker 镜像还在构建 / 刚推完拉不到**：镜像由 `docker.yml` 用同一个 tag 并行构建，冷缓存下
+  多架构 buildx 接近 1 小时。driver 先轮询该 tag 的 `docker.yml` 结论（每 20s 一次，上限
   `SMOKE_DOCKER_BUILD_WAIT_SECONDS`，默认 2700s），成功后才拉镜像；构建失败直接判 C 类并写明
-  「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）退回 6×20s 短重试。
+  「docker.yml 未成功」，不用等满；查不到工作流（老 tag / 本地跑 / 无 `gh`）直接去拉。
   只有在等待超限时才判 C，且 detail 明确写「是构建没结束，不是镜像缺失」。
+  拉取本身还有一层重试：**次数上限 ∩ 时间预算**（`SMOKE_DOCKER_PULL_ATTEMPTS` 默认 24、
+  `SMOKE_DOCKER_PULL_BUDGET_SECONDS` 默认 1200s；间隔 15s 起、逐次翻倍、封顶 60s），每次
+  `docker pull` 另有限时 300s（`SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS`）。**两者合起来被
+  `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS`（默认 2880s）限死**：加 K2–K7 约 240s，最坏约 52 min，
+  仍在 job 的 `timeout-minutes: 55` 之内 —— job 被超时掐断会让结果 JSON 不完整，比红更糟。
+  CI 的 `container-docker` job 会先 `docker login ghcr.io`（`GITHUB_TOKEN` + `packages: read`）
+  再跑 driver；登录失败只是退回匿名拉取，driver 不把登录当必要条件（本地 / fork / 无凭据照跑）。
+  失败时 detail 一定带 **docker 自己报的最后一句话**（`denied` / `no such manifest` /
+  `short read … unexpected EOF` 之类）与 `evidence/docker/pull-*.log` 的路径，不必先下 artifact。
+  注意 v0.3.3 那次假红**不是**传播延迟：driver 的等待循环日志被命令替换捕获，拉取整段被静默跳过
+  （详见 `scripts/smoke/docker/driver.sh` 里 `wait_for_docker_build` 的注释）。
 
 - **Linux 主程序怎么选**：deb 里除桌面壳 `/usr/bin/workbuddy-shift-desktop` 外还有
   `/usr/bin/companion-runtime`（悬浮窗 sidecar），`dpkg -L` 按字典序把它排在前面。driver 的
