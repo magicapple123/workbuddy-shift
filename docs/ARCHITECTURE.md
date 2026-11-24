@@ -320,19 +320,19 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | 文件 | 行数 | 类别 | 理由 | 后续计划 |
 | --- | ---: | --- | --- | --- |
 | `crates/wb-shift-core/src/modules/limits/scan.rs` | 554 | 来源枚举 | 六个来源的**候选文件收窗**共用同一套判据（按文件 mtime 而非目录名收窗、字节级 BMH 粗筛、`MERGE_WINDOW_MS` 去重），这四件事互为前提：改任一处口径都会让「同一次 429」在另一个来源里重复或消失。第六轮加入「插件宿主多日志根 union + 插件目录过滤」后越过阈值。 | 下一轮把「插件宿主 agent 日志」（`agent_log_roots` / `agent_log_files` / `is_codebuddy_extension_dir` / `walk_agent_logs`）整体抽到 `limits/scan/agent.rs`，公共收窗与去重留在本文件。 |
-| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 3442 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 3465 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
 | `crates/wb-shift-core/src/modules/limits/tests.rs` | 2329 | 测试 | 限额模块测试整体随模块搬迁，测试名与基线一致；第六轮加入「无模型条目按同账号同 resetAt 归并」「多日志根 union」「插件目录过滤」三组用例后超过原登记值。 | 同上，保留；继续膨胀时按「时间戳/归因」「页载荷聚合」「来源枚举」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1518 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/vscode_cn_inject/tests/inject.rs` | 542 | 测试 | state.vscdb 锁冲突与重试用例（busy_timeout / 失败分类 / 重试循环）共用同一套 `hold_exclusive` + `insert_row` 夹具，拆开会让「同一把库、同一把锁、唯一变量是 attempts」的对照失效。 | 测试继续膨胀时把「锁冲突与重试」用例组拆到 `tests/inject_lock.rs`。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1282 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/sync.rs` | 1737 | 测试 | 会话同步主题测试分组（含「末条 incomplete 归一后不得永久分歧」的四条收敛用例，以及走真实复制链路 + 组载荷装配（`detail_at`）断言 `summaryStatus` 的三成员组场景，见 issue #3 最后一条）。「三成员组不得被末条归一误判为分歧」这条另带反假绿锚点（成员正文必须真读到：三个成员 `contentState == "ready"` 且 `recordCount > 0`），避免断言在空载荷上假绿。 | 同上，保留。 |
-| `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 1387 | 测试 | 会话执行/恢复主题测试分组（本轮加入「同步侧把未来时间戳夹到本次写入时刻」的用例，以及「目标侧既有未来值不得被夹小」的对照用例）。 | 同上，保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 1390 | 测试 | 会话执行/恢复主题测试分组（本轮加入「同步侧把未来时间戳夹到本次写入时刻」的用例，以及「目标侧既有未来值不得被夹小」的对照用例）。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/run.rs` | 867 | 测试 | 会话编排主题测试分组。 | 同上，保留。 |
 | `companion-ui/src/desktop/rail-controller.ts` | 734 | 单一状态所有者 | 悬浮栏的唯一状态所有者（文件头已声明设计意图），拆分会让同一份布局/动画状态跨文件。 | 保持单文件；如继续增长，先抽纯函数（布局计算），状态仍留在 controller。 |
 | `crates/companion-core/tests/lifecycle/codex.rs` | 726 | 测试 | Codex 生命周期集成测试分组（原 lifecycle.rs 拆出）。 | 保留；测试文件继续膨胀时按场景再拆。 |
 | `crates/wb-shift-core/src/modules/process/macos.rs` | 714 | 平台代码 | macOS 进程枚举/关闭/启动与 app 路径探测集中在单文件，整模块 cfg(macos) 门控；本机 Windows 无法编译验证，先不二次拆。 | macOS CI 覆盖后按「进程控制」「app 路径解析」再拆。 |
 | `crates/wb-shift-core/src/modules/session/copy/db_spaces.rs` | 539 | 会话复制 | 目标账号空间匹配、新建与回滚共用同一份路径归一（`space_path_key`）与列探测结果：拆开会让「匹配口径」与「建行口径」分叉，而两者必须对同一目录给出同一结论。 | 下一轮按「查找（`find_target_space_id`/`SpaceLookup`）」与「新建/回滚（`insert_target_space`）」拆成 `copy/space_lookup.rs` 与 `copy/space_create.rs`；拆分前先补两者共用的路径键单测。 |
-| `crates/wb-shift-core/src/modules/session/copy/db.rs` | 529 | 会话复制 | 复制写库是**一次事务**：读源行、按目标表列取交集、映射项目归属（`space_id`）、搬账本、写后校验都在同一个事务与同一次列交集结果上完成，拆开就得把这些上下文跨文件传递。本轮加入「活跃时间 = max(源值, 副本正文最新时间戳)」的归一后越过阈值。 | 下一轮把账本搬运（`SessionAux` / `read_session_aux` / `write_session_aux` / `AUX_WRITE_FAILED_PREFIX`）整体抽到 `copy/db_aux.rs`，sessions 行写入、列交集与时间列归一留在本文件。 |
+| `crates/wb-shift-core/src/modules/session/copy/db.rs` | 530 | 会话复制 | 复制写库是**一次事务**：读源行、按目标表列取交集、映射项目归属（`space_id`）、搬账本、写后校验都在同一个事务与同一次列交集结果上完成，拆开就得把这些上下文跨文件传递。本轮加入「活跃时间 = max(源值, 副本正文最新时间戳)」的归一后越过阈值。 | 下一轮把账本搬运（`SessionAux` / `read_session_aux` / `write_session_aux` / `AUX_WRITE_FAILED_PREFIX`）整体抽到 `copy/db_aux.rs`，sessions 行写入、列交集与时间列归一留在本文件。 |
 | `crates/wb-shift-core/src/modules/session/recovery.rs` | 503 | 恢复编排 | 复制与同步的中断恢复共用同一套「阶段只前进、已越过只核验不重放」的框架与 `RecoverOutcome` 汇报口径；拆开会让「阶段判定」与「是否需要人工处理」的结论在两份实现里分叉。本轮为复制补写活跃时间多带了一个正文时间戳分支后越过阈值。 | 下一轮按操作类型把 `recover_copy_operation` 与同步恢复拆成 `recovery/copy.rs` + `recovery/sync.rs`，共享的阶段枚举与汇报结构留在本文件。 |
 | `crates/wb-shift-core/src/modules/checkin/tests/window.rs` | 702 | 测试 | 签到的时间窗口、到点口径（跨日补签 / 只看今日 / 窗口外限量补签）与周期延迟三组规则互为前提，用例集中放置便于对照口径差异。 | 测试继续膨胀时按「窗口解析」「到点判定」「周期延迟」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/variant.rs` | 650 | 单一来源 | 档位（国内/国际）规则与路径的单一来源，刻意集中；拆开会让同一规则出现多个入口。 | 保持单文件；新增档位时只在这里扩展。 |
@@ -376,8 +376,8 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/automation_sync.rs` | 761 | 定时任务同步 | 只读统计、备份、复制、暂停与设置读写共用同一份 `automations` 列清单与判定函数，拆开会让「跳过的任务」与「复制的列」口径分叉；其中约 300 行为单测。 | 下一轮把 `tests` 段拆到 `automation_sync_tests.rs` 即可回落到 500 行内。 |
 | `crates/wb-shift-core/src/modules/refresh.rs` | 1775 | 认证刷新 | 失败分级、标记自愈、单飞与退避共用同一份账号库读写与 `accounts.json` 语义；拆开会让「写标记」与「清标记」读到不同版本。 | 下一轮把 `verify_*` 复核调度抽到 `refresh/verify.rs`。 |
 | `crates/wb-shift-core/src/modules/session/sync/preview.rs` | 1054 | 同步预览 | 判定、指纹缓存、预览凭据绑定三者共享同一份内容身份（`ContentStamp`），拆开会让缓存键与判定前提分叉。 | 下一轮把 `PreviewDecision*` 缓存段抽到 `preview/cache.rs`。 |
-| `crates/wb-shift-core/src/modules/session_link/content.rs` | 934 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。本轮加入「比较口径」`comparable_line_digests`（把复制/同步写目标时的末条归一签名折算成确定性形式），它必须与存储口径（`line_digests`/`total_digest`）在读同一行的同一个循环里算出，两套口径分开维护正是不拆的理由。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`；比较口径随 `normalize_jsonl` 留在本文件。 |
-| `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 564 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |
+| `crates/wb-shift-core/src/modules/session_link/content.rs` | 941 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。本轮加入「比较口径」`comparable_line_digests`（把复制/同步写目标时的末条归一签名折算成确定性形式），它必须与存储口径（`line_digests`/`total_digest`）在读同一行的同一个循环里算出，两套口径分开维护正是不拆的理由。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`；比较口径随 `normalize_jsonl` 留在本文件。 |
+| `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 566 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |
 | `src/pages/credit-stats/data.ts` | 586 | 纯逻辑 | 档位过滤、客户端筛选（明细重算）、账本形状转换三套口径都在这里收敛，页面只调用；拆开会让同一口径出现多份实现。 | 下一轮把账本转换抽到 credit-stats/ledger-view.ts。 |
 | `src/pages/credit-stats/index.tsx` | 636 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
 
