@@ -943,3 +943,90 @@ fn sync_without_activity_column_still_updates_row() {
     );
     assert_ne!(updated_after, updated_before, "本次保存必须推进 updated_at");
 }
+
+/// 仅同步归档（正文零写入）→ 活跃时间保持现值。
+///
+/// 目标行的活跃时间刻意设得比正文里的时间戳更早：只要这条路径去「按正文重算」，
+/// 值就会被推大，本用例就会失败。
+#[test]
+fn status_only_sync_keeps_activity_untouched() {
+    let env = ready_env_with_status("status-activity-untouched");
+    env.add_activity_column();
+    // 正文在复制前就带时间戳：副本与配对基线都落在它上面，判定仍是 identical。
+    env.add_body(
+        "sess-1",
+        &body_with_timestamps("sess-1", &[ACTIVITY_BODY_NEWEST]),
+    );
+    let (group_id, token, target_id) = archive_scene(&env, "completed");
+    env.set_activity(&target_id, ACTIVITY_SOURCE_STALE);
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::StatusOnly)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(env.status_of(&target_id).as_deref(), Some("archived"));
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(ACTIVITY_SOURCE_STALE),
+        "只归档不写正文，活跃时间必须保持现值（不得按正文重算）"
+    );
+}
+
+/// 旧清单（没有 `latestActivityAt` 字段）→ 恢复照旧成功，只是不写活跃时间。
+///
+/// 升级后重放上一版本留下的未完成操作必须能补完；缺字段被当成错误就等于把用户
+/// 卡在「每次启动都提示恢复失败」。
+#[test]
+fn recovery_with_old_manifest_without_activity_field_still_succeeds() {
+    let env = ready_env_with_status("sync-activity-old-manifest");
+    env.add_activity_column();
+    let (group_id, token, target_id) = fast_forward_scene(&env);
+    let kept = 1_700_000_900_000;
+    env.set_activity(&target_id, kept);
+
+    // 数据库更新阶段中断：正文已写、清单已落盘、行未写 → 留下未完成操作。
+    install_block_update_trigger(&env);
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["needsRecovery"], true, "{report}");
+    drop_block_update_trigger(&env);
+
+    // 抹掉清单里的新字段，模拟「上一版本写下的清单」。
+    let pending = session_link::pending_operations(&env.paths, WbVariant::Cn);
+    let manifest_file = PathBuf::from(pending[0].backup.clone().expect("必须记录备份位置"));
+    let mut manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_file).expect("清单必须可读"),
+    )
+    .expect("清单必须是合法 JSON");
+    let removed = manifest["incoming"]
+        .as_object_mut()
+        .expect("incoming 必须是对象")
+        .remove("latestActivityAt");
+    assert!(removed.is_some(), "本用例前提：清单里确实有该字段");
+    std::fs::write(
+        &manifest_file,
+        serde_json::to_string(&manifest).expect("清单必须可序列化"),
+    )
+    .unwrap();
+    let new_updated_at = manifest["db"]["newUpdatedAt"].as_i64().unwrap();
+
+    let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+    assert_eq!(recovery.recovered.len(), 1, "{:?}", recovery.needs_recovery);
+    assert!(recovery.is_clean(), "{:?}", recovery.needs_recovery);
+    assert_eq!(
+        session_row(&env, &target_id).3,
+        Some(new_updated_at),
+        "缺字段只影响活跃时间，updated_at 照常写入"
+    );
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(kept),
+        "旧清单缺字段时必须跳过写该列、保持现值"
+    );
+    assert!(session_link::pending_operations(&env.paths, WbVariant::Cn).is_empty());
+}

@@ -199,6 +199,16 @@ impl Env {
         .unwrap();
     }
 
+    /// 把一行的 `last_activity_at` 置为 NULL（构造「客户端从未写过这一列」的现场）。
+    fn clear_activity(&self, id: &str) {
+        let conn = Connection::open(self.paths.workbuddy_db()).unwrap();
+        conn.execute(
+            "UPDATE sessions SET last_activity_at = NULL WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    }
+
     /// 一行的 `last_activity_at`；列不存在或值为 NULL 都按 None 处理。
     fn activity_of(&self, id: &str) -> Option<i64> {
         let conn = Connection::open(self.paths.workbuddy_db()).unwrap();

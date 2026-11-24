@@ -93,20 +93,20 @@ pub(in crate::modules::session) struct StatusChange<'a> {
 ///
 /// 只改 updated_at（与本次状态）；sessionId、标题与 custom_title 必须与覆盖前一致（R4）。
 ///
-/// 目标表有 `last_activity_at` 列时一并维护它（客户端侧栏的「活跃时间」读的就是这一列）：
-/// 取值 max(目标行当前值, 本次写入正文的最新记录时间戳)，**只前进不回退**——目标侧可能
-/// 已经比来源更新，把它改小等于让用户在列表里看不到最近发生的对话。老库没有该列时
-/// 不写（SQL 按列存在性拼接），不报错。
+/// `incoming_activity_at` 是**本次待写入正文**里最新一条记录的时间戳（由调用方从清单
+/// 里那份已核验摘要的字节算出，见 `SyncBackupPayload::latest_activity_at`）。目标表有
+/// `last_activity_at` 列时用它维护侧栏「活跃时间」：取值 max(目标行当前值, 该时间戳)，
+/// **只前进不回退**（目标侧可能已经比来源更新）。`None` 表示本次不写这一列——只同步
+/// 归档（正文零写入）与「旧清单没有该字段」都走这一支：保持现值，不报错，也不回读目标
+/// 正文（那会引入 TOCTOU）。
 pub(in crate::modules::session) fn update_target_session_row(
     paths: &SessionPaths,
     target: &OperationMember,
     new_updated_at: i64,
     before: Option<&SyncBackupRow>,
     status_change: Option<&StatusChange<'_>>,
+    incoming_activity_at: Option<i64>,
 ) -> Result<(), String> {
-    // 正文最新时间戳在**事务之前**取：正文可能上百 MB，在写事务里做这次扫描会把
-    // 写锁拖到秒级。取不到（文件缺失/没有时间戳）时保持目标行原值，不报错。
-    let body_latest_at = latest_body_timestamp(paths, &target.session_id);
     let mut conn = open_db(&paths.workbuddy_db(), false)
         .ok_or_else(|| "会话数据无法打开，未同步".to_string())?;
     if !table_exists(&conn, "sessions") {
@@ -117,16 +117,18 @@ pub(in crate::modules::session) fn update_target_session_row(
     let tx = conn
         .transaction()
         .map_err(|error| format!("会话数据事务开启失败：{error}"))?;
-    // 老库没有 `last_activity_at`：整列都不碰，其余列照常写（与复制侧「列取交集」同口径）。
-    let has_activity = column_exists(&tx, "sessions", "last_activity_at");
+    // 老库没有 `last_activity_at`（整列都不碰）与「本次没有可写的时间」都走同一条
+    // 短路：其余列照常写，SQL 里不出现该列，也就不会把现值改成 NULL。
+    let write_activity =
+        incoming_activity_at.is_some() && column_exists(&tx, "sessions", "last_activity_at");
     // 写入前先读出当前值：只前进不回退，所以期望值要在这里算出来，不能交给 SQL 里的
     // MAX()——回读校验需要一个确定的期望值，而不是「比一下大小」。
-    let before_activity = if has_activity {
+    let before_activity = if write_activity {
         read_activity_at(&tx, &target.session_id)?
     } else {
         None
     };
-    let expected_activity = advance_activity_at(before_activity, body_latest_at);
+    let expected_activity = advance_activity_at(before_activity, incoming_activity_at);
 
     // 状态写入用条件 UPDATE：目标在事务内被改为活跃态/被取消归档时 affected 为 0，
     // 事务外的一次读取不能替代事务内的条件。
@@ -135,7 +137,7 @@ pub(in crate::modules::session) fn update_target_session_row(
     let mut sets: Vec<&str> = vec!["updated_at = ?"];
     let mut params: Vec<rusqlite::types::Value> =
         vec![rusqlite::types::Value::Integer(new_updated_at)];
-    if has_activity {
+    if write_activity {
         sets.push("last_activity_at = ?");
         params.push(match expected_activity {
             Some(timestamp) => rusqlite::types::Value::Integer(timestamp),
@@ -172,7 +174,7 @@ pub(in crate::modules::session) fn update_target_session_row(
     }
     // 活跃时间在事务内回读校验：写入后的值必须等于期望值，且不小于写入前（只前进不回退）。
     // 事务外的读取证明不了本次 UPDATE 的产物。
-    if has_activity {
+    if write_activity {
         let after_activity = read_activity_at(&tx, &target.session_id)?;
         if after_activity != expected_activity {
             return Err("目标会话记录的活跃时间未按本次保存生效，已回滚本次更新".to_string());

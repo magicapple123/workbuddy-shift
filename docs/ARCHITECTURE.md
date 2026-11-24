@@ -320,19 +320,20 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | 文件 | 行数 | 类别 | 理由 | 后续计划 |
 | --- | ---: | --- | --- | --- |
 | `crates/wb-shift-core/src/modules/limits/scan.rs` | 554 | 来源枚举 | 六个来源的**候选文件收窗**共用同一套判据（按文件 mtime 而非目录名收窗、字节级 BMH 粗筛、`MERGE_WINDOW_MS` 去重），这四件事互为前提：改任一处口径都会让「同一次 429」在另一个来源里重复或消失。第六轮加入「插件宿主多日志根 union + 插件目录过滤」后越过阈值。 | 下一轮把「插件宿主 agent 日志」（`agent_log_roots` / `agent_log_files` / `is_codebuddy_extension_dir` / `walk_agent_logs`）整体抽到 `limits/scan/agent.rs`，公共收窗与去重留在本文件。 |
-| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 3314 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 3332 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
 | `crates/wb-shift-core/src/modules/limits/tests.rs` | 2329 | 测试 | 限额模块测试整体随模块搬迁，测试名与基线一致；第六轮加入「无模型条目按同账号同 resetAt 归并」「多日志根 union」「插件目录过滤」三组用例后超过原登记值。 | 同上，保留；继续膨胀时按「时间戳/归因」「页载荷聚合」「来源枚举」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1518 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/vscode_cn_inject/tests/inject.rs` | 542 | 测试 | state.vscdb 锁冲突与重试用例（busy_timeout / 失败分类 / 重试循环）共用同一套 `hold_exclusive` + `insert_row` 夹具，拆开会让「同一把库、同一把锁、唯一变量是 attempts」的对照失效。 | 测试继续膨胀时把「锁冲突与重试」用例组拆到 `tests/inject_lock.rs`。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1282 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/sync.rs` | 1737 | 测试 | 会话同步主题测试分组（含「末条 incomplete 归一后不得永久分歧」的四条收敛用例，以及走真实复制链路 + 组载荷装配（`detail_at`）断言 `summaryStatus` 的三成员组场景，见 issue #3 最后一条）。「三成员组不得被末条归一误判为分歧」这条另带反假绿锚点（成员正文必须真读到：三个成员 `contentState == "ready"` 且 `recordCount > 0`），避免断言在空载荷上假绿。 | 同上，保留。 |
-| `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 945 | 测试 | 会话执行/恢复主题测试分组。 | 同上，保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 1032 | 测试 | 会话执行/恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/run.rs` | 867 | 测试 | 会话编排主题测试分组。 | 同上，保留。 |
 | `companion-ui/src/desktop/rail-controller.ts` | 734 | 单一状态所有者 | 悬浮栏的唯一状态所有者（文件头已声明设计意图），拆分会让同一份布局/动画状态跨文件。 | 保持单文件；如继续增长，先抽纯函数（布局计算），状态仍留在 controller。 |
 | `crates/companion-core/tests/lifecycle/codex.rs` | 726 | 测试 | Codex 生命周期集成测试分组（原 lifecycle.rs 拆出）。 | 保留；测试文件继续膨胀时按场景再拆。 |
 | `crates/wb-shift-core/src/modules/process/macos.rs` | 714 | 平台代码 | macOS 进程枚举/关闭/启动与 app 路径探测集中在单文件，整模块 cfg(macos) 门控；本机 Windows 无法编译验证，先不二次拆。 | macOS CI 覆盖后按「进程控制」「app 路径解析」再拆。 |
 | `crates/wb-shift-core/src/modules/session/copy/db_spaces.rs` | 539 | 会话复制 | 目标账号空间匹配、新建与回滚共用同一份路径归一（`space_path_key`）与列探测结果：拆开会让「匹配口径」与「建行口径」分叉，而两者必须对同一目录给出同一结论。 | 下一轮按「查找（`find_target_space_id`/`SpaceLookup`）」与「新建/回滚（`insert_target_space`）」拆成 `copy/space_lookup.rs` 与 `copy/space_create.rs`；拆分前先补两者共用的路径键单测。 |
-| `crates/wb-shift-core/src/modules/session/copy/db.rs` | 518 | 会话复制 | 复制写库是**一次事务**：读源行、按目标表列取交集、映射项目归属（`space_id`）、搬账本、写后校验都在同一个事务与同一次列交集结果上完成，拆开就得把这些上下文跨文件传递。本轮加入「活跃时间 = max(源值, 副本正文最新时间戳)」的归一后越过阈值。 | 下一轮把账本搬运（`SessionAux` / `read_session_aux` / `write_session_aux` / `AUX_WRITE_FAILED_PREFIX`）整体抽到 `copy/db_aux.rs`，sessions 行写入、列交集与时间列归一留在本文件。 |
+| `crates/wb-shift-core/src/modules/session/copy/db.rs` | 529 | 会话复制 | 复制写库是**一次事务**：读源行、按目标表列取交集、映射项目归属（`space_id`）、搬账本、写后校验都在同一个事务与同一次列交集结果上完成，拆开就得把这些上下文跨文件传递。本轮加入「活跃时间 = max(源值, 副本正文最新时间戳)」的归一后越过阈值。 | 下一轮把账本搬运（`SessionAux` / `read_session_aux` / `write_session_aux` / `AUX_WRITE_FAILED_PREFIX`）整体抽到 `copy/db_aux.rs`，sessions 行写入、列交集与时间列归一留在本文件。 |
+| `crates/wb-shift-core/src/modules/session/recovery.rs` | 503 | 恢复编排 | 复制与同步的中断恢复共用同一套「阶段只前进、已越过只核验不重放」的框架与 `RecoverOutcome` 汇报口径；拆开会让「阶段判定」与「是否需要人工处理」的结论在两份实现里分叉。本轮为复制补写活跃时间多带了一个正文时间戳分支后越过阈值。 | 下一轮按操作类型把 `recover_copy_operation` 与同步恢复拆成 `recovery/copy.rs` + `recovery/sync.rs`，共享的阶段枚举与汇报结构留在本文件。 |
 | `crates/wb-shift-core/src/modules/checkin/tests/window.rs` | 702 | 测试 | 签到的时间窗口、到点口径（跨日补签 / 只看今日 / 窗口外限量补签）与周期延迟三组规则互为前提，用例集中放置便于对照口径差异。 | 测试继续膨胀时按「窗口解析」「到点判定」「周期延迟」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/variant.rs` | 650 | 单一来源 | 档位（国内/国际）规则与路径的单一来源，刻意集中；拆开会让同一规则出现多个入口。 | 保持单文件；新增档位时只在这里扩展。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/sync_decision.rs` | 744 | 测试 | 同步判定测试分组（含「只差末条归一签名算一致」的五条纯函数用例）。 | 保留。 |

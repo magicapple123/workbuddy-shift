@@ -273,7 +273,18 @@ pub(in crate::modules::session) fn ensure_row_copyable(
 /// `project_id` 一律写 NULL（跨账号的外键引用一定悬空）。
 ///
 /// 时间列的口径：`updated_at` 写本次（副本是刚产生的），`last_activity_at` 取
-/// max(源值, 目标正文最新时间戳) 并被本次时间夹住（见下方分支注释）。
+/// max(源值, `body_latest_at`) 并被本次时间夹住（见下方分支注释）。
+///
+/// `body_latest_at` 必须由调用方从**本次实际写入的那份正文**算出（`CopyBody::text`），
+/// 不在这里回读目标文件：目标文件此时可能已被客户端改动，回读会引入 TOCTOU；
+/// `None` 表示拿不到（本次没有内存副本、正文没有时间戳），退回沿用源值。
+///
+/// 参数过多的豁免（`clippy::too_many_arguments`）：这些都是「一次复制写库」的显式输入
+/// （两侧档位、两个身份、两个 session id、账本开关、正文时间），打包成结构体只会让
+/// 18 处调用点各写一份临时字面量、把「哪个字段是目标侧」藏起来。影响面仅限本 crate；
+/// 与 `exec/backup.rs::create_sync_backup` 同口径。后续若再加输入，改为 `CopyRowInput`
+/// 结构体一次收口（届时三处生产调用点一起改）。
+#[allow(clippy::too_many_arguments)]
 pub(in crate::modules::session) fn insert_session_copy(
     source_paths: &SessionPaths,
     target_paths: &SessionPaths,
@@ -282,6 +293,7 @@ pub(in crate::modules::session) fn insert_session_copy(
     source_uid: &str,
     target_uid: &str,
     ignore_aux: bool,
+    body_latest_at: Option<i64>,
 ) -> Result<DbCopyOutcome, String> {
     let dst_db = target_paths.workbuddy_db();
     if !dst_db.is_file() {
@@ -325,10 +337,6 @@ pub(in crate::modules::session) fn insert_session_copy(
     // 行级校验必须在**任何写库动作之前**：否则「复制被拒」时目标账号已经多出一条
     // 0 会话的孤儿 space 行（QA-E1）。循环里不再重复校验。
     ensure_row_copyable(&source_row)?;
-
-    // 「最后活跃时间」以正文为准，且必须在事务之外取：正文可能上百 MB，在写事务里
-    // 做这次扫描会把写锁拖到秒级（客户端可能同时开着别的写连接）。
-    let body_latest_at = latest_body_timestamp(target_paths, new_cid);
 
     // 「建 space（父行）→ 插会话（子行）」是一次父子写入：放进同一事务，任一失败
     // 整体回滚，绝不留下本次新建的孤儿 space。synchronous 已在上面的连接上确认。
@@ -388,9 +396,12 @@ pub(in crate::modules::session) fn insert_session_copy(
             "updated_at" => rusqlite::types::Value::Integer(copy_now),
             // 活跃时间不能沿用源行：客户端侧栏的「活跃时间」读的就是这一列，而源行的值
             // 可能远早于正文最后一条消息（正文一直在更新、这一列没人维护），副本会
-            // 永远显示成旧时间。取 max(源值, 正文最新) 且用 copy_now 夹住——源机时钟
-            // 超前时不能让副本的活跃时间跑到未来。源值为 NULL、缺列或正文取不到时间
-            // 时退回「沿用源值 / NULL」，不报错（老库兼容）。
+            // 永远显示成旧时间。取 max(源值, 本次写入正文的最新时间) 且用 copy_now
+            // 夹住——源机时钟超前时不能让副本的活跃时间跑到未来。
+            //
+            // 本分支只在源行**确实有**这一列时才进入（列交集之外不存在这个 key），
+            // 所以老库不会凭空多写一个源行没有的列。源值为 NULL 或正文取不到时间时
+            // 退回「沿用源值 / NULL」，不报错。
             "last_activity_at" => {
                 let from_row = match &value {
                     rusqlite::types::Value::Integer(number) if *number >= 0 => Some(*number),

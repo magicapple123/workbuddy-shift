@@ -1126,6 +1126,7 @@ fn insert_session_copy_duplicates_row_with_target_uid() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1162,7 +1163,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "missing",
             "uid-a",
             "uid-b",
-            false
+            false,
+            None,
         )
         .unwrap(),
         DbCopyOutcome::SourceRowMissing,
@@ -1178,7 +1180,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "sess-1",
             "uid-a",
             "uid-b",
-            false
+            false,
+            None,
         )
         .unwrap(),
         DbCopyOutcome::NoDb
@@ -1442,7 +1445,8 @@ fn insert_session_copy_normalizes_running_row_status() {
                 source_id,
                 "uid-a",
                 "uid-b",
-                false
+                false,
+                None,
             )
             .unwrap(),
             DbCopyOutcome::Inserted {
@@ -1532,7 +1536,8 @@ fn insert_session_copy_without_status_column_still_works() {
             "sess-1",
             "uid-a",
             "uid-b",
-            false
+            false,
+            None,
         )
         .unwrap(),
         DbCopyOutcome::Inserted {
@@ -1664,6 +1669,7 @@ fn copy_remaps_space_id_to_target_account_space() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1720,6 +1726,7 @@ fn copy_creates_space_for_target_when_missing() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1821,6 +1828,7 @@ fn copy_passes_source_space_pinned_to_new_space() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
 
@@ -1905,6 +1913,7 @@ fn copy_keeps_null_space_id_without_creating_space() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1955,6 +1964,7 @@ fn copy_rejection_leaves_no_orphan_space() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap_err();
     assert!(error.contains("Claw"), "{error}");
@@ -2006,6 +2016,7 @@ fn copy_insert_failure_rolls_back_new_space() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap_err();
     assert!(error.contains("会话记录保存失败"), "{error}");
@@ -2051,6 +2062,7 @@ fn copy_new_space_inherits_create_folder_path() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     let (space_id, _) = space_of(&env, "new-1");
@@ -2093,6 +2105,7 @@ fn copy_new_space_inherits_create_folder_path() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     let (space_id, _) = space_of(&env2, "new-1");
@@ -2493,6 +2506,7 @@ fn copy_reports_aux_note_when_target_lacks_ledger_tables() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert!(
@@ -2532,6 +2546,7 @@ fn aux_write_failure_rolls_back_the_session_row() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap_err();
     assert!(
@@ -2612,6 +2627,7 @@ fn aux_replay_is_idempotent() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     // 模拟恢复重放：会话行先被清掉，再按同一目标 id 补写一次。
@@ -2627,6 +2643,7 @@ fn aux_replay_is_idempotent() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
 
@@ -3223,6 +3240,7 @@ fn copy_into_legacy_db_without_activity_column_still_works() {
         "uid-a",
         "uid-b",
         false,
+        None,
     )
     .unwrap();
     assert!(

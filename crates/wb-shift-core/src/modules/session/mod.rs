@@ -66,12 +66,11 @@ pub use copy::{
 };
 pub use paths::{workbuddy_db_path, LinkNamespace, SessionPaths};
 use query::*;
-pub(crate) use query::{
-    advance_activity_at, current_user_uid_at, find_project_jsonl, latest_body_timestamp,
-    list_sessions_for_user_at, open_db, table_exists,
-};
 pub use query::{
     current_user_uid, list_sessions_for_account, list_sessions_for_user, session_copy_supported_at,
+};
+pub(crate) use query::{
+    current_user_uid_at, find_project_jsonl, list_sessions_for_user_at, open_db, table_exists,
 };
 // 会话行存活索引与「组内是否还有存活成员」判定：`session_groups` 的列表过滤与批量清理复用。
 pub(crate) use query::LiveSessionRows;
@@ -147,6 +146,19 @@ const SETTLED_ROW_STATUSES: [&str; 4] = ["completed", "error", "terminated", "ar
 /// 操作日志的 kind 取值。
 const OPERATION_KIND_COPY: &str = "copy";
 const OPERATION_KIND_SYNC: &str = "sync";
+
+/// 「只前进不回退」的活跃时间：取两个候选里的较大值，任一缺失时取另一个。
+///
+/// 复制（`copy/db.rs`）与同步（`exec/write.rs`）共用这一份口径：客户端的
+/// `sessions.last_activity_at` 驱动侧栏「活跃时间」，只能往前走——回退会让用户以为
+/// 最近的对话没发生过。`None` 表示「没有这个候选」，不参与比较（不是 0）。
+fn advance_activity_at(current: Option<i64>, candidate: Option<i64>) -> Option<i64> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(current.max(candidate)),
+        (Some(current), None) => Some(current),
+        (None, candidate) => candidate,
+    }
+}
 
 #[cfg(test)]
 mod tests;

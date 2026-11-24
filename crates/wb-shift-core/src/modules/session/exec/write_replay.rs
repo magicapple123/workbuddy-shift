@@ -42,6 +42,9 @@ pub(in crate::modules::session) fn run_status_only_phases(
         manifest.db.new_updated_at,
         manifest.db.target_row.as_ref(),
         Some(&status_change),
+        // 仅同步归档：正文零写入，因此**不**动活跃时间（保持目标行现值）。拿目标正文
+        // 现算会把这一列改成本次操作的时间，等于给「只归档」这个动作伪造了活跃信息。
+        None,
     )?;
     advance_operation(paths, operation, OpPhase::DbWritten)?;
     // 3) 不提交基线、不推进目标成员 lastSyncedAt：正文与配对基线保持原值。
@@ -123,6 +126,9 @@ pub(in crate::modules::session) fn run_sync_phases(
             manifest.db.new_updated_at,
             manifest.db.target_row.as_ref(),
             status_change.as_ref(),
+            // 时间来自清单里那份已核验摘要的待写入正文（不重新读目标文件）。旧清单没有
+            // 这个字段时为 None：跳过写该列、保持现值，升级后重放老操作不受影响。
+            manifest.incoming.latest_activity_at,
         )?;
     }
     advance_operation(paths, operation, OpPhase::DbWritten)?;

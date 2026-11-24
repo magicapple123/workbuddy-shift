@@ -328,38 +328,6 @@ pub(crate) fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<Path
     None
 }
 
-/// 按会话 id 定位正文并取其中最新一条记录的毫秒时间戳。
-///
-/// 只服务 `sessions.last_activity_at`（客户端侧栏展示的「活跃时间」）：正文不在本档、
-/// 读不出来、整篇没有时间戳都返回 None，调用方据此保持原有行为。**不是**内容校验的
-/// 依据，取不到也不得让业务写入失败——那只是展示用的一个时间。
-pub(crate) fn latest_body_timestamp(paths: &SessionPaths, cid: &str) -> Option<i64> {
-    latest_body_timestamp_at(&find_project_jsonl(paths, cid)?)
-}
-
-/// [`latest_body_timestamp`] 的文件版。
-///
-/// 这里整篇读入内存是**有意**的：调用它的两条路径（复制的 `insert_session_copy`、
-/// 同步的 `update_target_session_row`）都在同一批操作里刚把这份正文整体读过一次
-/// （摘要校验 / 写后回读），而且写进去的字节必须先是合法 UTF-8，因此
-/// `from_utf8_lossy` 走借用分支、不产生第二份拷贝，峰值内存与既有写入路径同量级。
-pub(crate) fn latest_body_timestamp_at(path: &Path) -> Option<i64> {
-    let bytes = std::fs::read(path).ok()?;
-    crate::modules::session_link::latest_record_timestamp(&String::from_utf8_lossy(&bytes))
-}
-
-/// 「只前进不回退」的活跃时间：取两个候选里的较大值，任一缺失时取另一个。
-///
-/// 复制与同步共用同一口径（两份实现早晚会分叉）：客户端的「活跃时间」只能往前走，
-/// 回退会让用户以为最近的对话没发生过。`None` 表示「没有这个候选」，不参与比较。
-pub(crate) fn advance_activity_at(current: Option<i64>, candidate: Option<i64>) -> Option<i64> {
-    match (current, candidate) {
-        (Some(current), Some(candidate)) => Some(current.max(candidate)),
-        (Some(current), None) => Some(current),
-        (None, candidate) => candidate,
-    }
-}
-
 /// 当前账号库中按 uid 找账号 id（成员 accountId 仅作展示，身份判定仍以 uid 为准）。
 pub(super) fn account_id_for_uid(paths: &SessionPaths, uid: &str) -> Option<String> {
     let accounts = account::load_accounts_at(&account::accounts_file_in(&paths.store_root));
