@@ -1334,3 +1334,54 @@ fn sync_clamps_future_incoming_activity_to_this_write() {
         "第二轮同步同样不得把活跃时间写到未来：{after} > {second_updated_at}"
     );
 }
+
+/// 目标侧**已有**的活跃时间就在未来 → 本次同步必须原样保留，不得顺手夹回本次写入时间。
+///
+/// 夹取的对象只能是「本次候选」：`advance_activity_at(现值, clamp(候选))`。若图省事改成
+/// 夹最终结果（`现值.max(候选).min(new_updated_at)`），现值一旦大于本次写入时间（上一轮
+/// 同步夹出来的值 / 第三方写入 / 用户机器时钟回拨）就会被**改小**，用户看到「最近的对
+/// 话没发生过」——那正是「只前进不回退」要防的回退。上一条用例的第二轮里现值恰好小于本
+/// 次写入时间，钉不住这条分支，故单列一例。
+#[test]
+fn sync_keeps_existing_future_target_activity_untouched() {
+    let env = ready_env_with_status("sync-activity-existing-future");
+    env.add_activity_column();
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    let target_id = env.first_copy_id(&report);
+    // 现值本身就在未来，且必然大于本次同步取到的 now_ms()。
+    let existing_future = now_ms() + 86_400_000;
+    env.set_activity(&target_id, existing_future);
+    // 候选落在正常区间（早于本次写入时间）：夹取对它是恒等变换，本用例只考察现值。
+    append_record_with_timestamp(&env.body_path("sess-1"), "sess-1", ACTIVITY_BODY_NEWEST);
+
+    let preview = preview(&env, "uid-b");
+    let group = &preview["groups"][0];
+    assert_eq!(group["verdict"], "fastForward", "{preview}");
+    let group_id = group["groupId"].as_str().unwrap().to_string();
+    let token = group["previewToken"].as_str().unwrap().to_string();
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+    let new_updated_at = report["synced"][0]["updatedAt"]
+        .as_i64()
+        .expect("同步结果必须带本次写入时间戳");
+    // 反假绿：先证明本次真的写了目标行，否则「值没变」可能只是根本没同步。
+    assert_eq!(
+        session_row(&env, &target_id).3,
+        Some(new_updated_at),
+        "本次同步必须真的写过目标行：{report}"
+    );
+    assert!(
+        existing_future > new_updated_at,
+        "本用例前提：目标侧现值必须大于本次写入时间"
+    );
+    assert_eq!(
+        env.activity_of(&target_id),
+        Some(existing_future),
+        "目标侧已有的更大值必须原样保留：夹的是本次候选，不是最终结果"
+    );
+}
