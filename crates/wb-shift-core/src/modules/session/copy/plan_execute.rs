@@ -191,6 +191,9 @@ pub(in crate::modules::session) fn finish_copy_from_body(
         &operation.target.session_id,
     )?;
     advance_operation(paths, operation, OpPhase::BodyWritten)?;
+    // 活跃时间取**本次写入的那份正文**（`CopyBody::text`）里最新的一条记录时间戳：
+    // 与落盘字节同源，不在写库阶段回读目标文件（那时客户端可能已经在写，会 TOCTOU）。
+    let body_latest_at = session_link::latest_record_timestamp(&body.text);
     let normalized = body.normalized;
 
     let (aux_note, space_note) = match insert_session_copy(
@@ -201,6 +204,7 @@ pub(in crate::modules::session) fn finish_copy_from_body(
         &operation.source.uid,
         &operation.target.uid,
         operation.aux_skipped,
+        body_latest_at,
     )? {
         DbCopyOutcome::Inserted {
             aux_note,

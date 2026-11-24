@@ -49,6 +49,15 @@ pub(in crate::modules::session) struct SyncBackupPayload {
     pub(in crate::modules::session) body_raw_digest: String,
     pub(in crate::modules::session) body_normalized_digest: String,
     pub(in crate::modules::session) record_count: usize,
+    /// 本次待写入正文里最新一条记录的毫秒时间戳（维护目标行 `last_activity_at` 用）。
+    ///
+    /// 取的是**这份字节**的时间戳（与 `body_raw_digest` 出自同一次计算），恢复重放时
+    /// 不需要重新读目标正文：那会引入 TOCTOU，也与「备份不可信时零写入」的口径冲突。
+    ///
+    /// 旧清单没有这个字段（`#[serde(default)]` 读成 None）：升级后重放上一版本留下的
+    /// 清单时**跳过**写这一列、保持目标现值，不得因为缺字段失败。
+    #[serde(default)]
+    pub(in crate::modules::session) latest_activity_at: Option<i64>,
 }
 
 /// 目标会话行的覆盖前快照（恢复「目标行」用，design §5.4）。
@@ -402,6 +411,9 @@ pub(in crate::modules::session) fn create_sync_backup(
             body_raw_digest: incoming_raw_digest,
             body_normalized_digest: plan.incoming.total_digest.clone(),
             record_count: plan.incoming.record_count,
+            // 与上面写入备份的字节同源（同一个 `incoming_text`），恢复重放直接用它，
+            // 不必（也不得）回读目标正文。
+            latest_activity_at: session_link::latest_record_timestamp(&plan.incoming_text),
         },
         db: SyncBackupDb {
             snapshot_file: db_rel,

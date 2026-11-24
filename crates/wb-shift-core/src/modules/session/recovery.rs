@@ -325,8 +325,12 @@ pub(super) fn recover_copy_operation(
     let read_paths = source_paths.unwrap_or(paths);
 
     // 1) 目标正文：已写成则直接复用；未写成则用当前源内容补写；被改动则停止。
-    let normalized = match check_target_body(paths, &operation) {
-        BodyCheck::Verified(normalized) => normalized,
+    //    第二个返回值是「本次正文最新记录时间戳」：补写分支拿得到内存里的待写入文本；
+    //    已写成分支只有摘要、没有正文，因此给 None——**不**回读目标文件（那时客户端
+    //    可能已经在写，回读既会 TOCTOU，也与「备份不可信时零写入」的口径冲突）。
+    //    拿不到时复制侧沿用源行的活跃时间，其余行为不变。
+    let (normalized, body_latest_at) = match check_target_body(paths, &operation) {
+        BodyCheck::Verified(normalized) => (normalized, None),
         BodyCheck::NeedsRecovery(reason) => return needs(reason, false),
         BodyCheck::Absent => {
             let Some(source_path) = find_project_jsonl(read_paths, &operation.source.session_id)
@@ -376,7 +380,8 @@ pub(super) fn recover_copy_operation(
             if let Err(error) = advance_operation(paths, &mut operation, OpPhase::BodyWritten) {
                 return needs(error, true);
             }
-            body.normalized
+            let body_latest_at = session_link::latest_record_timestamp(&body.text);
+            (body.normalized, body_latest_at)
         }
     };
 
@@ -398,6 +403,7 @@ pub(super) fn recover_copy_operation(
                 &operation.source.uid,
                 &operation.target.uid,
                 operation.aux_skipped,
+                body_latest_at,
             ) {
                 Ok(DbCopyOutcome::Inserted { .. }) => {}
                 Ok(outcome) => {

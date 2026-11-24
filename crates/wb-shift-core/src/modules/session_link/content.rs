@@ -579,6 +579,57 @@ pub fn is_strict_ordered_extension(prefix: &[String], full: &[String]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// 正文记录的毫秒时间戳（客户端「活跃时间」的来源）
+// ---------------------------------------------------------------------------
+
+/// 正文里最新一条记录的毫秒时间戳（每行的 `timestamp` 整数）。
+///
+/// 只取时间戳、**不参与分歧判定**：判定口径仍是 `line_digests` /
+/// `comparable_line_digests`，这里的结果只用于维护 `sessions.last_activity_at`
+/// （客户端侧栏展示的「活跃时间」）。因此坏行、空行、缺字段、非整数/负数一律跳过，
+/// 不让「某一行的时间戳写坏了」升级成整篇内容不可读；返回 `None` 表示这篇正文
+/// 一个可用时间戳都没有，调用方据此事保持原有行为。
+///
+/// 逐行 `serde_json` 解析而不是先整篇归一：时间戳与内容校验是两条独立的口径，
+/// 内容校验失败（`normalize_jsonl` 返回 Err）时这里仍可能拿到时间戳。
+pub fn latest_record_timestamp(text: &str) -> Option<i64> {
+    let mut latest: Option<i64> = None;
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let Some(timestamp) = record_timestamp_of(line) else {
+            continue;
+        };
+        latest = Some(latest.map_or(timestamp, |previous| previous.max(timestamp)));
+    }
+    latest
+}
+
+/// 单行记录的毫秒时间戳；坏行、空行、缺 `timestamp`、负数与非整数一律 `None`。
+///
+/// 用「只声明一个字段」的结构体反序列化，而不是建 `Value` 树：正文动辄上千行，
+/// 未知字段由 serde 直接跳过，不必为每行分配整棵 JSON 树（与 `normalize_jsonl`
+/// 用 `IgnoredAny` 省掉建树的理由相同）。
+pub fn record_timestamp_of(line: &str) -> Option<i64> {
+    // 绝大多数行（工具结果、事件）没有时间戳：先做子串预筛，省掉解析开销。
+    if line.trim().is_empty() || !line.contains("timestamp") {
+        return None;
+    }
+    let probe: TimestampProbe = serde_json::from_str(line).ok()?;
+    // 负的毫秒时间戳不可能来自客户端；0（1970）仍是合法值，保留。
+    probe.timestamp.filter(|value| *value >= 0)
+}
+
+/// `record_timestamp_of` 的解析目标：只关心 `timestamp` 一个字段。
+///
+/// `#[serde(default)]` 让缺字段的行（大量旧记录）解析成功并返回 `None`，
+/// 而不是把「没有时间戳」当成整行损坏。
+#[derive(serde::Deserialize)]
+struct TimestampProbe {
+    #[serde(default)]
+    timestamp: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // 预览用的内容指纹与进程内缓存（R5-16）
 // ---------------------------------------------------------------------------
 //

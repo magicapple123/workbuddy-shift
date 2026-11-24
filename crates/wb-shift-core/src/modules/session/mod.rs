@@ -147,5 +147,18 @@ const SETTLED_ROW_STATUSES: [&str; 4] = ["completed", "error", "terminated", "ar
 const OPERATION_KIND_COPY: &str = "copy";
 const OPERATION_KIND_SYNC: &str = "sync";
 
+/// 「只前进不回退」的活跃时间：取两个候选里的较大值，任一缺失时取另一个。
+///
+/// 复制（`copy/db.rs`）与同步（`exec/write.rs`）共用这一份口径：客户端的
+/// `sessions.last_activity_at` 驱动侧栏「活跃时间」，只能往前走——回退会让用户以为
+/// 最近的对话没发生过。`None` 表示「没有这个候选」，不参与比较（不是 0）。
+fn advance_activity_at(current: Option<i64>, candidate: Option<i64>) -> Option<i64> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => Some(current.max(candidate)),
+        (Some(current), None) => Some(current),
+        (None, candidate) => candidate,
+    }
+}
+
 #[cfg(test)]
 mod tests;

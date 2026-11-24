@@ -44,6 +44,9 @@ pub(crate) use content::{
     read_content_snapshot, to_hex, total_digest_of, ContentSnapshot, ContentState,
     NormalizedContent, NORMALIZATION_VERSION, SESSION_ID_MARKER,
 };
+// 正文记录的毫秒时间戳：只服务 `sessions.last_activity_at`（复制/同步写库时取正文最新值），
+// 与内容判定口径无关。
+pub(crate) use content::latest_record_timestamp;
 // 复制路径专用的容错修复（严格校验失败的兜底，只读源内容、只产出内存副本）。
 pub(crate) use content_repair::{repair_jsonl_for_copy, JsonlRepair};
 pub(crate) use link_store::{
