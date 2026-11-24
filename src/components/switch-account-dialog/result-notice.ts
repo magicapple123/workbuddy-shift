@@ -29,6 +29,26 @@ function dedupeTemporaryFiles(items: TemporaryFileInfo[]): TemporaryFileInfo[] {
   return [...seen.values()];
 }
 
+/**
+ * 把同一条说明按出现次数汇总：后端给的是固定文案，一批复制里十个会话拿到的
+ * `spaceNote` 往往一模一样。逐条拼接会让提示变成十遍重复，用户反而看不到重点；
+ * 相同文案只出现一次并标出涉及几个会话。
+ */
+function summarizeNotes(notes: string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const note of notes) counts.set(note, (counts.get(note) ?? 0) + 1);
+  return [...counts.entries()].map(([note, count]) =>
+    count > 1 ? `${note}（${count} 个会话）` : note,
+  );
+}
+
+/** 收集复制结果里的某一类说明（缺字段表示该会话没有这类异常）。 */
+function collectNotes<T>(items: T[], pick: (item: T) => string | undefined): string[] {
+  return items
+    .map(pick)
+    .filter((note): note is string => Boolean(note));
+}
+
 interface SwitchResultContext {
   result: SwitchResult;
   account: AccountMeta;
@@ -101,6 +121,22 @@ export function notifySwitchResult({
     toast.warning("源会话有损坏记录，已安全处理", {
       description: repairedNotes.join("；"),
     });
+  }
+  // 项目归属：后端给的是「已按目录新建分组」或「未能定位/新建分组，副本未归入任何项目」
+  // 两类说明。复制本身成功，所以用 warning，不能报成 error；界面不提示等于让用户
+  // 事后自己发现「会话在，项目里找不到」。
+  const spaceNotes = summarizeNotes(
+    collectNotes(copyReport?.copied ?? [], (item) => item.spaceNote),
+  );
+  if (spaceNotes.length > 0) {
+    toast.warning("会话的项目分组需要留意", { description: spaceNotes.join("；") });
+  }
+  // 账本：目标客户端缺表/缺列时副本不含用量记录（「共消耗」会偏少），同样不算失败。
+  const auxNotes = summarizeNotes(
+    collectNotes(copyReport?.copied ?? [], (item) => item.auxNote),
+  );
+  if (auxNotes.length > 0) {
+    toast.warning("副本不含会话用量记录", { description: auxNotes.join("；") });
   }
   // 同步结果：成功、跳过、失败与恢复信息都要能看到，不能只显示成功数。
   const groupLabel = (groupId: string) =>
