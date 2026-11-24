@@ -238,10 +238,14 @@ store 目录已落盘 + 进程持续存活 + `error.log` 无 crash 行（四元�
   只有在等待超限时才判 C，且 detail 明确写「是构建没结束，不是镜像缺失」。
   拉取本身还有一层重试：**次数上限 ∩ 时间预算**（`SMOKE_DOCKER_PULL_ATTEMPTS` 默认 24、
   `SMOKE_DOCKER_PULL_BUDGET_SECONDS` 默认 1200s；间隔 15s 起、逐次翻倍、封顶 60s），每次
-  `docker pull` 另有限时 300s（`SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS`）。**两者合起来被
-  `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS`（默认 2880s）限死**：加 K2–K7 约 240s，最坏约 52 min，
+  `docker pull` 另有限时 300s（`SMOKE_DOCKER_PULL_ATTEMPT_TIMEOUT_SECONDS`）——这是**单次上限**，
+  预算将尽时按「本次剩余预算」缩到 60s 下限（即末次可能只有 60–299s）。**这些合起来被
+  `SMOKE_DOCKER_TOTAL_WAIT_BUDGET_SECONDS`（默认 2880s）限死**：加 K2–K7 约 240s，最坏约 53 min，
   仍在 job 的 `timeout-minutes: 55` 之内 —— job 被超时掐断会让结果 JSON 不完整，比红更糟。
-  单次尝试被这个 300s 限时杀掉时，detail 会明写「**单次尝试超时（300s）**」：`docker` 的进度条走
+  单次尝试被这层限时杀掉时，detail 会明写「**单次尝试超时（≈Ns）**」，N 取**末次尝试真实用的**
+  秒数（从 driver 自己写的记账行 `单次限时 <N>s` 里解析），不是固定 300s——预算将尽的那一次
+  可能 60s 就被杀了，写 300s 会让人误以为「网络慢到跑满 5 分钟」，与「预算先到」的处置方向相反；
+  解析不到时才回落到默认上限并写成「≤Ns」。`docker` 的进度条走
   stderr 且不带换行，被杀时最后一段常未落盘，所以「最后输出」为空或只剩半行是**我们**杀它的结果，
   不是 docker 沉默——这两种情况的处置方向完全不同，别混。
   CI 的 `container-docker` job 会先 `docker login ghcr.io`（`GITHUB_TOKEN` + `packages: read`）

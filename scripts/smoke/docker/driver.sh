@@ -282,14 +282,52 @@ wait_for_docker_build() {
   done
 }
 
+# 末次尝试**真实**的单次限时 → 全局 PULL_LAST_ATTEMPT_SECS（纯数字秒）/ PULL_LAST_ATTEMPT_EXACT。
+#
+# 为什么不能直接拿 `PULL_ATTEMPT_TIMEOUT_SECONDS` 去写 detail：`pull_with_retry` 里单次限时是
+#   min(PULL_ATTEMPT_TIMEOUT_SECONDS, max(本次剩余预算, 60))
+# 预算将尽时末次只跑 60–299s。若 detail 固定打印 300s，读者会以为「跑满了 5 分钟才被杀」，
+# 而现场可能 1 分钟就被杀了——「网络慢」和「预算先到」的处置方向完全相反，日志不能自己说谎。
+#
+# 秒数来源：`pull_with_retry` 每次失败都会写一条记账行
+#   `[smoke] pull <img> 失败（第 n/m 次，exit=<rc>，单次限时 <secs>s，累计用时 <t>s）`
+# 这里按同一格式解析**末次**带 `exit=` 的那条（只取 `单次限时 <secs>s`）；日志缺失 / 被截断 /
+# 停在「N s 后重试」这类行上时解析不到，回落到默认上限，调用方据此改用「≤」措辞。
+#
+# 走全局变量而不是 `$( )`：调用方（`pull_fail_detail`）要同时用「秒数」和「措辞」，命令替换
+# 会把赋值丢在子 shell 里，两处各解析一遍日志又容易漂移。
+PULL_LAST_ATTEMPT_SECS="${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+PULL_LAST_ATTEMPT_EXACT="no"
+pull_last_attempt_timeout() { # $1=日志路径 → 写全局，无返回值
+  PULL_LAST_ATTEMPT_SECS="${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+  PULL_LAST_ATTEMPT_EXACT="no"
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+  # `grep 'exit='` 先把记账行挑出来：口径行（`[smoke] 口径：…单次限时 300s`）也含「单次限时」，
+  # 不筛就会在「只有口径行、还没跑过任何一次」时把默认上限当成实测值。
+  _plat=$(tr -d '\r' <"$1" 2>/dev/null |
+    grep 'exit=' | tail -n 1 | grep -o '单次限时 [0-9][0-9]*s' | grep -o '[0-9][0-9]*' || true)
+  case "${_plat}" in
+    "" | *[!0-9]*) ;;
+    *)
+      PULL_LAST_ATTEMPT_SECS="${_plat}"
+      PULL_LAST_ATTEMPT_EXACT="yes"
+      ;;
+  esac
+}
+
 # 末次尝试是不是被**我们**的限时杀掉（`smoke_timeout` 在超时时返回 124，与 `timeout` 一致，
 # 也会被 `pull_with_retry` 写进日志行的 `exit=`）。命中时输出一句人话，空则无输出。
 #
 # 为什么需要它：`docker pull` 的进度条走 **stderr 且不带换行**，进程被 `timeout` 杀掉时
 # 缓冲区里没写完的那一段**常常整条丢失** → 日志里只剩我们自己写的 `[smoke]` 记账行。
 # 此时 detail 的「最后输出」只能回落到记账行（或干脆空），读起来像「docker 什么都没说」，
-# 而真实原因是「我们在 300s 时把它杀了」——两者处置方向完全不同，必须自己写出来。
+# 而真实原因是「我们的限时把它杀了」——两者处置方向完全不同，必须自己写出来。
 # 判定只看**末次**的 `exit=`（日志里可能既有超时也有别的失败，读者关心的是最后那一次）。
+#
+# 秒数用**末次真实限时**（见 `pull_last_attempt_timeout`），不再写死默认 300s：
+# 解析得到实测值写「≈Ns」，回落到默认上限时写「≤Ns」——两者都不承诺「跑满了这个数」。
 pull_timeout_note() { # $1=日志路径 → 单行说明（末次尝试非超时则输出空）
   if [ ! -f "$1" ]; then
     return 0
@@ -297,8 +335,15 @@ pull_timeout_note() { # $1=日志路径 → 单行说明（末次尝试非超时
   _ptn_last_exit=$(tr -d '\r' <"$1" 2>/dev/null | grep -o 'exit=[0-9]*' | tail -n 1 || true)
   case "${_ptn_last_exit}" in
     exit=124)
-      printf '单次尝试超时（%ss 限时被杀；docker 的进度行不带换行，被杀时最后一段常未落盘）' \
-        "${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+      # 直接在**当前 shell** 里取值（不要 `$(pull_last_attempt_timeout …)`），否则拿不到全局。
+      pull_last_attempt_timeout "$1"
+      if [ "${PULL_LAST_ATTEMPT_EXACT}" = "yes" ]; then
+        _ptn_limit_text="≈${PULL_LAST_ATTEMPT_SECS}s"
+      else
+        _ptn_limit_text="≤${PULL_LAST_ATTEMPT_SECS}s"
+      fi
+      printf '单次尝试超时（%s 限时被杀；docker 的进度行不带换行，被杀时最后一段常未落盘）' \
+        "${_ptn_limit_text}"
       ;;
   esac
 }
@@ -365,15 +410,18 @@ pull_fail_class() { # $1=日志路径
 }
 
 # 失败 detail：自证「重试了什么、撞的是次数还是预算、docker 说什么、完整日志在哪」。
-# 末次尝试被单次限时杀掉时额外插一句「单次尝试超时（300s）」，否则读者会把「docker 无输出」
-# 当成 docker 自己的沉默，而真正的原因是我们把它杀了（两者的处置方向完全不同）。
+# 末次尝试被单次限时杀掉时额外插一句「单次尝试超时（≈Ns）」——N 是**末次真实限时**
+# （预算将尽时会被缩到 60s 下限），不是默认 300s；否则读者会把「docker 无输出」当成
+# docker 自己的沉默，而真正的原因是我们把它杀了（两者的处置方向完全不同）。
 pull_fail_detail() { # $1=日志路径
+  # 先在本 shell 里取末次限时（全局），`pull_fail_hint` 也复用同一个数字，两处口径不会打架。
+  pull_last_attempt_timeout "$1"
   _pfd_timeout=$(pull_timeout_note "$1")
   _pfd_timeout_part=""
   _pfd_timeout_secs=""
   if [ -n "${_pfd_timeout}" ]; then
     _pfd_timeout_part="${_pfd_timeout} · "
-    _pfd_timeout_secs="${PULL_ATTEMPT_TIMEOUT_SECONDS}"
+    _pfd_timeout_secs="${PULL_LAST_ATTEMPT_SECS}"
   fi
   printf '重试上限 %s 次 / 预算 %ss 用尽 · 归因 %s · %s最后输出：%s · 完整日志 evidence/docker/%s（随 smoke-docker artifact 上传）' \
     "${PULL_ATTEMPTS}" "${PULL_BUDGET_SECONDS}" \
