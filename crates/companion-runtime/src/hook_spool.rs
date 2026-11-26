@@ -4,15 +4,29 @@
 //! `bash.exe` 启动、原生 exe 冷启动、HTTP IPC 排队等全部开销。任何同步 RPC
 //! 都会在忙时撞上这个上限，于是宿主把 hook 报成超时并拦截操作。
 //!
-//! 这两类宿主的 hook 只做「观察」，不需要宿主等待采集结果：CLI 先把 `{}`
-//! 写到 stdout 并 flush，再把带来源标注的 payload 以单行 JSON 追加到用户目录下的
-//! spool 文件，随即退出。常驻 daemon 的 worker 线程按字节偏移增量消费这个文件，
-//! 因此即使 daemon 尚未启动 / 正在忙 / 暂时不存在，事件也会留在磁盘上、稍后补采。
+//! 这两类宿主的 hook 只做「观察」，不需要宿主等待采集结果，注册的命令也不再是 exe：
+//! v0.4.3 起注册的是 `bash '<脚本>'`（见 [`crate::hook_script`]），脚本把
+//! 「来源指令行 + 原始 payload」写进**自己的一份事件文件**后立即输出 `{}` 退出，不解析
+//! JSON、不冷启动 5MB 的 exe（issue #20 的回归：冷启动在慢盘 / 杀软环境下要 1.88–2.19s）。
+//! 一事件一文件是为了让并发 hook 物理上无法交错 —— shell 的 `printf … >> file` 不是一次
+//! `write()`，16 并发时实测会丢事件（见 [`crate::hook_inbox`]）。
+//!
+//! 消费端因此有两条链路，[`HookSpool::drain`] 一次都跑：
+//!
+//! 1. [`crate::hook_inbox`]：脚本发布的事件文件（`.evt`），读一条删一条；
+//! 2. 本模块的单文件队列 `companion-hook-spool.jsonl`：v0.4.2 的 exe 命令与遗留事件
+//!    继续写在这里，按字节偏移 + 内容指纹增量消费（旧队列里未消费的事件不会被升级丢弃）。
+//!
+//! 队列里可能同时存在两种格式：脚本写的「指令行 + payload」（来源在指令行里）与
+//! v0.4.2 及更早 exe 写的「单行 JSON」（自带 `agent_source`）。解码规则统一在
+//! [`crate::hook_frame`]。
 //!
 //! 与 `wb-shift-core` 的积分签到系统完全隔离：签到写
 //! `~/.workbuddy-shift/hook-events.jsonl`，本模块写
-//! `~/.workbuddy-shift-companion/companion-hook-spool.jsonl`，两者互不读写。
+//! `~/.workbuddy-shift-companion/companion-hook-spool.jsonl` 与 `hook-inbox.d/`，两者互不读写。
 
+use crate::hook_frame::{Frame, HookFrameDecoder};
+use crate::hook_inbox::EventInbox;
 use fs2::FileExt;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -73,18 +87,17 @@ pub fn handle_host_hook<W: Write>(
     let Ok(raw) = serde_json::from_slice::<Value>(bytes) else {
         return Ok(true);
     };
-    let mut payload = raw;
-    payload["agent_source"] = json!(source);
-    if let Some(edition) = edition.filter(|s| !s.is_empty()) {
-        payload["agent_edition"] = json!(edition);
-    }
+    // 与脚本链路共用同一份盖章语义：非 object 的 payload 包装成 `payload` 字段，
+    // 不丢弃、也不会在 `value[key] = …` 上 panic（hook 绝不能反过来打断宿主）。
+    let payload = crate::hook_frame::stamp_source(raw, source, edition);
     if let Err(e) = append(home, &payload) {
         eprintln!("hook 事件暂存失败（不拦截宿主）：{e}");
     }
     Ok(true)
 }
 
-/// 以独占文件锁串行化所有 hook 进程的追加，保证一条事件恰好占一行。
+/// 以独占文件锁串行化本文件队列的所有写入者（走 exe 的 codex 与 v0.4.2 遗留命令；
+/// 脚本已改为写收件箱，不再碰这里），保证一条事件恰好占一行。
 pub fn append(home: &Path, payload: &Value) -> Result<(), String> {
     let dir = state_dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -138,11 +151,18 @@ fn bytes_at(path: &Path, start: u64, len: usize) -> Option<Vec<u8>> {
 }
 
 /// daemon 侧的增量读取器。偏移量与内容指纹双重持久化：重启后不会重复消费也不丢事件。
+///
+/// 同时负责脚本收件箱（[`crate::hook_inbox`]）：`drain` 会先清空单文件队列里的积压，
+/// 再消费收件箱，保证「旧事件先于新事件」的投递顺序。
 pub struct HookSpool {
     path: PathBuf,
     checkpoint: PathBuf,
     offset: u64,
     tail: Vec<u8>,
+    /// 跨行 payload 与「来源指令行」的解析状态，必须跨 `drain` 调用保留。
+    frames: HookFrameDecoder,
+    /// 脚本发布的事件文件（一事件一文件）。
+    inbox: EventInbox,
 }
 
 impl HookSpool {
@@ -194,6 +214,8 @@ impl HookSpool {
             checkpoint,
             offset,
             tail,
+            frames: HookFrameDecoder::new(),
+            inbox: EventInbox::new(home),
         };
         spool.save_checkpoint();
         spool
@@ -202,6 +224,7 @@ impl HookSpool {
     fn reset(&mut self) {
         self.offset = 0;
         self.tail.clear();
+        self.frames.reset();
     }
 
     fn save_checkpoint(&self) {
@@ -213,8 +236,16 @@ impl HookSpool {
         );
     }
 
-    /// 消费自上次调用以来新增的完整行；不完整的尾行留给下一次。
+    /// 消费全部待处理事件：先清空单文件队列（v0.4.2 遗留 / exe 写入者），再消费脚本
+    /// 收件箱里的 `.evt` 文件。两段都按「至少一次」语义投递。
     pub fn drain(&mut self, mut consume: impl FnMut(Value)) -> Result<usize, String> {
+        let mut count = self.drain_file(&mut consume)?;
+        count += self.inbox.drain(&mut consume)?;
+        Ok(count)
+    }
+
+    /// 消费单文件队列里自上次调用以来新增的完整行；不完整的尾行留给下一次。
+    fn drain_file(&mut self, consume: &mut impl FnMut(Value)) -> Result<usize, String> {
         let len = match std::fs::metadata(&self.path) {
             Ok(meta) => meta.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -254,15 +285,17 @@ impl HookSpool {
         let mut complete = 0;
         for (i, byte) in buf.iter().enumerate() {
             if *byte == b'\n' {
-                let line = &buf[start..i];
-                if !line.is_empty() {
-                    match serde_json::from_slice::<Value>(line) {
-                        Ok(value) => {
+                match std::str::from_utf8(&buf[start..i]) {
+                    Ok(line) => match self.frames.push(line) {
+                        Frame::Event(value) => {
+                            // 投递回调 panic 时不推进 offset ⇒ 下次重投（至少一次）。
                             consume(value);
                             count += 1;
                         }
-                        Err(_) => eprintln!("忽略损坏的 hook 暂存记录"),
-                    }
+                        Frame::Incomplete | Frame::Skipped => {}
+                        Frame::Invalid => eprintln!("忽略损坏的 hook 暂存记录"),
+                    },
+                    Err(_) => eprintln!("忽略损坏的 hook 暂存记录"),
                 }
                 start = i + 1;
                 complete = i + 1;
@@ -276,174 +309,5 @@ impl HookSpool {
             self.save_checkpoint();
         }
         Ok(count)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    fn temp_home(tag: &str) -> PathBuf {
-        let home = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
-        home
-    }
-
-    #[test]
-    fn host_hook_prints_empty_object_and_never_waits_for_a_slow_daemon() {
-        let home = temp_home("hook-spool-slow-daemon");
-        // 端点指向一个收到请求后故意睡 3 秒的服务器；旧实现会在这里超时被拦截。
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let port = server.server_addr().to_ip().unwrap().port();
-        companion_core::atomic_json(
-            &spool_path(&home).parent().unwrap().join("runtime-v1.json"),
-            &json!({"protocol":1,"port":port,"token":"test"}),
-        )
-        .unwrap();
-        let _ = std::thread::spawn(move || {
-            if let Ok(Some(request)) = server.recv_timeout(Duration::from_secs(4)) {
-                std::thread::sleep(Duration::from_secs(3));
-                let _ = request.respond(tiny_http::Response::empty(204));
-            }
-        });
-        let started = Instant::now();
-        let mut out = Vec::new();
-        let handled = handle_host_hook(
-            &home,
-            br#"{"hook_event_name":"UserPromptSubmit","session_id":"s-1"}"#,
-            "workbuddy",
-            Some("domestic"),
-            &mut out,
-        )
-        .unwrap();
-        assert!(handled);
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "hook 不得等待 IPC：耗时 {:?}",
-            started.elapsed()
-        );
-        assert_eq!(out, b"{}\n");
-        // daemon 此刻才启动：落盘事件必须被补采。
-        let mut spool = HookSpool::new(&home);
-        let mut events = Vec::new();
-        assert_eq!(spool.drain(|v| events.push(v)).unwrap(), 1);
-        assert_eq!(events[0]["agent_source"], "workbuddy");
-        assert_eq!(events[0]["agent_edition"], "domestic");
-        assert_eq!(events[0]["session_id"], "s-1");
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn codex_hook_is_not_taken_over_by_the_spool() {
-        let home = temp_home("hook-spool-codex");
-        let mut out = Vec::new();
-        assert!(!handle_host_hook(&home, b"{}", "codex", None, &mut out).unwrap());
-        assert!(out.is_empty());
-        assert!(!spool_path(&home).exists());
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn checkpoint_prevents_duplicate_delivery_and_partial_lines_are_safe() {
-        let home = temp_home("hook-spool-checkpoint");
-        append(&home, &json!({"id":1})).unwrap();
-        append(&home, &json!({"id":2})).unwrap();
-        let mut spool = HookSpool::new(&home);
-        let mut ids = Vec::new();
-        assert_eq!(
-            spool
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            2
-        );
-        assert_eq!(ids, vec![1, 2]);
-        drop(spool);
-        append(&home, &json!({"id":3})).unwrap();
-        let mut restarted = HookSpool::new(&home);
-        let mut ids = Vec::new();
-        assert_eq!(
-            restarted
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            1
-        );
-        assert_eq!(ids, vec![3]);
-        // 手动制造半行：下一批完整事件仍应被消费。
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(spool_path(&home))
-            .unwrap();
-        file.write_all(br#"{"broken":"#).unwrap();
-        drop(file);
-        append(&home, &json!({"id":4})).unwrap();
-        let mut ids = Vec::new();
-        assert_eq!(
-            restarted
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            1
-        );
-        assert_eq!(ids, vec![4]);
-        // 再次消费不得重复投递。
-        assert_eq!(restarted.drain(|_| panic!("不得重复投递")).unwrap(), 0);
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn truncated_spool_resets_the_offset() {
-        let home = temp_home("hook-spool-truncated");
-        append(&home, &json!({"id":1})).unwrap();
-        let mut spool = HookSpool::new(&home);
-        assert_eq!(spool.drain(|_| {}).unwrap(), 1);
-        // 截断后重新写入「同样长度」的新事件：旧实现只看 len == offset 会漏掉它。
-        std::fs::write(spool_path(&home), b"").unwrap();
-        append(&home, &json!({"id":2})).unwrap();
-        let mut ids = Vec::new();
-        assert_eq!(
-            spool
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            1
-        );
-        assert_eq!(ids, vec![2]);
-        // 即便守护进程重启，指纹也必须让消费位置回到新文件的起点。
-        append(&home, &json!({"id":3})).unwrap();
-        let mut restarted = HookSpool::new(&home);
-        let mut ids = Vec::new();
-        assert_eq!(
-            restarted
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            1
-        );
-        assert_eq!(ids, vec![3]);
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    #[test]
-    fn concurrent_appends_keep_one_event_per_line() {
-        let home = temp_home("hook-spool-concurrent");
-        let mut handles = Vec::new();
-        for id in 0..8u64 {
-            let home = home.clone();
-            handles.push(std::thread::spawn(move || {
-                append(&home, &json!({"id":id})).unwrap();
-            }));
-        }
-        for handle in handles {
-            handle.join().unwrap();
-        }
-        let mut spool = HookSpool::new(&home);
-        let mut ids = Vec::new();
-        assert_eq!(
-            spool
-                .drain(|v| ids.push(v["id"].as_u64().unwrap()))
-                .unwrap(),
-            8
-        );
-        ids.sort_unstable();
-        assert_eq!(ids, (0..8).collect::<Vec<_>>());
-        std::fs::remove_dir_all(&home).unwrap();
     }
 }

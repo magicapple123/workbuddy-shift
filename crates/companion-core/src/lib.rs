@@ -14,8 +14,10 @@ pub fn now() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
-/// Stable hook executable the app publishes under the user's home. Both the
-/// built-in integrations and the custom hook command point at this path.
+/// Stable runtime copy the app publishes under the user's home. Codex hooks and
+/// the custom hook command point at this path; WorkBuddy / CodeBuddy IDE hooks
+/// register a shell script instead (a 5MB exe's cold start does not fit in the
+/// host's 3000ms hook budget — see `companion-runtime`'s `hook_script`).
 pub fn hook_binary(home: &std::path::Path) -> std::path::PathBuf {
     home.join(if cfg!(windows) {
         ".workbuddy-shift-companion/bin/companion-runtime-v1.exe"

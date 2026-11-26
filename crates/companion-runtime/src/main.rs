@@ -16,9 +16,12 @@ fn main() {
             // WorkBuddy treats empty stdout as invalid JSON. Codex SessionStart
             // treats JSON stdout as hook output. IDE and WorkBuddy accept `{}`.
             //
-            // WorkBuddy / CodeBuddy IDE are observational hooks: print `{}` and
-            // spool the event locally, then exit. Waiting on HTTP IPC here used
-            // to consume the host's whole 3000ms budget under load (issue #20).
+            // WorkBuddy / CodeBuddy IDE no longer register this executable: since
+            // v0.4.3 they run a generated shell script (`hook_script`), because a
+            // 5MB exe's cold start alone can exceed the host's hook budget
+            // (issue #20). This path still serves codex and any leftover v0.4.2
+            // command, and it must stay observational: print `{}` and spool the
+            // event locally instead of waiting on HTTP IPC.
             // The edition comes from the registered command, never probed at hook
             // time (`ps` walking could itself take seconds on Unix).
             if companion_runtime::handle_host_hook(
@@ -30,15 +33,21 @@ fn main() {
             )? {
                 return Ok(());
             }
-            if let Ok(mut p) = serde_json::from_slice::<Value>(&bytes) {
+            if let Ok(raw) = serde_json::from_slice::<Value>(&bytes) {
                 let codex_stop = agent == "codex"
                     && matches!(
-                        p["hook_event_name"]
+                        raw["hook_event_name"]
                             .as_str()
-                            .or(p["hookEventName"].as_str()),
+                            .or(raw["hookEventName"].as_str()),
                         Some("Stop" | "Interrupt" | "SessionEnd")
                     );
-                p["agent_source"] = json!(agent);
+                // 与脚本链路共用同一份盖章语义：非 object 的载荷包装成 `payload` 字段，
+                // 不用 `raw[key] = …`（那会在非 object 上 panic，让 hook 以 101 退出）。
+                let p = companion_runtime::hook_frame::stamp_source(
+                    raw,
+                    &agent,
+                    arg_value("--edition").as_deref(),
+                );
                 if codex_stop {
                     // Stop expects JSON output. Report delivery failures to
                     // Codex instead of silently leaving the session running.

@@ -90,19 +90,33 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/.workbuddy-shift-companion/bin/companion-runtime-v1[.exe]` | 稳定的 hook 入口：每次启动把当前运行时复制到这里，供各客户端 hooks 调用 |
+| `~/.workbuddy-shift-companion/bin/companion-runtime-v1[.exe]` | 稳定的运行时副本：每次启动把当前运行时复制到这里，供 codex hook 与自定义 hook 调用 |
+| `~/.workbuddy-shift-companion/hooks/hook-<source>-<edition>.sh` | WorkBuddy / CodeBuddy IDE 的 hook 入口脚本（安装时生成，事件队列路径与来源写死）。卸载时删除 |
 | `~/.workbuddy-shift-companion/settings.json` | 监听开关与来源配置 |
 | `~/.workbuddy-shift-companion/integrations.json` | 各来源的接入状态 |
 | `~/.workbuddy-shift-companion/custom-integrations.json` | 自定义来源模板 |
 | `~/.workbuddy-shift-companion/codex-recovery-v1.json` | Codex 离线事件暂存 |
 | `~/.workbuddy-shift-companion/runtime-v1.json` / `.lock` | 运行时端点与单实例锁 |
 | `~/.workbuddy-shift-companion/desktop-notifications.json` | 桌面通知去重所需的「已读」状态（运行时写入） |
-| `~/.workbuddy-shift-companion/companion-hook-spool.jsonl` | WorkBuddy / CodeBuddy IDE hook 的即发即走事件队列（`.lock` 串行追加、`.offset` 记录消费进度；daemon 每轮增量读取） |
+| `~/.workbuddy-shift-companion/hook-inbox.d/` | 脚本写入的**一事件一文件**收件箱：进程先写自己的 `.part`，再用一次 `mv` 原子发布成 `.evt`，daemon 读完即删 |
+| `~/.workbuddy-shift-companion/companion-hook-spool.jsonl` | 旧格式事件队列（v0.4.2 的 exe 命令仍在写；`.lock` 串行追加、`.offset` + 内容指纹记录消费进度；daemon 每轮增量读取，升级后其中的未消费事件照常补采） |
 
-WorkBuddy / CodeBuddy IDE 的 hook 只输出 `{}` 并把事件追加到上表的 spool 文件后立即退出，
-不等待 IPC（宿主的 3000ms 预算包含 exe 冷启动，同步 RPC 会在忙时被判超时）。
-`companion-runtime uninstall-hooks --home <目录>` 可批量摘除所有注册项并写入不再自动接入的策略；
-NSIS 卸载器在 PRE/POSTUNINSTALL 阶段自动调用它。积分签到系统的
+WorkBuddy / CodeBuddy IDE 的 hook 注册的是**几 KB 的 shell 脚本**（`bash '<脚本>'`，注册
+`timeout` 为 3 秒），不是运行时 exe。宿主给 hook 的 3000ms 预算包含进程冷启动：慢盘 /
+杀软实时扫描下，5MB exe 的冷启动实测中位数 1.88–2.19s，几乎每次调用都会撞上上限
+（issue #20 在 v0.4.2 收紧到 1000ms 后必然超时）。脚本只做 `cat` + 把「来源指令行 +
+原始 payload」写进**自己的一份事件文件** + 输出 `{}` 后退出，不解析 JSON、不启动 exe，
+耗时在几十毫秒级。之所以不追加到共享队列：shell 的 `printf >> file` 不是一次 `write()`，
+并发 hook 会互相插进对方的字节中间（本机 16 并发 8KB payload 实测会丢事件）。一事件一
+文件 + 原子 `mv` 因此不需要任何锁，也就没有「hook 被强杀留下死锁」的路径。
+`agent_source` / `agent_edition` 以「来源指令行」随事件一起落盘，由 daemon 侧解码
+（`crates/companion-runtime/src/hook_frame.rs`）后盖章，脚本里没有任何 JSON 拼接；
+形状异常（非 object）的 payload 由脚本声明的来源包装成 `payload` 字段照常投递，不整帧丢弃。
+
+`companion-runtime uninstall-hooks --home <目录>` 可批量摘除所有注册项（新的脚本命令、
+v0.4.2 的 exe 命令、旧 `.agent-studio` 命令三种形态）、删除生成的脚本，并写入不再自动
+接入的策略；脚本删不掉时只把错误上报（注册项已经清掉，不回滚），`uninstall-hooks` 末尾
+还有一次兜底删除。NSIS 卸载器在 PRE/POSTUNINSTALL 阶段自动调用它。积分签到系统的
 `~/.workbuddy-shift/hook-events.jsonl` 是另一套数据，两者互不读写。
 
 旧版本使用 `~/.agent-studio/`。**不兼容旧安装**：合并 hooks 时会把指向

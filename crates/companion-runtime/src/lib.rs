@@ -1,3 +1,6 @@
+pub mod hook_frame;
+pub mod hook_inbox;
+pub mod hook_script;
 pub mod hook_spool;
 pub use hook_spool::{handle_host_hook, HookSpool};
 
