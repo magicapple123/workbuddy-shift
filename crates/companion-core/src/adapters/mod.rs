@@ -19,14 +19,16 @@ use std::{
     path::PathBuf,
 };
 pub use workbuddy::{
-    merge_workbuddy_hooks, workbuddy_edition, workbuddy_settings_files, WORKBUDDY_HOOK_EVENTS,
+    is_workbuddy_hook_command, merge_workbuddy_hooks, workbuddy_edition, workbuddy_settings_files,
+    WORKBUDDY_HOOK_EVENTS,
 };
 
 /// 旧品牌（`~/.agent-studio`）留下的 hook 入口。
 ///
 /// 不再兼容旧安装：这个函数只用于**清理**——合并配置时把旧入口去掉，避免同一事件
 /// 被旧二进制和新入口各触发一次。旧目录与旧二进制不主动删除，用户数据留在原处。
-pub(crate) fn legacy_hook_command(command: &str) -> bool {
+/// 对 companion-runtime 公开，供安装/卸载路径识别并摘除历史重复注册。
+pub fn legacy_hook_command(command: &str) -> bool {
     command.contains(".agent-studio/bin/agent-studio-runtime") && command.contains(" hook")
 }
 pub fn query(db: &Connection, sql: &str) -> Result<Vec<Value>, String> {

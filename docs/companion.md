@@ -97,6 +97,13 @@ DSH 适配器的取舍（都有实测依据，改之前先看 `crates/companion-
 | `~/.workbuddy-shift-companion/codex-recovery-v1.json` | Codex 离线事件暂存 |
 | `~/.workbuddy-shift-companion/runtime-v1.json` / `.lock` | 运行时端点与单实例锁 |
 | `~/.workbuddy-shift-companion/desktop-notifications.json` | 桌面通知去重所需的「已读」状态（运行时写入） |
+| `~/.workbuddy-shift-companion/companion-hook-spool.jsonl` | WorkBuddy / CodeBuddy IDE hook 的即发即走事件队列（`.lock` 串行追加、`.offset` 记录消费进度；daemon 每轮增量读取） |
+
+WorkBuddy / CodeBuddy IDE 的 hook 只输出 `{}` 并把事件追加到上表的 spool 文件后立即退出，
+不等待 IPC（宿主的 3000ms 预算包含 exe 冷启动，同步 RPC 会在忙时被判超时）。
+`companion-runtime uninstall-hooks --home <目录>` 可批量摘除所有注册项并写入不再自动接入的策略；
+NSIS 卸载器在 PRE/POSTUNINSTALL 阶段自动调用它。积分签到系统的
+`~/.workbuddy-shift/hook-events.jsonl` 是另一套数据，两者互不读写。
 
 旧版本使用 `~/.agent-studio/`。**不兼容旧安装**：合并 hooks 时会把指向
 `.agent-studio/bin/agent-studio-runtime` 的旧条目清掉，避免同一事件被触发两次；旧目录

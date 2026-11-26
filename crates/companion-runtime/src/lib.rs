@@ -1,9 +1,38 @@
+pub mod hook_spool;
+pub use hook_spool::{handle_host_hook, HookSpool};
+
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 pub const PROTOCOL: u64 = 1;
+
+// 复用 Agent 免除每次 hook 重新建连/加载代理配置的开销。agent 是可克隆的句柄，
+// 按线程缓存即可；三类超时互不串扰。
+thread_local! {
+    static HOOK_AGENT: ureq::Agent =
+        ureq::AgentBuilder::new().timeout(Duration::from_millis(500)).build();
+    static RPC_AGENT: ureq::Agent =
+        ureq::AgentBuilder::new().timeout(Duration::from_secs(3)).build();
+    static SLOW_AGENT: ureq::Agent =
+        ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).build();
+}
+
+/// 不同命令的 IPC 预算：hook 必须远小于宿主的 3000ms；codex 的结束事件要等
+/// worker 确认持久化，保留 3 秒；设置/接入类操作允许读取远端状态，保留 12 秒。
+fn rpc_agent(command: &str, payload: &Value) -> ureq::Agent {
+    if command.starts_with("settings_")
+        || command.starts_with("integrations_")
+        || command.starts_with("custom_")
+    {
+        SLOW_AGENT.with(|a| a.clone())
+    } else if command == "hook" && payload["agent_source"] != "codex" {
+        HOOK_AGENT.with(|a| a.clone())
+    } else {
+        RPC_AGENT.with(|a| a.clone())
+    }
+}
 
 /// CodeBuddy CN must be matched before CodeBuddy: `codebuddy` is a prefix of `codebuddycn`.
 pub fn codebuddy_edition_from_text(text: &str) -> Option<&'static str> {
@@ -98,18 +127,7 @@ pub fn call(home: &Path, command: &str, payload: Value) -> Result<Value, String>
         .filter(|p| *p > 0 && *p < 65536)
         .ok_or("监听服务端口无效")?;
     let token = info["token"].as_str().ok_or("监听认证信息缺失")?;
-    let response: Value = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(
-            if command.starts_with("settings_")
-                || command.starts_with("integrations_")
-                || command.starts_with("custom_")
-            {
-                12
-            } else {
-                3
-            },
-        ))
-        .build()
+    let response: Value = rpc_agent(command, &payload)
         .post(&format!("http://127.0.0.1:{port}/rpc"))
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(json!({"command":command,"payload":payload}))
@@ -174,6 +192,38 @@ impl Drop for Client {
 #[cfg(test)]
 mod tests {
     use super::codebuddy_edition_from_text;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn hook_rpc_fails_fast_when_the_daemon_is_busy() {
+        let home = std::env::temp_dir().join(format!("hook-rpc-{}", uuid::Uuid::new_v4()));
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        companion_core::atomic_json(
+            &super::endpoint(&home),
+            &serde_json::json!({"protocol":super::PROTOCOL,"port":port,"token":"test"}),
+        )
+        .unwrap();
+        let _ = std::thread::spawn(move || {
+            if let Ok(Some(request)) = server.recv_timeout(Duration::from_secs(4)) {
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = request.respond(tiny_http::Response::empty(204));
+            }
+        });
+        let started = Instant::now();
+        let result = super::call(
+            &home,
+            "hook",
+            serde_json::json!({"agent_source":"workbuddy","hook_event_name":"Stop"}),
+        );
+        assert!(result.is_err(), "慢 IPC 必须报错而不是拖到宿主超时");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "hook RPC 耗时 {:?}",
+            started.elapsed()
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn integration_rpc_allows_remote_status_latency() {

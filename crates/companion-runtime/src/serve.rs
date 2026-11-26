@@ -3,7 +3,7 @@
 use super::integrations::{self, install_hooks};
 use super::{collector_request_command, ensure_hook_binary, ingest_hook_durably, Notifications};
 use companion_core::{adapters::Collector, atomic_json, now, text};
-use companion_runtime::{endpoint, home, PROTOCOL};
+use companion_runtime::{endpoint, home, HookSpool, PROTOCOL};
 use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -51,9 +51,20 @@ pub(super) fn serve() -> Result<(), String> {
         collector.integration_automatic("codeg"),
     ));
     let worker_codeg_integrated = codeg_integrated.clone();
+    // WorkBuddy / CodeBuddy IDE hooks write to this spool instead of blocking on
+    // RPC. The worker drains it every iteration (~100ms), including events that
+    // accumulated while the daemon was not running.
+    let mut hook_spool = HookSpool::new(&home);
     let worker = std::thread::spawn(move || {
         let mut poll_at = Instant::now() - Duration::from_secs(5);
         loop {
+            let _ = hook_spool.drain(|payload| {
+                if ingest_hook_durably(&mut collector, &payload)
+                    .is_ok_and(|value| value == json!(true))
+                {
+                    let _ = updates.send(collector.hub.snapshot());
+                }
+            });
             if poll_at.elapsed() >= Duration::from_secs(2) {
                 collector.poll();
                 poll_at = Instant::now();

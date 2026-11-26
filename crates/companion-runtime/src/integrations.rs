@@ -1,7 +1,8 @@
 use super::{ensure_hook_binary, hook_command};
 use companion_core::{
     adapters::{
-        codebuddy_settings_files, collect_session_logs, is_session_log, workbuddy_edition,
+        codebuddy_edition, codebuddy_settings_files, collect_session_logs, is_session_log,
+        is_workbuddy_hook_command, legacy_hook_command, workbuddy_edition,
         workbuddy_settings_files, Collector, CODEBUDDY_IDE_HOOK_EVENTS, WORKBUDDY_HOOK_EVENTS,
     },
     atomic_json,
@@ -94,27 +95,60 @@ fn binary(c: &Collector) -> PathBuf {
     })
 }
 fn command(c: &Collector, source: &str, file: &Path) -> String {
-    hook_command(
-        &binary(c),
-        &c.home,
-        source,
-        if source == "workbuddy" {
-            Some(workbuddy_edition(file))
-        } else {
-            None
-        },
-    )
+    let edition = match source {
+        "workbuddy" => Some(workbuddy_edition(file)),
+        "codebuddy-ide" => Some(codebuddy_edition(file)),
+        _ => None,
+    };
+    hook_command(&binary(c), &c.home, source, edition)
 }
-// Match complete commands at known application-owned locations, never substring names.
+
+/// 从 hook 命令里取 `--source` 参数（兼容单双引号）。
+fn hook_source_argument(command: &str) -> Option<&str> {
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--source" {
+            return tokens
+                .next()
+                .map(|value| value.trim_matches(|c| c == '\'' || c == '"'));
+        }
+    }
+    None
+}
+
+/// 红线筛查：只有看起来属于 companion / 旧 agent-studio 的命令才进入删除判定；
+/// `bash hook.sh`（积分签到）、hook-backups 等永远不参与。
+fn may_be_ours(command: &str) -> bool {
+    is_workbuddy_hook_command(command)
+        || legacy_hook_command(command)
+        || command.contains("companion-runtime")
+}
+
+/// Match complete commands at known application-owned locations, never substring names.
+///
+/// 除了当前命令，还识别：同品牌无/旧 `--edition` 变体，以及旧 `.agent-studio`
+/// 品牌指向同一来源的入口。旧条目必须在这里摘掉，否则一个事件会被新旧两个 exe
+/// 各触发一次（issue #20 的「11 事件 × 2 程序」）。
 fn owned(c: &Collector, source: &str, file: &Path, value: &Value) -> bool {
     let cmd = text(&value["command"]);
-    if cmd == command(c, source, file) {
+    let cmd = cmd.trim();
+    if !may_be_ours(cmd) {
+        return false;
+    }
+    if cmd == command(c, source, file) || cmd == hook_command(&binary(c), &c.home, source, None) {
         return true;
     }
-    if source == "workbuddy" && cmd == hook_command(&binary(c), &c.home, source, None) {
+    // 复用真正的注册命令构造器：任何 --edition 变体都以此开头，且与写入端共用同一套引号规则。
+    let prefix = hook_command(&binary(c), &c.home, source, None);
+    if cmd.starts_with(&prefix) {
         return true;
     }
-    false
+    legacy_hook_command(cmd) && hook_source_argument(cmd) == Some(source)
+}
+
+/// 旧品牌独立配置目录里遗留的注册项（升级前的 settings.json）。
+fn legacy_owned(value: &Value) -> bool {
+    legacy_hook_command(&text(&value["command"]))
 }
 fn read(file: &Path) -> Result<Value, String> {
     let v: Value = match std::fs::read(file) {
@@ -140,6 +174,28 @@ fn read(file: &Path) -> Result<Value, String> {
     }
     Ok(v)
 }
+/// 从 hooks 配置里摘掉匹配 `is_owned` 的分组/条目，保留其它一切字段与顺序。
+fn strip_owned(doc: &mut Value, is_owned: &impl Fn(&Value) -> bool) {
+    if let Some(map) = doc["hooks"].as_object_mut() {
+        for groups in map.values_mut() {
+            let Some(groups) = groups.as_array_mut() else {
+                continue;
+            };
+            groups.retain_mut(|group| {
+                if is_owned(group) {
+                    return false;
+                }
+                if let Some(hooks) = group["hooks"].as_array_mut() {
+                    let count = hooks.len();
+                    hooks.retain(|hook| !is_owned(hook));
+                    return count == hooks.len() || !hooks.is_empty();
+                }
+                true
+            });
+        }
+    }
+}
+
 fn contains(c: &Collector, source: &str, file: &Path, groups: &Value) -> bool {
     groups.as_array().into_iter().flatten().any(|g| {
         owned(c, source, file, g)
@@ -173,28 +229,17 @@ fn edit(c: &Collector, source: &str, install: bool) -> Result<(), String> {
         if install && doc["hooks"].is_null() {
             doc["hooks"] = json!({});
         }
-        if let Some(map) = doc["hooks"].as_object_mut() {
-            for groups in map.values_mut() {
-                let groups = groups.as_array_mut().unwrap();
-                groups.retain_mut(|g| {
-                    if owned(c, source, file, g) {
-                        return false;
-                    }
-                    if let Some(hooks) = g["hooks"].as_array_mut() {
-                        let count = hooks.len();
-                        hooks.retain(|h| !owned(c, source, file, h));
-                        return count == hooks.len() || !hooks.is_empty();
-                    }
-                    true
-                });
-            }
-        }
+        strip_owned(&mut doc, &|value| owned(c, source, file, value));
         if install {
             for event in events(source) {
                 if doc["hooks"][event].is_null() {
                     doc["hooks"][event] = json!([]);
                 }
-                let mut h = json!({"type":"command","command":command(c,source,file),"timeout":3});
+                // WorkBuddy / IDE 的 hook 不再发 RPC，1 秒只是宿主侧兜底；codex
+                // 的结束事件仍需等待采集器确认持久化，保留原来的 3 秒。
+                let timeout = if source == "codex" { 3 } else { 1 };
+                let mut h =
+                    json!({"type":"command","command":command(c,source,file),"timeout":timeout});
                 if source != "codebuddy-ide" {
                     h["statusMessage"] = json!("WorkBuddy Shift");
                     // Codex CLI skips handlers marked async entirely. Keep all
@@ -246,6 +291,45 @@ pub fn install_hooks(c: &Collector) -> Result<(), String> {
         Err(errors.join("；"))
     }
 }
+/// 批量移除全部已注册的 companion hook，并写入「不再自动接入」策略。
+///
+/// 供 `companion-runtime uninstall-hooks --home <dir>`（安装器卸载宏 / 用户手动）
+/// 调用。只删除本工具当前品牌与旧 `.agent-studio` 品牌的注册项；积分签到的
+/// `hook.sh`、第三方 hook、备份文件与其它数据一律保留。
+pub fn uninstall_all_hooks(c: &mut Collector) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for source in ["codex", "workbuddy", "codebuddy-ide"] {
+        if let Err(e) = edit(c, source, false) {
+            errors.push(e);
+        }
+        // 防止下次 serve 启动 / settings_set 时静默重装（issue #20 的「关掉还在拦」）。
+        if let Err(e) = c.set_integration_automatic(source, false) {
+            errors.push(e);
+        }
+    }
+    // 旧品牌自己的配置目录也可能留有注册项；它不在 files() 的扫描范围内。
+    let legacy_file = c.home.join(".agent-studio/settings.json");
+    if legacy_file.exists() {
+        match read(&legacy_file) {
+            Ok(before) => {
+                let mut doc = before.clone();
+                strip_owned(&mut doc, &legacy_owned);
+                if doc != before {
+                    if let Err(e) = atomic_json(&legacy_file, &doc) {
+                        errors.push(e);
+                    }
+                }
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("；"))
+    }
+}
+
 pub fn get(c: &Collector) -> Value {
     let sources: Vec<_> = SOURCES.iter().map(|source| {
         let locations = match kind_of(source) {
@@ -313,109 +397,4 @@ pub fn set(c: &mut Collector, p: &Value) -> Result<Value, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cleanup_preserves_mixed_groups_and_opt_out_survives_restart() {
-        let home = std::env::temp_dir().join(format!("integrations-{}", uuid::Uuid::new_v4()));
-        for dir in [".codex", ".workbuddy-ai", ".codebuddy"] {
-            std::fs::create_dir_all(home.join(dir)).unwrap();
-        }
-        let mut c = Collector::new(home.clone()).unwrap();
-        for source in ["codex", "workbuddy", "codebuddy-ide"] {
-            let file = files(&c, source)[0].clone();
-            let mine = command(&c, source, &file);
-            let other = json!({"type":"command","command":format!("echo {mine}"),"custom":42});
-            atomic_json(&file,&json!({"custom":true,"hooks":{"Stop":[{"matcher":"custom","metadata":"keep","hooks":[{"command":mine},other.clone()]},{"hooks":[]}]}})).unwrap();
-            set(&mut c, &json!({"source":source,"action":"uninstall"})).unwrap();
-            let doc = read(&file).unwrap();
-            assert_eq!(doc["hooks"]["Stop"][0]["hooks"], json!([other]));
-            assert_eq!(doc["hooks"]["Stop"][0]["metadata"], "keep");
-            assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 2);
-            assert_eq!(doc["custom"], true);
-        }
-        let mut restarted = Collector::new(home.clone()).unwrap();
-        restarted
-            .request("settings_set", &restarted.settings.clone())
-            .unwrap();
-        install_hooks(&restarted).unwrap();
-        assert!(get(&restarted)["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| !matches!(r["source"].as_str(), Some("codeg" | "dsh")))
-            .all(|r| r["status"] == "not_installed" && r["automatic"] == false));
-        // 第 5 个来源 DSH 是只读日志接入：目录不存在即「暂不可用」，
-        // 而且 install / uninstall 都不能写盘（没有 hook 可装）。
-        restarted.settings["sources"]["dsh"]["path"] = json!(home.join("no-dsh"));
-        let dsh = get(&restarted)["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["source"] == "dsh")
-            .cloned()
-            .unwrap();
-        assert_eq!(dsh["kind"], "log");
-        assert_eq!(dsh["status"], "unavailable");
-        assert!(dsh["locations"].as_array().unwrap().is_empty());
-        let entries_before = std::fs::read_dir(&home).unwrap().count();
-        set(&mut restarted, &json!({"source":"dsh","action":"install"})).unwrap();
-        assert_eq!(get(&restarted)["sources"][4]["automatic"], true);
-        set(
-            &mut restarted,
-            &json!({"source":"dsh","action":"uninstall"}),
-        )
-        .unwrap();
-        assert_eq!(get(&restarted)["sources"][4]["automatic"], false);
-        assert_eq!(
-            std::fs::read_dir(&home).unwrap().count(),
-            entries_before,
-            "DSH 接入不得在用户目录里新建任何文件"
-        );
-        // 有 sessions 目录时是「已连接（只读）」。
-        std::fs::create_dir_all(home.join("no-dsh/sessions/-D-proj-/session-a")).unwrap();
-        std::fs::write(
-            home.join("no-dsh/sessions/-D-proj-/session-a/session.v4.jsonl.zstd"),
-            b"",
-        )
-        .unwrap();
-        let dsh = get(&restarted)["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["source"] == "dsh")
-            .cloned()
-            .unwrap();
-        assert_eq!(dsh["status"], "installed");
-        assert_eq!(dsh["locations"].as_array().unwrap().len(), 1);
-        set(
-            &mut restarted,
-            &json!({"source":"codex","action":"install"}),
-        )
-        .unwrap();
-        assert_eq!(get(&restarted)["sources"][0]["status"], "installed");
-        let codex_hooks = read(&home.join(".codex/hooks.json")).unwrap();
-        for event in CODEX_EVENTS {
-            assert_eq!(
-                codex_hooks["hooks"][event][0]["hooks"][0]["async"],
-                Value::Null,
-                "{event} must complete before Codex leaves the turn"
-            );
-        }
-        std::fs::write(home.join(".codex/hooks.json"), "malformed").unwrap();
-        assert_eq!(get(&restarted)["sources"][0]["status"], "error");
-        assert!(set(
-            &mut restarted,
-            &json!({"source":"codex","action":"uninstall"})
-        )
-        .is_err());
-        assert!(!Collector::new(home.clone())
-            .unwrap()
-            .integration_automatic("codex"));
-        assert_eq!(
-            std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap(),
-            "malformed"
-        );
-        std::fs::remove_dir_all(home).unwrap();
-    }
-}
+mod tests;

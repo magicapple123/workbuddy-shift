@@ -1,10 +1,10 @@
 mod integrations;
 use companion_core::{adapters::Collector, text};
-use companion_runtime::{arg_value, call, codebuddy_edition_from_host, home};
+use companion_runtime::{arg_value, call, home};
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 fn main() {
@@ -15,9 +15,20 @@ fn main() {
             let agent = arg_value("--source").unwrap_or_else(|| "codex".into());
             // WorkBuddy treats empty stdout as invalid JSON. Codex SessionStart
             // treats JSON stdout as hook output. IDE and WorkBuddy accept `{}`.
-            if agent == "workbuddy" || agent == "codebuddy-ide" {
-                println!("{{}}");
-                let _ = std::io::stdout().flush();
+            //
+            // WorkBuddy / CodeBuddy IDE are observational hooks: print `{}` and
+            // spool the event locally, then exit. Waiting on HTTP IPC here used
+            // to consume the host's whole 3000ms budget under load (issue #20).
+            // The edition comes from the registered command, never probed at hook
+            // time (`ps` walking could itself take seconds on Unix).
+            if companion_runtime::handle_host_hook(
+                &home(),
+                &bytes,
+                &agent,
+                arg_value("--edition").as_deref(),
+                &mut std::io::stdout(),
+            )? {
+                return Ok(());
             }
             if let Ok(mut p) = serde_json::from_slice::<Value>(&bytes) {
                 let codex_stop = agent == "codex"
@@ -28,15 +39,6 @@ fn main() {
                         Some("Stop" | "Interrupt" | "SessionEnd")
                     );
                 p["agent_source"] = json!(agent);
-                if let Some(edition) = arg_value("--edition") {
-                    p["agent_edition"] = json!(edition);
-                } else if agent == "codebuddy-ide"
-                    && p["agent_edition"].as_str().unwrap_or("").is_empty()
-                {
-                    if let Some(edition) = codebuddy_edition_from_host() {
-                        p["agent_edition"] = json!(edition);
-                    }
-                }
                 if codex_stop {
                     // Stop expects JSON output. Report delivery failures to
                     // Codex instead of silently leaving the session running.
@@ -58,8 +60,16 @@ fn main() {
         })(),
         Some("serve") => serve(),
         Some("custom-hook") => custom_hook(),
+        Some("uninstall-hooks") => (|| -> Result<(), String> {
+            let mut collector = Collector::new(home())?;
+            integrations::uninstall_all_hooks(&mut collector)?;
+            println!("WorkBuddy Shift hooks 已移除");
+            Ok(())
+        })(),
         _ => {
-            eprintln!("companion-runtime serve | hook | custom-hook");
+            eprintln!(
+                "companion-runtime serve | hook | custom-hook | uninstall-hooks [--home <dir>]"
+            );
             Ok(())
         }
     };
