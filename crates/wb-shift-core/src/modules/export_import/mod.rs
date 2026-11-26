@@ -46,6 +46,8 @@ mod tests {
 
     use super::encrypted::merge_encrypted_bytes;
     use super::export::*;
+    // issue #232：第三方 `enc:v1:` 密文判定（预览与合并共用同一份）。
+    use super::import::is_foreign_ciphertext;
     include!("tests/import.rs");
     include!("tests/crypto.rs");
     include!("tests/encrypted.rs");

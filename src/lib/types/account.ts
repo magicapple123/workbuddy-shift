@@ -177,6 +177,12 @@ export interface ImportPreviewAccount {
   hasToken: boolean;
   /** access_token 为 WorkBuddy 加密信封：可导入，但仅切换可用（签到/积分不可用）。 */
   encrypted: boolean;
+  /**
+   * access_token 为第三方号池的加密密文（`enc:v1:` 前缀）：本机解不开，导入会整体跳过。
+   *
+   * 老后端没有该字段：缺省按「不是第三方密文」处理。
+   */
+  foreignEncrypted?: boolean;
 }
 
 /** 导入结果计数。 */

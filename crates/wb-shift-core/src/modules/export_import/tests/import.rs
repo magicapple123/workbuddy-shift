@@ -451,6 +451,474 @@
         assert_eq!(plain["encrypted"], false, "明文凭据不得误标 encrypted");
     }
 
+    // -----------------------------------------------------------------------
+    // issue #232：第三方号池（BuddyRelay 等）导出格式兼容
+    //
+    // 根因：对方用 camelCase `accessToken` / `refreshToken`，本工具只认 snake_case，
+    // 于是整份号池在预览里全部显示「缺少 token」。归一化只**补键**，不裁剪、不改名，
+    // 既有 `$wbEncrypted` 信封语义原样保留。
+    // -----------------------------------------------------------------------
+
+    /// camelCase 凭据归一化后可以入库，其它字段（含 `auth_raw`）原样保留。
+    #[test]
+    fn parse_normalizes_camel_case_credentials() {
+        let text = r#"[{
+            "id": "relay-1",
+            "uid": "u-relay",
+            "nickname": "号池账号",
+            "accessToken": "tok-relay",
+            "refreshToken": "ref-relay",
+            "auth_raw": { "k": "v" }
+        }]"#;
+        let mut accounts: Vec<Value> = vec![];
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(result.imported, 1, "camelCase 凭据必须能入库");
+        assert_eq!(result.skipped, 0);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["access_token"], "tok-relay");
+        assert_eq!(accounts[0]["refresh_token"], "ref-relay");
+        assert_eq!(
+            accounts[0]["auth_raw"]["k"], "v",
+            "归一化只补键：其它字段不得被裁剪"
+        );
+        assert_eq!(accounts[0]["nickname"], "号池账号");
+    }
+
+    /// `token` 是第二优先级的别名：没有 `accessToken` 时也认。
+    #[test]
+    fn parse_falls_back_to_token_alias() {
+        let parsed = parse_accounts_json(r#"[{ "uid": "u1", "token": "tok-short" }]"#)
+            .expect("应能解析");
+        assert_eq!(parsed[0]["access_token"], "tok-short");
+    }
+
+    /// 规范键优先：同时存在时以 `access_token` 为准；规范键为空串时才回退别名。
+    #[test]
+    fn parse_prefers_canonical_token_over_alias() {
+        let parsed = parse_accounts_json(
+            r#"[
+                { "uid": "u1", "access_token": "tok-canonical", "accessToken": "tok-alias" },
+                { "uid": "u2", "access_token": "   ", "accessToken": "tok-fallback" }
+            ]"#,
+        )
+        .expect("应能解析");
+
+        assert_eq!(
+            parsed[0]["access_token"], "tok-canonical",
+            "已有合法规范键时不得被别名覆盖"
+        );
+        assert_eq!(
+            parsed[1]["access_token"], "tok-fallback",
+            "规范键为空串时应回退别名"
+        );
+    }
+
+    /// 别名指向 `$wbEncrypted` 信封时按信封原样搬过来（不拆、不改写）。
+    #[test]
+    fn parse_keeps_envelope_when_carried_by_alias() {
+        let text = r#"[{
+            "uid": "u-env-alias",
+            "accessToken": { "$wbEncrypted": 1, "envelope": "a" },
+            "refreshToken": { "$wbEncrypted": 1, "envelope": "r" }
+        }]"#;
+        let parsed = parse_accounts_json(text).expect("应能解析");
+        assert_eq!(
+            parsed[0]["access_token"],
+            json!({"$wbEncrypted": 1, "envelope": "a"}),
+            "信封语义必须原样保留"
+        );
+        assert_eq!(parsed[0]["refresh_token"]["envelope"], "r");
+    }
+
+    /// `{ "accounts": [...] }` 包装可解析，且预览索引与数组下标一致。
+    #[test]
+    fn parse_accepts_accounts_wrapper_and_keeps_preview_indexes() {
+        let text = r#"{
+            "version": 1,
+            "accounts": [
+                { "uid": "u1", "nickname": "甲", "accessToken": "t1" },
+                { "uid": "u2", "nickname": "乙" }
+            ]
+        }"#;
+        let parsed = parse_accounts_json(text).expect("包装对象应能解析");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["access_token"], "t1");
+
+        let preview = preview_accounts(text).unwrap();
+        assert_eq!(preview["total"], 2);
+        assert_eq!(preview["accounts"][0]["index"], 0);
+        assert_eq!(preview["accounts"][0]["nickname"], "甲");
+        assert_eq!(preview["accounts"][1]["index"], 1);
+        assert_eq!(preview["accounts"][1]["hasToken"], false);
+    }
+
+    /// 包装对象的 `accounts` 不是数组时仍按「非数组」拒绝（文案不变）。
+    #[test]
+    fn parse_rejects_wrapper_without_account_array() {
+        let err = parse_accounts_json(r#"{ "accounts": 1 }"#).unwrap_err();
+        assert!(
+            err.contains("JSON 数组"),
+            "包装格式错误应仍报数组文案：{err}"
+        );
+        assert!(
+            parse_accounts_json(r#"{ "other": [] }"#).is_err(),
+            "不认识的顶层对象不得被当成账号列表"
+        );
+    }
+
+    /// `enc:v1:` 密文：预览标记 `foreignEncrypted`、`hasToken=false`，导入计 skipped 且不落库。
+    #[test]
+    fn foreign_ciphertext_is_marked_in_preview_and_skipped_on_merge() {
+        let text = r#"[
+            {
+                "uid": "u-pool",
+                "nickname": "加密池账号",
+                "access_token": "enc:v1:AAAA",
+                "encrypted_access_token": "enc:v1:AAAA"
+            },
+            {
+                "uid": "u-plain",
+                "nickname": "明文账号",
+                "access_token": "SECRET"
+            }
+        ]"#;
+        let preview = preview_accounts(text).unwrap();
+        let pool = &preview["accounts"][0];
+        assert_eq!(pool["hasToken"], false, "密文不得算作有凭据");
+        assert_eq!(pool["foreignEncrypted"], true, "应标记第三方密文");
+        assert_eq!(pool["encrypted"], false, "`enc:v1:` 不是 WorkBuddy 信封");
+        assert_eq!(
+            preview["accounts"][1]["foreignEncrypted"], false,
+            "明文凭据不得误标第三方密文"
+        );
+
+        let mut accounts: Vec<Value> = vec![];
+        let result = merge_import_records(&mut accounts, text, &[0, 1]).unwrap();
+        assert_eq!(result.imported, 1, "只有明文账号可入库");
+        assert_eq!(result.skipped, 1, "密文账号计 skipped");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["uid"], "u-plain", "密文账号不得进入账号库");
+    }
+
+    /// 密文判定允许前导空白（对方导出时可能带换行/空格），且只认字符串。
+    #[test]
+    fn foreign_ciphertext_detection_tolerates_leading_whitespace() {
+        assert!(is_foreign_ciphertext(&json!("enc:v1:abc")));
+        assert!(is_foreign_ciphertext(&json!("  \n enc:v1:abc")));
+        assert!(!is_foreign_ciphertext(&json!("enc:v2:abc")));
+        assert!(!is_foreign_ciphertext(&json!("SECRET")));
+        assert!(!is_foreign_ciphertext(&json!({ "$wbEncrypted": 1 })));
+        assert!(!is_foreign_ciphertext(&Value::Null));
+    }
+
+    // -----------------------------------------------------------------------
+    // issue #232：QA 独立复核（真实导出形态 + 边界）
+    //
+    // 与上面「最小样例」互补：这里用一份**贴近 BuddyRelay 真实导出**的多账号文件
+    // （`{accounts:[...]}` 包装 + camelCase 凭据 + `domain` / `expiresAt` / `authRaw`），
+    // 确认预览口径、导入计数与字段保真度三者一致 —— 归一化只允许「补键」。
+    // -----------------------------------------------------------------------
+
+    /// 真实形态导出：预览全部有凭据 → 全部可入库 → 来源端字段一个都不少。
+    #[test]
+    fn relay_shaped_export_previews_and_imports_without_field_loss() {
+        let text = r#"{
+            "version": 2,
+            "exportedAt": 1893456000000,
+            "accounts": [
+                {
+                    "id": "relay-cn-1", "uid": "uid-cn-1", "nickname": "国内号",
+                    "email": "cn1@example.com", "domain": "workbuddy.cn",
+                    "accessToken": "at-cn-1", "refreshToken": "rt-cn-1",
+                    "expiresAt": 1893456000000,
+                    "authRaw": { "accessToken": "at-cn-1", "domain": "workbuddy.cn" }
+                },
+                {
+                    "id": "relay-ai-1", "uid": "uid-ai-1", "nickname": "国际号",
+                    "email": "ai1@example.com", "domain": "www.workbuddy.ai",
+                    "accessToken": "at-ai-1", "refreshToken": "rt-ai-1",
+                    "expiresAt": 1893456000000,
+                    "authRaw": { "accessToken": "at-ai-1", "domain": "www.workbuddy.ai" }
+                },
+                {
+                    "id": "relay-cn-2", "uid": "uid-cn-2", "nickname": "国内号 2",
+                    "domain": "workbuddy.cn", "accessToken": "at-cn-2", "expiresAt": 1
+                }
+            ]
+        }"#;
+
+        let preview = preview_accounts(text).expect("真实形态导出必须能预览");
+        assert_eq!(preview["total"], 3);
+        for index in 0..3 {
+            assert_eq!(
+                preview["accounts"][index]["hasToken"], true,
+                "第 {index} 项应识别出凭据（否则又会退化成整份号池「缺少 token」）"
+            );
+            assert_eq!(preview["accounts"][index]["foreignEncrypted"], false);
+            assert_eq!(preview["accounts"][index]["encrypted"], false);
+        }
+
+        let mut accounts: Vec<Value> = vec![];
+        let result = merge_import_records(&mut accounts, text, &[0, 1, 2]).expect("应能导入");
+        assert_eq!(result.imported, 3, "预览说有凭据的数必须与真正入库的数一致");
+        assert_eq!(result.skipped, 0);
+        assert_eq!(result.overwritten, 0, "空账号库里没有可覆盖的记录");
+
+        let ai = &accounts[1];
+        assert_eq!(ai["access_token"], "at-ai-1");
+        assert_eq!(ai["refresh_token"], "rt-ai-1");
+        // 「只补键、不改名、不裁剪」：`domain` 决定档位、`authRaw` 是切号写回的原始凭据、
+        // `expiresAt` 决定明文 Token 是否仍算有效，少一个就切不过去或判成过期。
+        assert_eq!(ai["domain"], "www.workbuddy.ai");
+        assert_eq!(ai["expiresAt"], json!(1893456000000i64));
+        assert_eq!(ai["authRaw"]["accessToken"], "at-ai-1");
+        assert_eq!(ai["authRaw"]["domain"], "www.workbuddy.ai");
+        assert_eq!(ai["email"], "ai1@example.com");
+        assert_eq!(ai["id"], "relay-ai-1", "来源自带的 id 必须保留");
+        assert_eq!(
+            account::variant_of(ai).as_str(),
+            "ai",
+            "`domain` 必须能继续决定档位（归一化不能改写它）"
+        );
+    }
+
+    /// 第三方号池的 `domain` 是导入时**唯一**的档位线索：CodeBuddy 系国际版域
+    /// （`www.codebuddy.ai` / apex `codebuddy.ai`）必须判成国际版，相似域不得误判。
+    ///
+    /// 这是从导入入口（`parse_accounts_json` → 合并 → `variant_of`）走的端到端口径，
+    /// 而不是只测 `variant.rs` 的私有判定：导入路径不会给记录补 `variant` 字段，
+    /// 因此档位 100% 由 `domain` 兜底决定 —— 判错就写进国内桶、切号打到错误的客户端。
+    #[test]
+    fn imported_pool_accounts_take_their_variant_from_the_domain() {
+        let text = r#"[
+            { "uid": "u-cb-ai", "domain": "www.codebuddy.ai", "accessToken": "t1" },
+            { "uid": "u-cb-ai-apex", "domain": "codebuddy.ai", "accessToken": "t2" },
+            { "uid": "u-wb-ai", "domain": "workbuddy.ai", "accessToken": "t3" },
+            { "uid": "u-cb-cn", "domain": "www.codebuddy.cn", "accessToken": "t4" },
+            { "uid": "u-cb-lookalike", "domain": "codebuddy.ai.cn", "accessToken": "t5" },
+            { "uid": "u-cb-prefix", "domain": "xcodebuddy.ai", "accessToken": "t6" },
+            { "uid": "u-cb-evil", "domain": "www.codebuddy.ai.evil.com", "accessToken": "t7" }
+        ]"#;
+        let mut accounts: Vec<Value> = vec![];
+        merge_import_records(&mut accounts, text, &[0, 1, 2, 3, 4, 5, 6]).unwrap();
+
+        for (index, expected) in [
+            (0, "ai"),         // www.codebuddy.ai
+            (1, "ai"),         // apex
+            (2, "ai"),         // apex（WorkBuddy 国际版）
+            (3, "cn"),         // 国内版产品域
+            (4, "cn"),         // 标签边界外的相似域
+            (5, "cn"),         // 前缀粘连，不是子域
+            (6, "cn"),         // 后缀注入
+        ] {
+            assert_eq!(
+                account::variant_of(&accounts[index]).as_str(),
+                expected,
+                "`{}` 的档位判定不对（uid={}）",
+                accounts[index]["domain"],
+                accounts[index]["uid"]
+            );
+        }
+    }
+
+    /// 规范键存在但「不是凭据」（null / 数字 / 普通对象）时仍要回退别名。
+    ///
+    /// 真实号池里 `access_token` 常被写成 `null` 占位；只判「存在」而不判「是不是凭据」
+    /// 会把这类记录判成「有规范键」从而放弃别名，等于又回到 #232 的原始症状。
+    #[test]
+    fn alias_fallback_covers_null_number_and_plain_object() {
+        let parsed = parse_accounts_json(
+            r#"[
+                { "uid": "u-null", "access_token": null, "accessToken": "at-null" },
+                { "uid": "u-num", "access_token": 42, "accessToken": "at-num" },
+                { "uid": "u-obj", "access_token": { "k": "v" }, "token": "at-obj" },
+                { "uid": "u-arr", "access_token": [], "refreshToken": "only-refresh" }
+            ]"#,
+        )
+        .expect("应能解析");
+
+        assert_eq!(parsed[0]["access_token"], "at-null");
+        assert_eq!(parsed[1]["access_token"], "at-num");
+        assert_eq!(parsed[2]["access_token"], "at-obj", "`token` 是第二优先级别名");
+        assert_eq!(
+            parsed[3]["access_token"],
+            json!([]),
+            "数组不是凭据：归一化只补键，既有值原样保留（合并时会因无凭据被跳过）"
+        );
+        assert_eq!(parsed[3]["refresh_token"], "only-refresh");
+        assert!(
+            account::secret_value(&parsed[3], "access_token").is_none(),
+            "`[]` 不得被当成有效凭据"
+        );
+        assert_eq!(
+            account::secret_value(&parsed[3], "refresh_token"),
+            Some(json!("only-refresh")),
+            "只有 refreshToken 时保留它，但不能凭空造出 access_token"
+        );
+    }
+
+    /// 别名搬来的密文同样要命中 `enc:v1:` 判定（贵号池导出就是 camelCase）。
+    ///
+    /// 这条钉住「先归一化、后判定」的顺序：先判密文再归一化会漏掉 `accessToken` 形态。
+    #[test]
+    fn foreign_ciphertext_carried_by_camel_alias_is_still_detected() {
+        let text = r#"[
+            { "uid": "u-alias-cipher", "accessToken": "  enc:v1:ZZZ" },
+            { "uid": "u-alias-plain", "accessToken": "PLAIN" }
+        ]"#;
+
+        let preview = preview_accounts(text).unwrap();
+        assert_eq!(preview["accounts"][0]["hasToken"], false);
+        assert_eq!(preview["accounts"][0]["foreignEncrypted"], true);
+        assert_eq!(preview["accounts"][1]["hasToken"], true);
+        assert_eq!(preview["accounts"][1]["foreignEncrypted"], false);
+
+        let mut accounts: Vec<Value> = vec![];
+        let result = merge_import_records(&mut accounts, text, &[0, 1]).unwrap();
+        assert_eq!(result.skipped, 1);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["uid"], "u-alias-plain");
+    }
+
+    /// `enc:v2:` 是对方后来的新格式：本机同样解不开，但**不是**本次登记的 `enc:v1:` 口径，
+    /// 现在按普通明文处理（至少不会让用户以为文件坏了）。这条钉住「前缀精确匹配」。
+    #[test]
+    fn enc_v2_prefix_is_not_treated_as_foreign_ciphertext() {
+        let text = r#"[{ "uid": "u-v2", "accessToken": "enc:v2:AAA" }]"#;
+        let parsed = parse_accounts_json(text).unwrap();
+        assert_eq!(parsed[0]["access_token"], "enc:v2:AAA", "原样保留，不改写");
+
+        let preview = preview_accounts(text).unwrap();
+        assert_eq!(
+            preview["accounts"][0]["foreignEncrypted"], false,
+            "只认登记过的 `enc:v1:` 前缀"
+        );
+        assert_eq!(preview["accounts"][0]["hasToken"], true);
+    }
+
+    /// 顶层不是数组也不是包装对象（字符串 / 数字 / 布尔 / null）→ 明确拒绝，且文案说清要求。
+    #[test]
+    fn parse_rejects_top_level_scalars() {
+        for text in [r#""accounts""#, "42", "3.5", "true", "null"] {
+            let err = parse_accounts_json(text).unwrap_err();
+            assert!(
+                err.contains("JSON 数组"),
+                "顶层标量 {text} 应报数组文案，实际：{err}"
+            );
+        }
+    }
+
+    /// 包装对象里 `accounts` 为字符串 / 对象 / null 时同样拒绝（只认数组这一层）；
+    /// `accounts: []` 是合法输入（空列表 ≠ 格式错误，前端据此报「共 0 个账号」）。
+    #[test]
+    fn parse_rejects_wrapper_with_non_array_accounts() {
+        for text in [
+            r#"{ "accounts": "x" }"#,
+            r#"{ "accounts": { "0": {} } }"#,
+            r#"{ "accounts": null }"#,
+        ] {
+            assert!(
+                parse_accounts_json(text).is_err(),
+                "非数组 accounts 必须拒绝：{text}"
+            );
+        }
+        assert_eq!(
+            parse_accounts_json(r#"{ "accounts": [] }"#)
+                .expect("`accounts: []` 是合法输入")
+                .len(),
+            0
+        );
+    }
+
+    /// 既有备份（snake_case + `$wbEncrypted` 信封）不得被归一化改动：
+    /// 信封原样保留、已有规范键不被别名覆盖、`refresh_token` 不丢。
+    #[test]
+    fn normalize_leaves_native_backup_records_untouched() {
+        let text = r#"[{
+            "id": "native-1",
+            "uid": "u-native",
+            "access_token": { "$wbEncrypted": [1, 2, 3], "envelope": "abc" },
+            "refresh_token": "rt-native",
+            "mark": "red",
+            "note": "本地备注",
+            "accessToken": "should-not-override"
+        }]"#;
+        let parsed = parse_accounts_json(text).unwrap();
+        assert_eq!(
+            parsed[0]["access_token"],
+            json!({ "$wbEncrypted": [1, 2, 3], "envelope": "abc" }),
+            "信封依赖本机 keyblob，改写即失效"
+        );
+        assert_eq!(parsed[0]["refresh_token"], "rt-native");
+        assert_eq!(parsed[0]["mark"], "red");
+        assert_eq!(parsed[0]["note"], "本地备注");
+        assert_eq!(
+            parsed[0]["accessToken"], "should-not-override",
+            "别名键本身也要原样保留（只加键，不改名/不删键）"
+        );
+
+        let preview = preview_accounts(text).unwrap();
+        assert_eq!(preview["accounts"][0]["encrypted"], true, "信封仍标 encrypted");
+        assert_eq!(preview["accounts"][0]["hasToken"], true);
+        assert_eq!(preview["accounts"][0]["foreignEncrypted"], false);
+
+        let mut accounts = vec![json!({
+            "id": "native-1", "uid": "u-native", "access_token": { "$wbEncrypted": 1 },
+            "mark": "blue",
+        })];
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(result.overwritten, 1, "同 uid 备份应覆盖");
+        assert_eq!(accounts[0]["mark"], "red", "备份自带展示字段时以备份为准");
+        assert_eq!(accounts[0]["refresh_token"], "rt-native");
+    }
+
+    /// 索引越界与重复索引的口径：越界计 skipped、重复索引不去重（同一记录会被合并两次）。
+    ///
+    /// 重复索引不会产生重复账号（同 uid 第二次走覆盖），计数口径必须与之一致。
+    #[test]
+    fn merge_counts_out_of_range_and_duplicate_indexes() {
+        let text = r#"[{ "id": "a", "uid": "u1", "access_token": "t1" }]"#;
+        let mut accounts: Vec<Value> = vec![];
+
+        let result = merge_import_records(&mut accounts, text, &[0, 0, 5]).unwrap();
+        assert_eq!(result.imported, 2, "索引 0 被合并两次（第二次覆盖）");
+        assert_eq!(result.overwritten, 1);
+        assert_eq!(result.skipped, 1, "越界索引计 skipped");
+        assert_eq!(accounts.len(), 1, "同 uid 不产生副本");
+    }
+
+    /// 密文记录**不得覆盖**本地同 uid 的可用账号（最坏情况：导入一份别人的加密池备份，
+    /// 把本机还能用的账号冲成一条不可用凭据）。凭据判定必须在 uid 匹配之前。
+    #[test]
+    fn foreign_ciphertext_never_overwrites_a_local_account_with_the_same_uid() {
+        let mut accounts = vec![json!({
+            "id": "local-1",
+            "uid": "u-shared",
+            "nickname": "本地可用",
+            "access_token": "GOOD-TOKEN",
+            "refresh_token": "GOOD-REFRESH",
+            "mark": "blue",
+        })];
+
+        let text = r#"[{
+            "uid": "u-shared",
+            "nickname": "别人的加密池",
+            "accessToken": "enc:v1:AAAA",
+            "refreshToken": "enc:v1:BBBB"
+        }]"#;
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+
+        assert_eq!(result.skipped, 1, "密文记录整条跳过");
+        assert_eq!(result.imported, 0);
+        assert_eq!(result.overwritten, 0, "不得计为覆盖");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["access_token"], "GOOD-TOKEN", "本地凭据必须原样保留");
+        assert_eq!(accounts[0]["refresh_token"], "GOOD-REFRESH");
+        assert_eq!(accounts[0]["nickname"], "本地可用");
+        assert_eq!(accounts[0]["mark"], "blue");
+    }
+
     #[test]
     fn export_file_name_rejects_traversal_and_non_json() {
         assert!(validate_export_file_name("../../etc/passwd.json").is_err());

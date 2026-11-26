@@ -15,8 +15,13 @@ use crate::modules::config::{
 const AI_API_ENDPOINT: &str = "https://www.workbuddy.ai";
 /// 国际版 OAuth `platform` 参数。
 const AI_OAUTH_PLATFORM: &str = "workbuddy-ai";
-/// 账号 / 响应 `domain` 判据：该后缀视为国际版。
-const AI_DOMAIN_SUFFIX: &str = ".workbuddy.ai";
+/// 账号 / 响应 `domain` 判据：这些域的 apex 与其子域都视为国际版。
+///
+/// 两个产品域都要认：WorkBuddy 国际版写 `www.workbuddy.ai`，CodeBuddy 系（IDE / 插件 /
+/// CLI）写 `www.codebuddy.ai`，而导入的第三方号池里 `domain` 常常就是**唯一**档位线索。
+/// 只认 `.workbuddy.ai` 时，`www.codebuddy.ai` 会被判成国内版并写进国内桶，切号就会打到
+/// 错误的客户端。
+const AI_DOMAIN_APEXES: [&str; 2] = ["workbuddy.ai", "codebuddy.ai"];
 /// 国际版 billing 接口前缀（实测形态；国内版为 config 里的 `/v2/billing/meter`）。
 const AI_BILLING_PREFIX: &str = "/billing/meter";
 
@@ -95,12 +100,22 @@ pub fn codebuddy_domain_for(domain: &str, variant: WbVariant) -> String {
     }
 }
 
-/// 域名是否为国际版域（只认后缀，避免相似域名被误判）。
+/// 域名是否为国际版域：命中 apex 本身或其子域，其余一律不算。
+///
+/// 判据是**标签边界**的后缀匹配（`workbuddy.ai` / `codebuddy.ai`），因此
+/// `www.workbuddy.ai.evil.com`、`notworkbuddy.ai` 都不会被误判成国际版；
+/// 大小写与前后空白先归一。
 fn has_ai_domain_suffix(domain: &str) -> bool {
-    domain
-        .trim()
-        .to_ascii_lowercase()
-        .ends_with(AI_DOMAIN_SUFFIX)
+    let domain = domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return false;
+    }
+    AI_DOMAIN_APEXES.iter().any(|apex| {
+        domain == *apex
+            || domain
+                .strip_suffix(apex)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 /// WorkBuddy 档位。
@@ -154,8 +169,9 @@ impl WbVariant {
 
     /// 域名是否与本档位相符。
     ///
-    /// 国际版期望 `.workbuddy.ai` 后缀，国内版期望非该后缀；空域名无法判定，
-    /// 视为相符（由调用方按各自的兼容策略决定是否放行）。
+    /// 国际版期望 `workbuddy.ai` / `codebuddy.ai` 的 apex 或子域，国内版期望不是这两个
+    /// （包括 `www.codebuddy.cn` 与企业自建域）；空域名无法判定，视为相符（由调用方按
+    /// 各自的兼容策略决定是否放行）。
     pub fn matches_domain(self, domain: &str) -> bool {
         let domain = domain.trim();
         if domain.is_empty() {
@@ -396,6 +412,45 @@ mod tests {
         );
     }
 
+    /// issue #232 导出号池兼容：`domain` 是导入时唯一的档位线索，CodeBuddy 国际版域
+    /// （含 apex）也必须判成国际版，否则账号会被写进国内桶、切号打到错误的客户端。
+    #[test]
+    fn from_account_recognizes_both_ai_product_domains() {
+        for domain in [
+            "www.codebuddy.ai",
+            "codebuddy.ai",
+            "workbuddy.ai",
+            " www.codebuddy.ai ",
+            "WWW.CODEBUDDY.AI",
+        ] {
+            assert_eq!(
+                WbVariant::from_account(&json!({ "domain": domain })),
+                WbVariant::Ai,
+                "`{domain}` 应为国际版"
+            );
+        }
+
+        // 相似域名仍不得误判（后缀必须落在标签边界上）。
+        for domain in [
+            "www.codebuddy.ai.evil.com",
+            "www.workbuddy.ai.evil.com",
+            "notcodebuddy.ai",
+        ] {
+            assert_eq!(
+                WbVariant::from_account(&json!({ "domain": domain })),
+                WbVariant::Cn,
+                "`{domain}` 不应被判成国际版"
+            );
+        }
+
+        // 回归：显式 `variant` 仍优先于域名兜底。
+        assert_eq!(
+            WbVariant::from_account(&json!({"variant": "cn", "domain": "www.codebuddy.ai"})),
+            WbVariant::Cn,
+            "显式字段优先于域名判定"
+        );
+    }
+
     #[test]
     fn serde_round_trip_uses_lowercase_names() {
         assert_eq!(serde_json::to_string(&WbVariant::Cn).unwrap(), "\"cn\"");
@@ -598,12 +653,19 @@ mod tests {
     fn matches_domain_rejects_cross_variant_responses() {
         assert!(WbVariant::Ai.matches_domain("www.workbuddy.ai"));
         assert!(WbVariant::Ai.matches_domain(" WWW.WORKBUDDY.AI "));
-        assert!(!WbVariant::Ai.matches_domain("www.codebuddy.cn"));
+        // CodeBuddy 系国际版域（issue #232）：apex 与子域都算国际版。
+        assert!(WbVariant::Ai.matches_domain("www.codebuddy.ai"));
+        assert!(WbVariant::Ai.matches_domain("codebuddy.ai"));
+        assert!(WbVariant::Ai.matches_domain("workbuddy.ai"));
         assert!(!WbVariant::Ai.matches_domain("www.workbuddy.ai.evil.com"));
+        assert!(!WbVariant::Ai.matches_domain("www.codebuddy.ai.evil.com"));
+        assert!(!WbVariant::Ai.matches_domain("www.codebuddy.cn"));
 
         assert!(WbVariant::Cn.matches_domain("www.codebuddy.cn"));
         assert!(WbVariant::Cn.matches_domain("www.workbuddy.cn"));
         assert!(!WbVariant::Cn.matches_domain("www.workbuddy.ai"));
+        // 行为修正（旧口径把它当国内版，导致国际版账号被拒/分错桶）。
+        assert!(!WbVariant::Cn.matches_domain("www.codebuddy.ai"));
 
         // 空域名无法判定：不阻断（由调用方决定兼容策略）。
         assert!(WbVariant::Cn.matches_domain(""));

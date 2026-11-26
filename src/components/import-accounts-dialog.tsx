@@ -188,7 +188,16 @@ export function ImportAccountsDialog({
                     onChange={() => toggle(a.index)}
                   />
                   <span className="min-w-0 flex-1 truncate text-sm">{previewLabel(a)}</span>
-                  {a.encrypted ? (
+                  {a.foreignEncrypted ? (
+                    // 第三方号池的 `enc:v1:` 密文：本机解不开，导入会整条跳过 —— 优先于其它徽标，
+                    // 否则用户只会看到「缺少 token」，然后去猜是不是文件选错了。
+                    <Badge
+                      variant="danger"
+                      title="第三方加密池密文，需在对方工具导出明文完整凭证后重试"
+                    >
+                      加密池密文
+                    </Badge>
+                  ) : a.encrypted ? (
                     <Badge variant="secondary">加密凭据</Badge>
                   ) : (
                     !a.hasToken && <Badge variant="outline">缺少 token</Badge>

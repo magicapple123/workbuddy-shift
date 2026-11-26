@@ -2,8 +2,58 @@
 
 use super::*;
 
-/// 解析导出/导入文件文本：必须是 JSON 数组，且每项为 JSON 对象。
+/// 凭据字段的第三方别名（按优先级）：BuddyRelay 之类工具导出的是 camelCase。
 ///
+/// 只用于**补齐**规范键，绝不覆盖已有合法 `access_token` / `refresh_token`。
+const ACCESS_TOKEN_ALIASES: [&str; 2] = ["accessToken", "token"];
+const REFRESH_TOKEN_ALIASES: [&str; 1] = ["refreshToken"];
+
+/// 第三方号池「加密池密文」的前缀：本机无法解密，既不预览成可用凭据，也不入库。
+const FOREIGN_CIPHER_PREFIX: &str = "enc:v1:";
+
+/// 归一化一条导入记录：补齐 `access_token` / `refresh_token`，其余字段原样保留。
+///
+/// - 规范键缺失、空串或不是凭据（普通对象 / 数字等）时，按 [`ACCESS_TOKEN_ALIASES`] /
+///   [`REFRESH_TOKEN_ALIASES`] 的顺序回退；已有合法规范键时**不覆盖**。
+/// - 只加键不改名、不裁剪：`$wbEncrypted` 信封、`auth_raw`、来源端自定义字段都必须原样
+///   透传到账号库（信封依赖本机 keyblob 才能解密，改写即失效）。
+fn normalize_import_record(item: &Value) -> Value {
+    let Value::Object(source) = item else {
+        return item.clone();
+    };
+    let mut record = source.clone();
+    for (canonical, aliases) in [
+        ("access_token", ACCESS_TOKEN_ALIASES.as_slice()),
+        ("refresh_token", REFRESH_TOKEN_ALIASES.as_slice()),
+    ] {
+        if account::secret_value(item, canonical).is_some() {
+            continue;
+        }
+        if let Some(value) = aliases
+            .iter()
+            .find_map(|alias| account::secret_value(item, alias))
+        {
+            record.insert(canonical.to_string(), value);
+        }
+    }
+    Value::Object(record)
+}
+
+/// 该字段值是否为第三方加密池密文（`enc:v1:` 前缀，允许前导空白）。
+///
+/// 这类字符串既不是明文凭据、也不是 WorkBuddy 的 `$wbEncrypted` 信封：本机无法解密，
+/// 导入后只会得到一条「看似有 token、实际不可用」的账号，因此单独识别并明确提示。
+pub(super) fn is_foreign_ciphertext(value: &Value) -> bool {
+    value
+        .as_str()
+        .map(str::trim_start)
+        .is_some_and(|text| text.starts_with(FOREIGN_CIPHER_PREFIX))
+}
+
+/// 解析导出/导入文件文本：必须是 JSON 数组，或 `{ "accounts": [...] }` 包装对象。
+///
+/// 每项都会先经 [`normalize_import_record`] 归一化（第三方号池的 camelCase 凭据字段），
+/// 预览与合并共用这份结果，保证「预览说有凭据」与「导入真的入库」口径一致。
 /// 失败时返回带位置的明确错误文案（非法 JSON / 非数组 / 元素不是对象）。
 pub fn parse_accounts_json(text: &str) -> Result<Vec<Value>, String> {
     if text.trim().is_empty() {
@@ -11,15 +61,21 @@ pub fn parse_accounts_json(text: &str) -> Result<Vec<Value>, String> {
     }
     let parsed: Value =
         serde_json::from_str(text).map_err(|e| format!("文件不是合法的 JSON：{e}"))?;
-    let array = parsed
-        .as_array()
-        .ok_or_else(|| "文件内容应为 JSON 数组（账号列表）".to_string())?;
+    let array = match &parsed {
+        Value::Array(array) => array,
+        // 第三方号池常见 `{ "accounts": [...] }` 包装：只认这一层，别的一律当非数组。
+        Value::Object(map) => map
+            .get("accounts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "文件内容应为 JSON 数组（账号列表）".to_string())?,
+        _ => return Err("文件内容应为 JSON 数组（账号列表）".to_string()),
+    };
     for (index, item) in array.iter().enumerate() {
         if !item.is_object() {
             return Err(format!("文件第 {} 项不是合法的账号对象", index + 1));
         }
     }
-    Ok(array.clone())
+    Ok(array.iter().map(normalize_import_record).collect())
 }
 
 /// 生成导入文件的脱敏预览（含文件内索引，不含 token）。
@@ -28,19 +84,24 @@ pub fn parse_accounts_json(text: &str) -> Result<Vec<Value>, String> {
 /// 列表接口同口径：WorkBuddy 5.6 加密信封等对象/数组不得漏进前端渲染路径，
 /// 否则会被当作 React 子节点渲染导致整树卸载（issue #100）。
 /// `encrypted` 标记 access_token 为加密信封：可导入，但仅切换可用。
+/// `foreignEncrypted` 标记第三方号池的 `enc:v1:` 密文：本机无法解密，既不算有凭据、
+/// 也不入库（前端据此展示「加密池密文」而不是「缺少 token」）。
 pub fn preview_accounts(text: &str) -> Result<Value, String> {
     let array = parse_accounts_json(text)?;
     let items: Vec<Value> = array
         .iter()
         .enumerate()
         .map(|(index, item)| {
+            let foreign_encrypted = item.get("access_token").is_some_and(is_foreign_ciphertext);
             json!({
                 "index": index,
                 "uid": account::display_value(item, "uid"),
                 "nickname": account::display_value(item, "nickname"),
                 "email": account::display_value(item, "email"),
-                "hasToken": account::secret_value(item, "access_token").is_some(),
+                "hasToken": !foreign_encrypted
+                    && account::secret_value(item, "access_token").is_some(),
                 "encrypted": account::is_envelope(item, "access_token"),
+                "foreignEncrypted": foreign_encrypted,
             })
         })
         .collect();
@@ -62,9 +123,13 @@ pub(super) enum MergeOutcome {
 ///
 /// 按 uid 去重：同 uid 覆盖（保留导入记录原样）；uid 缺失或无法匹配则追加。
 /// 凭据判定与采集口径一致（`account::secret_value`）：非空明文串或
-/// `$wbEncrypted` 加密信封均可入库，缺失 / 空串 / 普通对象跳过。
+/// `$wbEncrypted` 加密信封均可入库，缺失 / 空串 / 普通对象跳过；
+/// 第三方 `enc:v1:` 密文同样跳过（本机解不开，写进账号库等于留下一条不可用凭据）。
 pub(super) fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome {
-    if account::secret_value(item, "access_token").is_none() {
+    let Some(token) = account::secret_value(item, "access_token") else {
+        return MergeOutcome::Skipped;
+    };
+    if is_foreign_ciphertext(&token) {
         return MergeOutcome::Skipped;
     }
     if let Some(uid) = account::get_str(item, "uid").as_deref() {

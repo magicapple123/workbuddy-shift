@@ -146,7 +146,12 @@ export function useAccountsPage() {
     toast.success("导出成功", { description: text });
   }
 
-  /** 导入完成提示：计数 + token 可能过期提醒（含加密凭据能力限制），并刷新列表。 */
+  /**
+   * 导入完成提示：计数 + token 可能过期提醒（含加密凭据能力限制），并刷新列表。
+   *
+   * 「0 个成功」必须是警告而不是成功：一份全 `enc:v1:` 的第三方号池文件会整份跳过，
+   * 若仍弹「导入成功」，用户会以为凭证已经在库里，然后对着账号列表找不到东西。
+   */
   function onImported(result: {
     imported: number;
     skipped: number;
@@ -154,6 +159,16 @@ export function useAccountsPage() {
     encrypted: number;
   }) {
     void fetchAll();
+    if (result.imported === 0) {
+      const reason =
+        result.skipped > 0
+          ? `跳过 ${result.skipped} 个：多为第三方加密池密文或缺少凭据。`
+          : "文件里没有可导入的账号。";
+      toast.warning("没有导入任何账号", {
+        description: `${reason}请让对方导出「完整凭证」（明文 access_token / refresh_token）后重试。`,
+      });
+      return;
+    }
     const overwriteText = result.overwritten > 0 ? `（覆盖 ${result.overwritten} 个）` : "";
     const encryptedText =
       result.encrypted > 0
