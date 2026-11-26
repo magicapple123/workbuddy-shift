@@ -83,6 +83,131 @@ fn preview_token_round_trips_and_rejects_foreign_ids() {
     assert!(paths.preview_tokens_dir().join("keep.txt").exists());
 }
 
+/// 目录里的 `.json` 条目数（凭据文件数量）。
+fn json_entry_count(paths: &SessionPaths) -> usize {
+    std::fs::read_dir(paths.preview_tokens_dir())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// issue #19 回归：一次大批量预览在保存过程中不能把自己的凭据挤掉。
+///
+/// 跨组批量同步会先为**所有**目标调用预览、保存凭据，再逐条执行。原来的实现每保存一条就
+/// 裁剪到 `KEEP_PREVIEW_TOKENS - 1` 条，于是第 200 条保存时第 1 条已被删掉，执行到最早的目标
+/// 就报「预览凭据已过期」并 `break`，整批只做完一部分。
+#[test]
+fn bulk_preview_tokens_survive_their_own_prune() {
+    let dir = TempDir::new("preview-bulk");
+    let paths = temp_paths(&dir);
+    let group = group_with_members("g-1", vec![]);
+    let binding = sample_binding(&group);
+
+    // 比单档保留条数多 50 条（当前为 250）：足以越过旧的裁剪水位。
+    let total = KEEP_PREVIEW_TOKENS + 50;
+    let mut ids = Vec::with_capacity(total);
+    for _ in 0..total {
+        ids.push(save_preview_token(&paths, binding.clone()).unwrap());
+    }
+
+    assert_eq!(json_entry_count(&paths), total, "未达高水位时一条凭据都不该被删");
+    // 第 1 条正是旧实现最先删掉的那条；最后一条用来确认「刚保存的凭据立即可用」。
+    for (index, id) in ids.iter().enumerate() {
+        assert!(
+            load_preview_token(&paths, id).is_some(),
+            "第 {} 条凭据在保存过程中被自己清理掉了",
+            index + 1
+        );
+    }
+}
+
+/// 高水位清理：未达阈值一条都不删，达到阈值才裁到 `keep` 条。
+#[test]
+fn prune_over_threshold_only_prunes_at_high_water_mark() {
+    let dir = TempDir::new("preview-watermark");
+    let paths = temp_paths(&dir);
+    let group = group_with_members("g-1", vec![]);
+    let binding = sample_binding(&group);
+
+    for _ in 0..4 {
+        save_preview_token(&paths, binding.clone()).unwrap();
+    }
+    // 4 < 5：不做任何删除（批量预览保存到一半时走的正是这条路径）。
+    assert_eq!(prune_preview_tokens_over(&paths, 2, 5), 0);
+    assert_eq!(json_entry_count(&paths), 4);
+
+    // 补到 5 条：达到阈值，清理后保留最近 2 条。
+    save_preview_token(&paths, binding.clone()).unwrap();
+    assert_eq!(prune_preview_tokens_over(&paths, 2, 5), 3);
+    assert_eq!(json_entry_count(&paths), 2);
+}
+
+/// 未达阈值时不碰任何文件（`.json` 之外的条目同样不受影响）。
+#[test]
+fn prune_over_threshold_leaves_other_files_alone_below_threshold() {
+    let dir = TempDir::new("preview-watermark-keep");
+    let paths = temp_paths(&dir);
+    let tokens_dir = paths.preview_tokens_dir();
+    std::fs::create_dir_all(&tokens_dir).unwrap();
+    std::fs::write(tokens_dir.join("keep.txt"), "x").unwrap();
+    // 扩展名不是 `json`：计数与清理都不该把它算成凭据。
+    std::fs::write(tokens_dir.join("notes.json.bak"), "y").unwrap();
+
+    let group = group_with_members("g-1", vec![]);
+    let binding = sample_binding(&group);
+    for _ in 0..2 {
+        save_preview_token(&paths, binding.clone()).unwrap();
+    }
+
+    // 计数只算 `.json`（2 条），因此未达阈值。
+    assert_eq!(json_entry_count(&paths), 2);
+    assert_eq!(prune_preview_tokens_over(&paths, 1, 5), 0);
+    assert_eq!(json_entry_count(&paths), 2);
+    assert!(tokens_dir.join("keep.txt").exists());
+    assert!(tokens_dir.join("notes.json.bak").exists());
+}
+
+/// 阈值语义的边界：目录不存在、`threshold = 0`、`keep >= count` 都必须返回 0、
+/// 不 panic、不删错文件。
+#[test]
+fn prune_over_threshold_handles_missing_dir_and_zero_bounds() {
+    let dir = TempDir::new("preview-watermark-edge");
+    let paths = temp_paths(&dir);
+    let tokens_dir = paths.preview_tokens_dir();
+
+    // 目录不存在（`prune_preview_tokens_over` 是公开函数，不能假设调用方先建目录）。
+    assert!(!tokens_dir.exists());
+    assert_eq!(prune_preview_tokens_over(&paths, 2, 5), 0);
+    assert!(!tokens_dir.exists(), "只读检查不该顺手建目录");
+
+    // `threshold = 0`：比较条件恒成立，但空目录没有可删的条目。
+    std::fs::create_dir_all(&tokens_dir).unwrap();
+    assert_eq!(prune_preview_tokens_over(&paths, 0, 0), 0);
+
+    // `keep >= count`：条数没超过保留数，一条都不删。
+    let group = group_with_members("g-1", vec![]);
+    let binding = sample_binding(&group);
+    for _ in 0..3 {
+        save_preview_token(&paths, binding.clone()).unwrap();
+    }
+    assert_eq!(prune_preview_tokens_over(&paths, 3, 0), 0);
+    assert_eq!(json_entry_count(&paths), 3);
+
+    // 高水位必须明显高于单档保留数：一次批量超过 `keep` 时，只有把清理推迟到高水位
+    // 才能保证本批凭据不被自己删掉（issue #19 的修复前提）。
+    // 用 const 块写成编译期断言：阈值被调小到 `keep` 附近会直接编译失败。
+    const {
+        assert!(
+            PREVIEW_TOKEN_PRUNE_THRESHOLD > KEEP_PREVIEW_TOKENS,
+            "预览凭据高水位必须高于单档保留数"
+        )
+    };
+}
+
 /// 逐项核对：任一绑定字段变化都必须报出可读原因。
 #[test]
 fn verify_preview_reports_every_binding_mismatch() {

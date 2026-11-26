@@ -20,6 +20,9 @@ use std::path::PathBuf;
 pub const PREVIEW_TOKEN_VERSION: u32 = 2;
 /// 每档位保留的历史预览凭据条数（凭据是一次性的，不做长期保留）。
 pub const KEEP_PREVIEW_TOKENS: usize = 200;
+/// 目录条目达到该阈值才触发清理：远高于单次批量的目标数，
+/// 避免一次大批量预览在保存过程中把自己的凭据挤掉（issue #19）。
+pub const PREVIEW_TOKEN_PRUNE_THRESHOLD: usize = 2_000;
 
 /// 预览时记录的单个成员绑定：执行前逐项核对，任何一项变化都算预览过期。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,9 +155,14 @@ pub fn save_preview_token(paths: &SessionPaths, binding: PreviewBinding) -> Resu
         binding,
     };
     std::fs::create_dir_all(paths.preview_tokens_dir()).map_err(|error| error.to_string())?;
-    // 先清理再写入：清理按时间排序，刚保存的凭据不会被自己的清理删掉
-    // （不受文件系统时间戳精度影响）。
-    prune_preview_tokens(paths, KEEP_PREVIEW_TOKENS.saturating_sub(1));
+    // 达到高水位才清理，本批刚保存的凭据不会被自己删掉：跨组批量同步会先为每个目标保存凭据，
+    // 若每保存一条就裁剪到 `KEEP_PREVIEW_TOKENS`，第 200 条会把第 1 条挤掉，执行到它时
+    // 报「预览已过期」并中断整批（issue #19）。
+    //
+    // 边界：设批量开始时目录已有 L 条、本批 B 个目标，清理会在 L + k 达到阈值时触发；
+    // 若此时已保存的本批凭据超过 keep（即 B > keep 且 2001 - L <= B），仍会裁到本批较早的
+    // 条目。L >= 1800 或 B <= keep 时不会发生；正常分组规模不可达，超过请分批执行。
+    prune_preview_tokens_over(paths, KEEP_PREVIEW_TOKENS, PREVIEW_TOKEN_PRUNE_THRESHOLD);
     let content = serde_json::to_string_pretty(&token).map_err(|error| error.to_string())?;
     atomic_write(&preview_file(paths, &preview_id), &content)
         .map_err(|error| format!("预览凭据写入失败：{error}"))?;
@@ -196,6 +204,24 @@ pub fn prune_preview_tokens(paths: &SessionPaths, keep: usize) -> usize {
         }
     }
     removed
+}
+
+/// 仅在条目数达到 `threshold` 时清理到 `keep` 条；未达阈值不做任何删除。
+///
+/// 计数只看 `.json` 条目名、不取 metadata：这是每保存一条凭据都会走的热路径，
+/// 而「要不要清理」只取决于数量级（见 `PREVIEW_TOKEN_PRUNE_THRESHOLD` 的理由）。
+pub fn prune_preview_tokens_over(paths: &SessionPaths, keep: usize, threshold: usize) -> usize {
+    let Ok(entries) = std::fs::read_dir(paths.preview_tokens_dir()) else {
+        return 0;
+    };
+    let count = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    if count < threshold {
+        return 0;
+    }
+    prune_preview_tokens(paths, keep)
 }
 
 /// 核对预览凭据与实时状态，返回不一致项的说明（空表示一致，可以继续）。
