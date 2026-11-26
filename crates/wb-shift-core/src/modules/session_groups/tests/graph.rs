@@ -397,3 +397,41 @@
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // issue #231：跨组安全批量同步（`sync_all`）
+    // -----------------------------------------------------------------------
+
+    /// 空候选（前端在 N=0 时不会放按钮，但接口必须自己兜住）直接拒绝，不去读任何存储。
+    ///
+    /// 只断言「空入参」这一条：非空入参会去解析真实客户端存储，用例不得读写用户数据。
+    #[test]
+    fn sync_all_safe_rejects_empty_group_list() {
+        let err = sync_all_safe(SessionClient::Workbuddy, None, &[], false).unwrap_err();
+        assert_eq!(err, "没有需要同步的会话组");
+    }
+
+    /// 跨组汇总必须给子报告条目补 `groupId`；内核已带 `groupId` 的条目不能被覆盖。
+    #[test]
+    fn stamp_group_id_backfills_missing_ids_only() {
+        let mut item = json!({
+            "synced": [{ "targetMemberId": "m-1" }, { "groupId": "g-inner", "targetMemberId": "m-2" }],
+            "skipped": [{ "targetMemberId": "m-3", "reasonCode": "previewStale" }],
+            "errors": [{ "error": "写入失败" }],
+            "temporaryFiles": [{ "reason": "待恢复" }],
+        });
+
+        // 助手是 `sync_all` 的私有项（`pub(super)`）：用例按模块路径调用，不为测试放宽可见性。
+        sync_all::stamp_group_id(&mut item, "g-1");
+        assert_eq!(item["synced"][0]["groupId"], "g-1", "缺失 groupId 的条目要补上");
+        assert_eq!(
+            item["synced"][1]["groupId"], "g-inner",
+            "内核已给的 groupId 不得被覆盖"
+        );
+        assert_eq!(item["skipped"][0]["groupId"], "g-1");
+        assert_eq!(item["errors"][0]["groupId"], "g-1");
+        assert!(
+            item["temporaryFiles"][0].get("groupId").is_none(),
+            "临时文件条目不是会话条目，不补 groupId"
+        );
+    }

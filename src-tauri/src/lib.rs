@@ -305,6 +305,7 @@ pub fn run() {
             commands::sync_session_group_pair,
             commands::sync_session_group_unify,
             commands::sync_session_group_safe_batch,
+            commands::sync_all_session_groups_safe,
             commands::add_session_group_member,
             commands::copy_linked_sessions,
             commands::vscode_restart_precheck,

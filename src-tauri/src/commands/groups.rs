@@ -127,6 +127,28 @@ pub async fn sync_session_group_safe_batch(
     .map_err(|error| error.to_string())?
 }
 
+/// 跨组安全批量同步：把当前客户端下所有可安全快进的副本一次同步完。
+///
+/// `group_ids` 由前端从列表载荷筛出（`summaryStatus == "behind"`），后端逐组重算来源与
+/// 复核；分歧组不猜、整组跳过并在报告的 `skippedGroups` 里给出原因。`restart` 缺省 false：
+/// 插件侧运行中需用户确认（确认框授权）后传 true，由后端关闭并在结束后重开一次宿主。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sync_all_session_groups_safe(
+    client: String,
+    variant_scope: Option<String>,
+    group_ids: Vec<String>,
+    restart: Option<bool>,
+) -> Result<Value, String> {
+    let client = session_groups::SessionClient::parse(&client)?;
+    let scope = session_groups::parse_variant_scope(variant_scope.as_deref())?;
+    let restart = restart.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        session_groups::sync_all_safe(client, scope, &group_ids, restart)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn add_session_group_member(
     client: String,

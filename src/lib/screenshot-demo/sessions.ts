@@ -295,6 +295,8 @@ export function buildDemoSessionGroups(
       latestActivityAt: Math.max(...members.map((member) => member.updatedAt)),
       memberCount: members.length,
       activeMemberCount: members.length,
+      // 与后端同一口径：`versionStatus === "behind"` 的成员数（跨组批量同步的候选计数）。
+      behindMemberCount: members.filter((member) => member.versionStatus === "behind").length,
       accountNames: members.map((member) => member.accountName),
       summaryStatus: item.status,
       summaryText: item.status === "behind" ? "有副本落后，可安全同步" : item.status === "latest" ? "关联副本内容一致" : sharedBaseScenario ? "3 个账号在共同旧版，另有 2 条独立更新" : item.status === "diverge" ? "多个副本有不同更新，需要选择来源" : "有副本内容缺失",

@@ -158,6 +158,26 @@ pub(crate) async fn api_sync_session_group_safe_batch(
     }
 }
 
+/// 跨组安全批量同步：只同步可安全快进的副本，分歧组整组跳过（原因在 `skippedGroups`）。
+///
+/// 编辑器生命周期由 core 统一收口（全量就绪后只关 / 开一次）；宿主层只做参数解析。
+pub(crate) async fn api_sync_all_session_groups_safe(
+    body: Result<Json<SessionGroupSyncAllSafeRequest>, JsonRejection>,
+) -> Response {
+    let request = match parse_body(body) {
+        Ok(request) => request,
+        Err(rejection) => return invalid_body(rejection),
+    };
+    let (client, scope) = match client_scope(&request.client, request.variant_scope.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match session_groups::sync_all_safe(client, scope, &request.group_ids, request.restart) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
 pub(crate) async fn api_add_session_group_member(
     body: Result<Json<SessionGroupAddMemberRequest>, JsonRejection>,
 ) -> Response {

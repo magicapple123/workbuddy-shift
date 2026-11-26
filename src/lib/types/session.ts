@@ -272,6 +272,13 @@ export interface SessionGroupSummary {
   latestActivityAt: number;
   memberCount: number;
   activeMemberCount: number;
+  /**
+   * 组内 `versionStatus === "behind"` 的成员数（「跨组安全批量同步」的候选副本数）。
+   *
+   * 老后端没有该字段：消费方按 0 处理（`selectSyncAllCandidates` 已用 `?? 0`），
+   * 只影响确认框里的副本数，不影响能否同步。
+   */
+  behindMemberCount?: number;
   accountNames: string[];
   summaryStatus: SessionGroupStatus;
   summaryText: string;
@@ -376,6 +383,44 @@ export interface SessionGroupCurrentAccount {
   uid?: string | null;
   accountId?: string | null;
   running?: boolean;
+}
+
+/**
+ * 「跨组安全批量同步」的跳过项（`skipped` / `skippedGroups` 共用一套判定口径）。
+ *
+ * 跨组汇总后每条都带 `groupId`；`targetMemberId` 只在「单个副本复核后不再快进」时出现
+ * （整组跳过用 `reasonCode` 说明原因，没有目标成员）。
+ */
+export interface SessionGroupAllSafeSkippedItem {
+  groupId: string;
+  targetMemberId?: string;
+  status?: "skipped";
+  verdict?: SessionSyncVerdict | null;
+  /** `detailFailed` / `noSafeSource` / `noBehind`（整组）/ `previewFailed` / `recheckNotFastForward`（单目标）。 */
+  reasonCode: string;
+  message: string;
+}
+
+/**
+ * 跨组安全批量同步报告（issue #231）。
+ *
+ * `groups` 为本次涉及的组与目标数，`skippedGroups` 为整组跳过的原因；`synced` / `skipped` /
+ * `errors` 是跨组汇总，条目内一律带 `groupId` 便于回溯。编辑器生命周期由后端统一收口：
+ * 全程只关 / 开一次宿主，`restartedEditor` 表示本次确实由工具关闭并重开成功。
+ */
+export interface SessionGroupAllSafeReport {
+  client: SessionGroupClient;
+  variantScope: WbVariant | null;
+  groups: { groupId: string; title: string; targetCount: number }[];
+  skippedGroups: { groupId: string; title: string; reasonCode: string; message: string }[];
+  synced: SessionSyncResultItem[];
+  skipped: SessionGroupAllSafeSkippedItem[];
+  errors: { groupId?: string; error: string }[];
+  needsRecovery: boolean;
+  temporaryFiles: TemporaryFileInfo[];
+  restartedEditor?: boolean;
+  /** 写入已完成但宿主未能自动重新打开（无 `errors` 数组时用它兜底）。 */
+  editorError?: string;
 }
 
 export interface SessionGroupActionReport {

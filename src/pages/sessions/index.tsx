@@ -32,6 +32,7 @@ import { useSessionDetail } from "./hooks/use-session-detail";
 import { useSessionGroups } from "./hooks/use-session-groups";
 import { canPruneGroups, pruneConfirmDescription, showPruneEntry } from "./prune";
 import { restartDialogCopy } from "./restart";
+import { selectSyncAllCandidates, syncAllDialogCopy } from "./sync-all";
 
 export default function SessionsPage() {
   const { accounts, fetchAll } = useAccountsStore();
@@ -157,6 +158,13 @@ export default function SessionsPage() {
   );
   /** 运行中确认框文案：按客户端分派（JetBrains 会关闭 IDEA / PyCharm 并逐个重开）。 */
   const restartCopy = restartDialogCopy(client);
+  // 跨组批量同步的候选（只含 `behind` 组）：N>0 才显示入口，文案按客户端说明是否关宿主。
+  const syncAllCandidates = selectSyncAllCandidates(list.groups);
+  const syncAllCopy = syncAllDialogCopy(
+    client,
+    actions.syncAllTarget?.groupCount ?? syncAllCandidates.groupCount,
+    actions.syncAllTarget?.memberCount ?? syncAllCandidates.memberCount,
+  );
   const statusOptions = [    ["all", "全部"], ["behind", "待同步"], ["diverge", "有分歧"], ["latest", "内容一致"],
     ["missing", "内容缺失"], ["unknown", "无法确认"],
   ];
@@ -174,6 +182,7 @@ export default function SessionsPage() {
             </div>
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={list.loading || detail.detailLoading}><RefreshCw className={list.loading ? "animate-spin" : undefined} />刷新</Button>
+              {syncAllCandidates.groupCount > 0 && <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.requestSyncAll(list.groups)} disabled={actions.actionBusy || list.loading}><RefreshCw className={actions.actionBusy ? "animate-spin" : undefined} />同步 {syncAllCandidates.groupCount} 个待同步组</Button>}
               {showPruneEntry({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount }) && <span className="shrink-0" title={list.pruneBlocked ?? undefined}><Button variant="outline" size="sm" onClick={() => void actions.requestPrune()} disabled={!canPruneGroups({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount, busy: actions.actionBusy || list.loading, blockedReason: list.pruneBlocked })}><Eraser />清理失效关联组</Button></span>}
               <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} prefill={rebuildPrefill} onPrefillConsumed={() => setRebuildPrefill(null)} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
             </div>
@@ -243,6 +252,20 @@ export default function SessionsPage() {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={actions.actionBusy}>取消</AlertDialogCancel>
             <DemoAction><Button variant="destructive" disabled={actions.actionBusy} onClick={() => void actions.deleteGroup()}>{actions.actionBusy ? "处理中…" : "确认删除关联"}</Button></DemoAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {/* 跨组批量同步：一次确认把所有可安全快进的副本同步完，分歧组跳过并说明原因。 */}
+      <AlertDialog open={!!actions.syncAllTarget} onOpenChange={(open) => { if (!open && !actions.actionBusy) actions.setSyncAllTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{syncAllCopy.title}</AlertDialogTitle>
+            <AlertDialogDescription>{syncAllCopy.description}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {actions.actionBusy && <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{syncAllCopy.busyText}</p>}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={actions.actionBusy}>取消</AlertDialogCancel>
+            <DemoAction><Button disabled={actions.actionBusy} onClick={() => void actions.confirmSyncAll()}>{actions.actionBusy ? "同步中…" : "开始同步"}</Button></DemoAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

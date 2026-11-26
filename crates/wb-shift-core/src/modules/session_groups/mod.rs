@@ -118,6 +118,7 @@ mod liveness;
 mod maintenance;
 mod members;
 mod sync;
+mod sync_all;
 mod view;
 
 pub use graph::{sync_safe_batch, sync_unify_batch, GroupUnifyTarget};
@@ -126,6 +127,7 @@ pub use members::{
     add_member, copy_linked_sessions, delete_group, list_account_sessions, remove_member,
 };
 pub use sync::{jetbrains_restart_precheck, preview_pair, sync_pair, vscode_restart_precheck};
+pub use sync_all::sync_all_safe;
 pub use view::{detail, list};
 // 用例注入临时数据根后读组详情（断言 `summaryStatus` / `divergence`）；生产仍走 `detail`。
 // 与 `session_link::real_read_count` 同形：只在测试构建里导出，避免生产构建出现未使用导入。
@@ -169,4 +171,5 @@ mod tests {
     include!("tests/plugin_liveness.rs");
     include!("tests/members.rs");
     include!("tests/graph.rs");
+    include!("tests/sync_all.rs");
 }

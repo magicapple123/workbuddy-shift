@@ -3,6 +3,7 @@ import type {
   SessionCopyReport,
   SessionLinksPreview,
   SessionSyncMode,
+  SessionGroupAllSafeReport,
   SessionGroupClient,
   SessionGroupList,
   SessionGroupDetail,
@@ -125,6 +126,28 @@ export function syncSessionGroupUnify(args: {
 export function syncSessionGroupSafeBatch(client: SessionGroupClient, groupId: string, variantScope?: WbVariant, restart?: boolean): Promise<SessionGroupActionReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("sync_session_group_safe_batch", { client, groupId, ...(variantScope ? { variantScope } : {}), ...(restart ? { restart: true } : {}) });
+}
+
+/**
+ * 跨组安全批量同步：一次把多个关联组的「可安全快进副本」同步完。
+ *
+ * `groupIds` 由页面用 `selectSyncAllCandidates` 从列表载荷筛出（`summaryStatus === "behind"`）；
+ * 后端逐组重算安全来源并复核，分歧组整组跳过（原因在报告的 `skippedGroups` 里），
+ * 编辑器生命周期全程只关 / 开一次。`restart` 只在确认框授权后传 `true`。
+ */
+export function syncAllSessionGroupsSafe(
+  client: SessionGroupClient,
+  groupIds: string[],
+  variantScope?: WbVariant,
+  restart?: boolean,
+): Promise<SessionGroupAllSafeReport> {
+  if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
+  return call("sync_all_session_groups_safe", {
+    client,
+    groupIds,
+    ...(variantScope ? { variantScope } : {}),
+    restart: restart === true,
+  });
 }
 
 export function addSessionGroupMember(args: {

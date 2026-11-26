@@ -509,6 +509,12 @@ pub(super) fn group_payload(
         "latestActivityAt": latest_activity_at,
         "memberCount": group.members.len(),
         "activeMemberCount": active.len(),
+        // 「跨组安全批量同步」的候选计数：前端据此显示「同步 N 个待同步组」并汇总副本数，
+        // 不必为了算一个数字再把每个组详情都拉一遍。
+        "behindMemberCount": views
+            .iter()
+            .filter(|view| view.version_status == "behind")
+            .count(),
         "accountNames": account_names,
         "summaryStatus": summary_status,
         "summaryText": summary_text(summary_status),

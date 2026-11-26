@@ -256,6 +256,20 @@ pub(crate) struct SessionGroupSyncSafeRequest {
     pub(crate) restart: bool,
 }
 
+/// `POST /api/session-groups/sync-safe-all`。
+///
+/// 跨组安全批量同步：`groupIds` 由前端从列表载荷筛出（`summaryStatus == "behind"`），
+/// 后端逐组重算安全来源并复核；分歧组整组跳过（原因在报告的 `skippedGroups` 里）。
+/// 与 Tauri command `sync_all_session_groups_safe` 的参数逐字一致（`restart` 缺省 false）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct SessionGroupSyncAllSafeRequest {
+    pub(crate) client: String,
+    pub(crate) variant_scope: Option<String>,
+    pub(crate) group_ids: Vec<String>,
+    pub(crate) restart: bool,
+}
+
 /// `POST /api/session-groups/preview`。
 ///
 /// 预览不接受写入参数（previewToken / mode / restart），与 Tauri command 同形；

@@ -10,10 +10,14 @@ import type {
   SessionSyncMode,
   WbVariant,
 } from "@/lib/types";
-import { variantLabel } from "@/lib/variant";
 
+// 同步结果的提示文案在 `../notify`（纯函数 + 单测）：这里只负责在动作结束后发一次。
+import { emitSyncToasts } from "../notify";
+import type { SyncToastReport } from "../notify";
 import { attemptPrune, pruneFailureDescription, runPrune } from "../prune";
 import { restartPrecheckClient } from "../restart";
+import { selectSyncAllCandidates } from "../sync-all";
+import type { SyncAllCandidateGroup, SyncAllCandidates } from "../sync-all";
 import type { SessionDetailController } from "./use-session-detail";
 
 export interface SessionActionsController {
@@ -25,9 +29,14 @@ export interface SessionActionsController {
   /** dry-run 统计结果：非空即打开「清理失效关联组」二次确认框。 */
   pruneTarget: SessionGroupPruneReport | null;
   setPruneTarget: (target: SessionGroupPruneReport | null) => void;
+  /** 跨组批量同步的候选：非空即打开确认框（`null` = 未在确认）。 */
+  syncAllTarget: SyncAllCandidates | null;
+  setSyncAllTarget: (target: SyncAllCandidates | null) => void;
   prepareUnify: (source: SessionGroupMemberDetail) => Promise<void>;
   confirmUnify: () => Promise<void>;
   syncSafeBatch: () => Promise<void>;
+  requestSyncAll: (groups: readonly SyncAllCandidateGroup[]) => void;
+  confirmSyncAll: () => Promise<void>;
   addMember: () => Promise<void>;
   confirmRestart: () => Promise<void>;
   unlinkMember: (member: SessionGroupMemberDetail) => Promise<void>;
@@ -72,6 +81,8 @@ export function useSessionActions({
   const [actionBusy, setActionBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionGroupSummary | null>(null);
   const [pruneTarget, setPruneTarget] = useState<SessionGroupPruneReport | null>(null);
+  /** 跨组批量同步的候选（确认框打开时非空）。 */
+  const [syncAllTarget, setSyncAllTarget] = useState<SyncAllCandidates | null>(null);
   /** 插件侧「宿主运行中」的确认框：确认后执行 run（带 restart），取消则丢弃。 */
   const [restartPrompt, setRestartPrompt] = useState<{ actionLabel: string; run: () => Promise<void> } | null>(null);
 
@@ -131,9 +142,10 @@ export function useSessionActions({
           targets: actions.map(({ target, preview, mode }) => ({ targetMemberId: target.memberId, previewToken: preview.previewToken!, mode })),
           ...(restart ? { restart: true } : {}),
         });
-        notifyResult(report);
+        emitSyncToasts(report);
       } else {
-        const combined: { synced: unknown[]; skipped: unknown[]; errors: { error: string }[]; needsRecovery: boolean } = { synced: [], skipped: [], errors: [], needsRecovery: false };
+        // 逐目标串行调用，把结果汇总成与单组报告同形的一份（`SyncToastReport` 是它的公共子集）。
+        const combined: Required<Pick<SyncToastReport, "synced" | "skipped" | "errors" | "needsRecovery">> = { synced: [], skipped: [], errors: [], needsRecovery: false };
         for (const { target, preview, mode } of actions) {
           try {
             const report = await api.syncSessionGroupPair({
@@ -150,7 +162,7 @@ export function useSessionActions({
             break;
           }
         }
-        notifyResult(combined);
+        emitSyncToasts(combined);
       }
       await detail.reloadSelectedGroup();
     } catch (error) {
@@ -181,10 +193,53 @@ export function useSessionActions({
     setActionBusy(true);
     try {
       const report = await api.syncSessionGroupSafeBatch(client, currentDetail.groupId, scope, restart);
-      notifyResult(report);
+      emitSyncToasts(report);
       await detail.reloadSelectedGroup();
     } catch (error) {
       toast.error("批量同步失败", { description: api.asError(error) });
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  /**
+   * 打开「跨组安全批量同步」确认框。
+   *
+   * 只把 `behind` 组放进候选（纯逻辑在 `../sync-all`）：没有候选时直接提示，不弹一个
+   * 「0 个组」的确认框 —— 那只会让用户以为按钮坏了。
+   */
+  function requestSyncAll(groups: readonly SyncAllCandidateGroup[]) {
+    if (actionBusy) return;
+    const candidates = selectSyncAllCandidates(groups);
+    if (candidates.groupCount === 0) {
+      toast.info("没有需要同步的会话组", {
+        description: "当前客户端的关联组都已是最新，或存在分歧需要打开该组手动选择保留哪一份。",
+      });
+      return;
+    }
+    setSyncAllTarget(candidates);
+  }
+
+  /**
+   * 确认跨组批量同步：插件侧带 `restart`（确认框已告知会关闭并重开），其余客户端不带。
+   *
+   * 后端逐组重算来源并复核、只做安全快进，编辑器生命周期全程只关 / 开一次；这里只负责把
+   * 结果讲清楚（成功、跳过原因、失败与待恢复）并刷新列表与已打开的详情。
+   */
+  async function confirmSyncAll() {
+    const target = syncAllTarget;
+    if (!target || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const restart = client === "vscodeExt" || client === "jetbrains";
+      const report = await api.syncAllSessionGroupsSafe(client, target.groupIds, scope, restart);
+      emitSyncToasts(report);
+      setSyncAllTarget(null);
+      await reloadGroups();
+      if (detail.detail) await detail.reloadSelectedGroup();
+    } catch (error) {
+      // 失败时保留确认框，方便直接重试（后端在失败路径上不写入半条记录）。
+      toast.error("跨组同步失败", { description: api.asError(error) });
     } finally {
       setActionBusy(false);
     }
@@ -374,9 +429,13 @@ export function useSessionActions({
     setDeleteTarget,
     pruneTarget,
     setPruneTarget,
+    syncAllTarget,
+    setSyncAllTarget,
     prepareUnify,
     confirmUnify,
     syncSafeBatch,
+    requestSyncAll,
+    confirmSyncAll,
     addMember,
     confirmRestart,
     unlinkMember,
@@ -384,28 +443,4 @@ export function useSessionActions({
     requestPrune,
     confirmPrune,
   };
-}
-
-function notifyResult(report: {
-  synced?: unknown[];
-  skipped?: unknown[];
-  errors?: { error: string }[];
-  needsRecovery?: boolean;
-  temporaryFiles?: { reason: string }[];
-  restartedVariants?: WbVariant[];
-  restartedEditor?: boolean;
-  editorError?: string;
-}, targetName?: string) {
-  const synced = report.synced?.length ?? 0;
-  const skipped = report.skipped?.length ?? 0;
-  const errors = report.errors ?? [];
-  const restartHint = report.restartedVariants?.length
-    ? `，已重新打开 ${report.restartedVariants.map(variantLabel).join("、")}`
-    : report.restartedEditor ? "，已重新打开 VS Code" : "";
-  if (synced > 0) toast.success(targetName ? `已同步到「${targetName}」` : `已同步 ${synced} 个会话`, { description: `完成 ${synced} 项${restartHint}` });
-  if (skipped > 0) toast.warning(`有 ${skipped} 项跳过`, { description: "预览过期或复核后不再符合安全条件的项不会计为成功。" });
-  if (errors.length > 0) toast.error("部分会话同步失败", { description: errors.map((item) => item.error).join("；") });
-  if (report.needsRecovery) toast.error("会话操作待恢复", { description: report.temporaryFiles?.map((item) => item.reason).join("；") || "已保留恢复所需材料。" });
-  if (report.editorError) toast.warning("VS Code 未能自动重新打开", { description: report.editorError });
-  if (synced === 0 && skipped === 0 && errors.length === 0 && !report.needsRecovery) toast.info("当前没有需要同步的副本");
 }

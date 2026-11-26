@@ -107,6 +107,7 @@ const ROUTES: Record<string, Route> = {
   sync_session_group_pair: { method: "POST", path: "/api/session-groups/sync" },
   sync_session_group_unify: { method: "POST", path: "/api/session-groups/unify" },
   sync_session_group_safe_batch: { method: "POST", path: "/api/session-groups/sync-safe" },
+  sync_all_session_groups_safe: { method: "POST", path: "/api/session-groups/sync-safe-all" },
   add_session_group_member: { method: "POST", path: "/api/session-groups/add" },
   copy_linked_sessions: { method: "POST", path: "/api/session-groups/copy-linked" },
   vscode_restart_precheck: { method: "POST", path: "/api/vscode-ext/restart-precheck" },

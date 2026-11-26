@@ -127,6 +127,10 @@ pub fn router(state: SharedState) -> Router {
             post(api_sync_session_group_safe_batch),
         )
         .route(
+            "/api/session-groups/sync-safe-all",
+            post(api_sync_all_session_groups_safe),
+        )
+        .route(
             "/api/session-groups/add",
             post(api_add_session_group_member),
         )
