@@ -1,6 +1,7 @@
 import { CircleAlert, Loader2 } from "lucide-react";
 import { creditResourceName } from "@/lib/credit-package-names";
 import { formatAmount, formatFullDateTime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import type {
   CreditExpiry,
 } from "@/lib/types";
@@ -52,7 +53,7 @@ export function ResourceBreakdown({ credit, loading }: { credit?: CreditExpiry; 
               </div>
             </div>
             <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-              <div className="h-full rounded-full bg-emerald-500/75" style={{ width: `${ratio}%` }} />
+              <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-emerald-500/75")} style={{ width: `${ratio}%` }} />
             </div>
           </div>
         );

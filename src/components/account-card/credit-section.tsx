@@ -159,7 +159,12 @@ export function CreditResourceRow({ resource, compact, placeholderLabel }: { res
   const expiryText = resource ? formatCreditExpiry(resource.expireAt) : "\u00a0";
   const expiryTitle = resource?.expireAt ? `${expiryText} 到期` : expiryText;
   const ratio = resource && resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
-  const barTone = resource && (resource.expiringSoon || resource.expired) ? "bg-orange-500" : "bg-emerald-500";
+  // 三态与「全部积分包」弹窗保持一致：已过期红 / 即将过期橙 / 其它绿。
+  const barTone = resource?.expired
+    ? "bg-red-600/60 dark:bg-red-400/60"
+    : resource?.expiringSoon
+      ? "bg-orange-500"
+      : "bg-emerald-500";
   const title = resource ? `${name} · 剩余 ${formatAmount(resource.remaining)} / ${formatAmount(resource.total)} · ${expiryTitle}` : undefined;
   return (
     <div className={cn("min-w-0", placeholder && "invisible")} aria-hidden={placeholder || undefined} title={title}>
