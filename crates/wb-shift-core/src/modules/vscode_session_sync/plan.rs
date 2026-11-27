@@ -162,6 +162,12 @@ pub(crate) struct SyncItemPlan {
     pub(super) target_uid: String,
     /// 备份根目录名（`<工具存储根>/backups/<backup_kind>/<utc_iso>/`）。
     pub(super) backup_kind: &'static str,
+    /// R6-07：该数据仓的归属命名空间（`ns_for_client_dir(context.spec.client_dir)`）。
+    ///
+    /// `None` 表示未知客户端：不记归属索引，退化为 R6-07 之前的行为。
+    /// 执行阶段拿不到 `SessionStoreSpec`，因此在这里（`plan_sync_item` 里有 `context.spec`）
+    /// 一次算好带下来。
+    pub(super) ns: Option<&'static str>,
     pub(super) source_content: ContentSnapshot,
     pub(super) target_content: ContentSnapshot,
 }
@@ -292,6 +298,10 @@ pub(super) fn plan_sync_item(
         target_conversation_id: target_member.session_id.clone(),
         target_uid: context.target_uid.to_string(),
         backup_kind: context.spec.backup_kind,
+        // R6-07：命名空间与读侧（`token_stats::ide_client_source`）、写入侧
+        // （`vscode_session::copy_sessions_in_with`）共用同一份 `client_dir` 映射。
+        ns: crate::modules::usage_origin::IdeClientSource::from_client_dir(context.spec.client_dir)
+            .map(|client| client.namespace()),
         source_content: source_snapshot.clone(),
         target_content: target_snapshot.clone(),
     }))
