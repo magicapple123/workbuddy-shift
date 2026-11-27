@@ -5746,6 +5746,7 @@ dependencies = [
  "uuid",
  "windows 0.58.0",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
