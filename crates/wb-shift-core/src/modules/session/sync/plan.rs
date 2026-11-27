@@ -134,7 +134,15 @@ pub(in crate::modules::session) fn plan_sync_selection(
     );
     let mismatches = session_link::verify_preview(&token, &live);
     if !mismatches.is_empty() {
-        return skip(format!("检查结果已失效：{}", mismatches.join("；")));
+        // 这里是 issue #3 的真实路径：预览时正文完好、之后正文损坏，凭据核对会先命中
+        // （它排在模式门禁之前），于是用户只看得到「内容已变化」，看不到「坏在第几行」。
+        // 至少一侧不可验证时把当前内容状态补在后面；两侧都 Ready 只是内容变多变少时不补，
+        // 那种情况没有「哪一侧坏了」可讲，多说反而误导。
+        let sides = unverifiable_sides(&source_content, &target_content);
+        let detail = sides
+            .map(|sides| format!("（当前内容状态：{sides}）"))
+            .unwrap_or_default();
+        return skip(format!("检查结果已失效：{}{detail}", mismatches.join("；")));
     }
     // 本次是否随写入把目标对齐为归档：凭据里授权过才允许，且必须在本次重新核验。
     let archive_authorized = binding.archive_action.as_deref() == Some(ARCHIVE_ACTION_STATUS_ONLY);
@@ -155,19 +163,30 @@ pub(in crate::modules::session) fn plan_sync_selection(
             };
         }
     } else if !decision.verdict.allows(selection.mode) {
+        // 前缀逐字保留（前端提示与既有测试按 `该组判定为 X，不允许以 Y 模式同步` 匹配），
+        // 只在后面补上判定自己的原因：`decide_sync` 已经算出了「两边各改了什么」「哪一侧
+        // 内容无法确认、坏在第几行」这些可读事实，丢掉它们用户只剩一句没有信息量的话，
+        // 只能反复回报同一个 issue（issue #3 三轮仍未定位）。
         return SyncItemOutcome::Rejected {
             message: format!(
-                "该组判定为 {}，不允许以 {} 模式同步",
+                "该组判定为 {}，不允许以 {} 模式同步：{}",
                 decision.verdict.as_str(),
-                selection.mode.as_str()
+                selection.mode.as_str(),
+                decision.reason
             ),
         };
     }
     // 判定非 unknown 必然双方正文可验证（decide_sync 的前置条件），这里仍然显式兜底。
+    // 兜底文案同样要带上「哪一侧、为什么」：正文末行半截、成员行缺失、预览过期是不同的
+    // 故障，用户与排障者必须能从这句话里分辨出来。
     let (ContentState::Ready(source_snapshot), ContentState::Ready(target_snapshot)) =
         (&source_content, &target_content)
     else {
-        return skip("双方内容不可验证，检查结果已失效".to_string());
+        // 两侧都不可验证时才走到这里；真出现「两侧都可验证」的误用，也不能编造原因。
+        return skip(match unverifiable_sides(&source_content, &target_content) {
+            Some(sides) => format!("双方内容不可验证，检查结果已失效（{sides}）"),
+            None => "双方内容不可验证，检查结果已失效".to_string(),
+        });
     };
     // 归档资格在写入前重新核验（来源仍已归档、目标仍在终态白名单）；任一项不满足
     // 整体判为预览失效，不静默执行另一组副作用。
@@ -240,6 +259,53 @@ pub(in crate::modules::session) fn plan_sync_selection(
             target_status_before,
             reason: decision.reason,
         }),
+    }
+}
+
+/// 两侧内容状态的可读说明，供「内容不可验证」的文案说明**是哪一侧**、**为什么**。
+///
+/// 只写确实不可验证的那一侧：两侧都不 Ready 时两侧都写，只有一侧不 Ready 时只写那一侧，
+/// 免得把「另一侧没问题」也写进拒绝理由里误导用户。两侧都 Ready 时返回 `None`——
+/// 「只是内容变多变少」没有「哪一侧坏了」可讲，调用方据此不追加任何内容状态说明。
+pub(in crate::modules::session) fn unverifiable_sides(
+    source: &ContentState,
+    target: &ContentState,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+    if !matches!(source, ContentState::Ready(_)) {
+        parts.push(format!(
+            "来源：{}",
+            side_content_reason(SOURCE_ACCOUNT_LABEL, source)
+        ));
+    }
+    if !matches!(target, ContentState::Ready(_)) {
+        parts.push(format!(
+            "目标：{}",
+            side_content_reason(TARGET_ACCOUNT_LABEL, target)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
+}
+
+/// 侧别称谓：与 `decide_sync` 的判定原因逐字同口径，不新造术语。
+///
+/// 用户先在预览里看到「当前账号的内容无法确认：第 N 行的格式无法识别…」，执行时再看到
+/// 同一句话，才能确认「点同步之前就坏了，不是我点错了」。
+pub(in crate::modules::session) const SOURCE_ACCOUNT_LABEL: &str = "当前账号";
+pub(in crate::modules::session) const TARGET_ACCOUNT_LABEL: &str = "目标账号";
+
+/// 单侧内容状态的说明；`account` 只取 [`SOURCE_ACCOUNT_LABEL`] / [`TARGET_ACCOUNT_LABEL`]。
+///
+/// 三个分支的措辞与 `decide_sync` 的 `Unknown` 文案一一对应（缺失 / 不可验证），
+/// 这样两处提示不会各说一套。
+pub(in crate::modules::session) fn side_content_reason(
+    account: &str,
+    state: &ContentState,
+) -> String {
+    match state {
+        ContentState::Ready(_) => format!("{account}的内容可验证"),
+        ContentState::Missing => format!("{account}的内容不存在，无法确认"),
+        ContentState::Unavailable(reason) => format!("{account}的内容无法确认：{reason}"),
     }
 }
 

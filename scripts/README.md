@@ -225,6 +225,7 @@ macOS / Linux 直接 `pnpm run tauri dev` 即可；单实例锁在 macOS 上由
 
 | 脚本 | 用途 |
 |---|---|
+| `diagnostics/diagnose-sync-failure.py` | 诊断切号时「同步失败」的真实原因：两侧 DB 行 / 正文末行健康度 / 同名正文副本 / 未完成操作日志的 `lastError` / 末条 assistant 是否带模型报错 + 一组近似判定（只读，可 `--json`） |
 | `diagnostics/fix-incomplete-turns.py` | 修复"复制过来的会话显示思考中"（正文末条 `incomplete`） |
 | `diagnostics/repair-session-space.py` | 回填跨账号复制导致的 `space_id` 错位 |
 | `diagnostics/check-body-health.py` / `diagnostics/check-record-count.py` | 会话正文健康度体检（只读） |

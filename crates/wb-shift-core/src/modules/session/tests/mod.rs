@@ -389,6 +389,8 @@ include!("run.rs");
 
 include!("sync.rs");
 
+include!("sync_plan_reasons.rs");
+
 include!("exec.rs");
 
 include!("recovery.rs");
