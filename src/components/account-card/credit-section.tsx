@@ -24,7 +24,6 @@ export function AccountCreditSection({ account, compact, credit, creditLoading, 
   const resources = creditResources(credit);
   const visibleResources = resources.slice(0, 2);
   const expiringAmount = credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
-  const allResources = resources;
   return (
     <>
       <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-4 pt-3" : "px-5 pb-5 pt-4")}>
@@ -98,13 +97,13 @@ export function AccountCreditSection({ account, compact, credit, creditLoading, 
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>全部积分包</DialogTitle>
-            <DialogDescription>{name} · 共 {allResources.length} 个积分包</DialogDescription>
+            <DialogDescription>{name} · 共 {resources.length} 个积分包</DialogDescription>
           </DialogHeader>
-          {allResources.length === 0 ? (
+          {resources.length === 0 ? (
             <div className="px-1 py-6 text-center text-sm text-muted-foreground">当前没有可展示的资源包。</div>
           ) : (
             <div className="max-h-[60vh] min-w-0 overflow-y-auto divide-y divide-border/60">
-              {allResources.map((resource, index) => {
+              {resources.map((resource, index) => {
                 const ratio = resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
                 return (
                   <div key={`${resource.packageCode || resource.packageName || "resource"}-${index}`} className="min-w-0 py-3 first:pt-0 last:pb-0">
@@ -121,7 +120,7 @@ export function AccountCreditSection({ account, compact, credit, creditLoading, 
                       </div>
                     </div>
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                      <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-emerald-500/75")} style={{ width: `${ratio}%` }} />
+                      <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-[var(--data-series-blue)]")} style={{ width: `${ratio}%` }} />
                     </div>
                   </div>
                 );
@@ -159,12 +158,13 @@ export function CreditResourceRow({ resource, compact, placeholderLabel }: { res
   const expiryText = resource ? formatCreditExpiry(resource.expireAt) : "\u00a0";
   const expiryTitle = resource?.expireAt ? `${expiryText} 到期` : expiryText;
   const ratio = resource && resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
-  // 三态与「全部积分包」弹窗保持一致：已过期红 / 即将过期橙 / 其它绿。
+  // 三态与「全部积分包」弹窗保持一致：已过期红 / 即将过期橙 / 其它用主题数据蓝
+  // （蓝是「正常可用」的中性状态色；绿已从数据色板移除，见 docs 里的配色约定）。
   const barTone = resource?.expired
     ? "bg-red-600/60 dark:bg-red-400/60"
     : resource?.expiringSoon
       ? "bg-orange-500"
-      : "bg-emerald-500";
+      : "bg-[var(--data-series-blue)]";
   const title = resource ? `${name} · 剩余 ${formatAmount(resource.remaining)} / ${formatAmount(resource.total)} · ${expiryTitle}` : undefined;
   return (
     <div className={cn("min-w-0", placeholder && "invisible")} aria-hidden={placeholder || undefined} title={title}>

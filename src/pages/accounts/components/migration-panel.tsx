@@ -1,11 +1,10 @@
-import { ExternalLink, FileDown, FileUp, QrCode } from "lucide-react";
+import { ExternalLink, QrCode } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { Button } from "@/components/ui/button";
-import * as api from "@/lib/api";
 import type { WbVariant } from "@/lib/types";
 
-import { EncryptedBackupActions } from "./encrypted-backup-actions";
+import { AccountBackupActions } from "./account-backup-actions";
 
 interface Props {
   variant: WbVariant;
@@ -17,7 +16,13 @@ interface Props {
   onEncryptedImported?: () => void;
 }
 
-/** 「添加与迁移账号」面板：OAuth 接入、导入备份、导出账号（含加密导入/导出）。 */
+/**
+ * 「添加与迁移账号」面板：OAuth 接入 + 备份动作组（`[导入备份 |▾]`、`[导出 |▾]`）。
+ *
+ * 备份动作的交互结构（明文 / 加密两个档位、WebUI 降级、0 账号禁用、键盘可达性）
+ * 全部收进 `AccountBackupActions`，本面板只留一行调用：这里是页面布局，那里是按钮行为，
+ * 混在一起会让「改 ▾ 的可用性」和「改面板留白」互相拖后腿。
+ */
 export function AccountMigrationPanel({
   variant,
   accountCount,
@@ -26,9 +31,6 @@ export function AccountMigrationPanel({
   onExport,
   onEncryptedImported,
 }: Props) {
-  // 加密导入/导出要本机绝对路径（保存/打开对话框产物），WebUI 与演示模式没有等价入口。
-  const showEncrypted = api.isDesktop() && !api.isDemoMode();
-
   return (
     <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-[0_6px_20px_rgba(15,23,42,.025)]">
       <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
@@ -52,29 +54,12 @@ export function AccountMigrationPanel({
             </Button>
           </DemoAction>
         </div>
-        <div className="flex items-center gap-1">
-          <DemoAction>
-            <Button variant="ghost" size="sm" className="h-9 px-2.5" onClick={onImport} title="从备份文件导入账号">
-              <FileUp />导入备份
-            </Button>
-          </DemoAction>
-          <DemoAction>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-9 px-2.5"
-              onClick={onExport}
-              disabled={accountCount === 0}
-              title="导出账号备份"
-            >
-              <FileDown />导出
-            </Button>
-          </DemoAction>
-          {/* issue #186：加密导入/导出只在桌面端出现（需要本机绝对路径）。 */}
-          {showEncrypted ? (
-            <EncryptedBackupActions accountCount={accountCount} onImported={onEncryptedImported} />
-          ) : null}
-        </div>
+        <AccountBackupActions
+          accountCount={accountCount}
+          onImport={onImport}
+          onExport={onExport}
+          onImported={onEncryptedImported}
+        />
       </div>
     </div>
   );
