@@ -443,7 +443,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/token_stats/tests/origin.rs` | 508 | 测试 | R6-07 归属测试（segments/链式/反向同步/共享指纹/回填）需要同一批造数函数与临时 home。 | 保留；继续膨胀时按「读取侧」「写入侧」拆两组。 |
 | `crates/wb-shift-core/src/modules/usage_origin/mod.rs` | 573 | 归属索引 | 索引的读写、段合并/截断、复制与同步交接、GC、回填一次性标记共享同一份不变量（段按 untilMs 升序、相邻同 uid 合并、尾部回退文件 uid）；拆开会让「合并」与「查询」的边界条件在两处漂移。 | 下一轮把回填（已在 `backfill.rs`）与 `record_handoff` 之外的纯查询抽到 `query.rs`。 |
 | `crates/wb-shift-core/src/modules/at_rest/mod.rs` | 651 | 解密通道 | 平台闸门、双开关求值、密钥/临时副本缓存与 `usable_account` 唯一入口共享同一份「谁能用这份凭据」的判断；拆开会让「开关关闭」与「平台未启用」的短路顺序在两处漂移（顺序错就等于把解密能力漏给写操作）。 | 下一轮把平台探测与 `credential.json` 读写抽到 `at_rest/gate.rs`。 |
-| `crates/wb-shift-core/src/modules/at_rest/tests.rs` | 828 | 测试 | AAD 金标准向量、信封容错表、密钥缓存、临时副本不落库、开关矩阵、平台回退共用同一套假 exe / 临时 home 造数。 | 保留；继续膨胀时按「纯函数（AAD/信封）」「IO（密钥/缓存/闸门）」拆两组。 |
+| `crates/wb-shift-core/src/modules/at_rest/tests.rs` | 834 | 测试 | AAD 金标准向量、信封容错表、密钥缓存、临时副本不落库、开关矩阵、平台回退共用同一套假 exe / 临时 home 造数。 | 保留；继续膨胀时按「纯函数（AAD/信封）」「IO（密钥/缓存/闸门）」拆两组。 |
 | `crates/wb-shift-core/src/modules/travel/cycle.rs` | 504 | 旅行编排 | 旅行轮次在同一函数里串起「选账号 → 惰性刷新 → 解密副本（R6-06）→ 请求 → 结果归一」，拆开要把本次运行上下文跨文件传递；刚越过阈值 4 行。 | 下一轮把「结果归一/汇报」抽到 `travel/report.rs`，即可回到 500 以下。 |
 | `src/components/account-card/status-chips.tsx` | 535 | 账号卡片 | 所有 chip 的判定顺序（阻断 > 信封 > 临期 > 正常）必须在一处，顺序错会让「凭据已加密」被「需重新登录」盖住；R6-02 新增 chip 后越过阈值。 | 下一轮把 chip 判定抽成纯函数 `status-chips/model.ts`，组件只负责渲染。 |
 | `crates/companion-core/src/hub.rs` | 510 | 会话状态机 | 等待/授权/提问三态与 grace 投影共用同一份成员快照；拆开会让「快照里是否出现」与「通知是否发出」判据分叉。 | 下一轮把 `permission-attention` 相关投影抽到 `hub/attention.rs`。 |
