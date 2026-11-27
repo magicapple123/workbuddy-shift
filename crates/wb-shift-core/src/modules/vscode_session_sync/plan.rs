@@ -249,14 +249,22 @@ pub(super) fn plan_sync_item(
     );
     let mismatches = session_link::verify_preview(&token, &live);
     if !mismatches.is_empty() {
-        return skip(format!("检查结果已失效：{}", mismatches.join("；")));
+        // 与桌面端同一口径：凭据核对排在模式门禁之前，若只报「内容已变化」，用户看不到
+        // 「哪一侧、坏在哪」。至少一侧不可验证时补上当前状态；两侧都 Ready（只是内容变多
+        // 变少）不补——那种情况没有「坏了」可讲。
+        let detail = session_link::unverifiable_sides(&source_content, &target_content)
+            .map(|sides| format!("（当前内容状态：{sides}）"))
+            .unwrap_or_default();
+        return skip(format!("检查结果已失效：{}{detail}", mismatches.join("；")));
     }
     if !decision.verdict.allows(selection.mode) {
         return SyncItemOutcome::Rejected {
+            // 前缀逐字保留（前端与既有测试按它匹配），只追加判定自己算出的原因。
             message: format!(
-                "该组判定为 {}，不允许以 {} 模式同步",
+                "该组判定为 {}，不允许以 {} 模式同步：{}",
                 decision.verdict.as_str(),
-                selection.mode.as_str()
+                selection.mode.as_str(),
+                decision.reason
             ),
         };
     }
@@ -264,7 +272,9 @@ pub(super) fn plan_sync_item(
     let (ContentState::Ready(source_snapshot), ContentState::Ready(target_snapshot)) =
         (&source_content, &target_content)
     else {
-        return skip("双方内容不可验证，检查结果已失效".to_string());
+        let sides = session_link::unverifiable_sides(&source_content, &target_content)
+            .unwrap_or_else(|| "两侧内容都可验证，无法给出具体原因".to_string());
+        return skip(format!("双方内容不可验证，检查结果已失效（{sides}）"));
     };
     SyncItemOutcome::Validated(Box::new(SyncItemPlan {
         group_id: selection.group_id.clone(),
