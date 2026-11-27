@@ -48,6 +48,11 @@ export function ConfirmCleanDialog({
 
         {plan ? (
           <div className="space-y-3 text-sm">
+            {plan.note ? (
+              <div className="rounded-lg border border-warning-border bg-warning-soft px-3 py-2 text-xs leading-5 text-warning-foreground">
+                {plan.note}
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
               <span>目标：{plan.labels.join("、")}</span>
               <span>

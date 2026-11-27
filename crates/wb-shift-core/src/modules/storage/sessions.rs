@@ -6,6 +6,7 @@
 //! 分类口径来自 AUDIT §3 T3：不得按文件名判孤儿——无行文件里大量是现有会话的
 //! `subagents/` 与 `tool-results/`，所以孤儿 = **任何档位库都无行且不被关联组引用**。
 
+use super::redundancy::{apply_live_copy_counts, group_index_from_text};
 use super::roots::{usage_of, Usage};
 use crate::modules::variant::WbVariant;
 use rusqlite::types::Value as SqlValue;
@@ -36,8 +37,15 @@ pub struct Bundle {
     pub row_status: &'static str,
     /// `present` / `partial` / `bodyMissing` / `orphan`。
     pub presence: &'static str,
+    /// 冗余副本：**同一组内同一账号**还有别的**存活行**（跨账号的合法副本不算）。
+    ///
+    /// 口径见 [`super::redundancy`]：一个组里 A / B 各一份是正常状态，不是冗余；
+    /// 同账号里另一份已被软删也不算（那份删不了，也不占「可清理条数」）。
     pub redundant: bool,
     pub group_id: Option<String>,
+    /// **存活行口径**：本组内本账号还活着的会话行条数（`0` = 不在关联组里或本账号在本组
+    /// 没有存活行）。由 [`super::redundancy::apply_live_copy_counts`] 统一写入，与
+    /// `clean` 的 `redundantAll` 取舍一致。
     pub live_copies: usize,
     pub entries: Vec<Entry>,
     /// DB 行全列快照（删行前写进回收站 manifest；无行时为 None）。
@@ -243,41 +251,6 @@ pub fn read_session_links(store_root: &Path) -> String {
     std::fs::read_to_string(store_root.join("session_links.json")).unwrap_or_default()
 }
 
-/// 关联组索引（原文由调用方提供）。
-pub fn group_index_from_text(text: &str, variant: WbVariant) -> HashMap<String, (String, usize)> {
-    let mut out = HashMap::new();
-    let Ok(json) = serde_json::from_str::<Value>(text) else {
-        return out;
-    };
-    let Some(groups) = json.get("groups").and_then(Value::as_array) else {
-        return out;
-    };
-    for group in groups {
-        let group_id = group
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let Some(members) = group.get("members").and_then(Value::as_array) else {
-            continue;
-        };
-        let same_variant: Vec<&Value> = members
-            .iter()
-            .filter(|member| {
-                member.get("variant").and_then(Value::as_str) == Some(variant.as_str())
-            })
-            .filter(|member| member.get("state").and_then(Value::as_str) != Some("removed"))
-            .collect();
-        let count = same_variant.len();
-        for member in same_variant {
-            if let Some(session_id) = member.get("sessionId").and_then(Value::as_str) {
-                out.insert(session_id.to_string(), (group_id.clone(), count));
-            }
-        }
-    }
-    out
-}
-
 /// 读一个档位的全部会话行（快照构建与 `scan_sessions` 共用；库缺失/被占用时返回空）。
 pub fn read_rows_at(data_root: &Path) -> Vec<Map<String, Value>> {
     match open_db(&data_root.join("workbuddy.db")) {
@@ -338,8 +311,11 @@ pub fn scan_sessions_with_links(
         .into_iter()
         .filter_map(|id| {
             let row = row_by_id.get(&id);
+            // 这里填的是**关联表口径**（成员记录数）的初值；构造完成后统一由
+            // `apply_live_copy_counts` 用**存活行口径**重算 `live_copies` / `redundant`。
+            // 两者会不一致：成员可能已被软删或正文/行已被客户端清掉，最终以存活行为准。
             let (group_id, copies) = match groups.get(&id) {
-                Some((group, count)) => (Some(group.clone()), *count),
+                Some(found) => (Some(found.group_id.clone()), found.same_uid_copies),
                 None => (None, 0),
             };
             let bundle = build_bundle(
@@ -359,6 +335,10 @@ pub fn scan_sessions_with_links(
             (present || bundle.row.is_some()).then_some(bundle)
         })
         .collect();
+
+    // 统一按存活行口径重算副本数与冗余标记：列表标记、冗余筛选与一键清理必须同一个口径，
+    // 否则会出现「按钮说有 1 条可清理、点下去报没有冗余副本」（见 `super::redundancy`）。
+    apply_live_copy_counts(&mut bundles);
 
     bundles.sort_by(|a, b| {
         b.updated_at
@@ -469,6 +449,8 @@ fn build_bundle(
         updated_at: row.map(|row| int_of(row, "updated_at")).unwrap_or(0),
         row_status,
         presence,
+        // 初值：同账号同组多份才算冗余（跨账号各一份是正常状态，见 `super::redundancy`）。
+        // 扫描结束后 `apply_live_copy_counts` 会按「存活行口径」覆盖这两个字段。
         redundant: live_copies > 1,
         group_id,
         live_copies,

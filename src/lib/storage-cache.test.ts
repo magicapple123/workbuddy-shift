@@ -71,7 +71,7 @@ function makeScan(generatedAt: number): StorageScan {
 }
 
 function makeSessions(): StorageSessionsPayload {
-  return { variant: "cn", clientRunning: false, sessions: [] };
+  return { variant: "cn", clientRunning: false, redundantCleanable: 0, sessions: [] };
 }
 
 function makeTrash(): StorageTrashPayload {

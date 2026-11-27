@@ -115,6 +115,7 @@ export default function StoragePage() {
               ) : (
                 <SessionList
                   sessions={page.sessions ?? []}
+                  redundantCleanable={page.redundantCleanable}
                   clientRunning={page.scan.clientRunning}
                   busy={page.busy}
                   presenceOverrides={page.presence}
@@ -123,6 +124,7 @@ export default function StoragePage() {
                       { kind: "session", id: sessionId, entries, deleteRow },
                     ])
                   }
+                  onCleanRedundant={() => void page.previewClean([{ kind: "redundantAll" }])}
                   onReveal={(path, mode, scope) => void page.reveal(path, mode, scope)}
                 />
               )}

@@ -21,11 +21,15 @@ import {
 
 interface SessionListProps {
   sessions: StorageSession[];
+  /** 一键清理会删掉的条数（服务端算，Σ(每组每账号存活数-1)）；不自己数，避免口径打架。 */
+  redundantCleanable: number;
   clientRunning: boolean;
   busy: boolean;
   /** 已按外部校验刷新的 presence（外部删除后 focus 重校验的结果）。 */
   presenceOverrides: Record<string, string>;
   onClean: (sessionId: string, entries: StorageEntryKind[], deleteRow: boolean) => void;
+  /** 一键清理冗余副本（同组同账号多份 → 每组保留最新一条，跨账号副本不删）。 */
+  onCleanRedundant: () => void;
   /** `scope: "cwd"` 只读打开任意绝对目录（工作目录在白名单外也能开）。 */
   onReveal: (path: string, mode: "select" | "open", scope?: "storage" | "cwd") => void;
 }
@@ -35,10 +39,12 @@ type StatusFilter = "all" | "live" | "softDeleted" | "orphan" | "redundant" | "m
 /** 会话资产：可展开逐文件勾选；删除整条会话会同时删数据库行。 */
 export function SessionList({
   sessions,
+  redundantCleanable,
   clientRunning,
   busy,
   presenceOverrides,
   onClean,
+  onCleanRedundant,
   onReveal,
 }: SessionListProps) {
   const [query, setQuery] = useState("");
@@ -109,11 +115,30 @@ export function SessionList({
         <span className="text-xs text-muted-foreground">
           共 {visible.length} 条{shown.length < visible.length ? `，显示前 ${shown.length} 条` : ""}
         </span>
+        <DemoAction className="ml-auto">
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-danger"
+            disabled={busy || clientRunning || redundantCleanable === 0}
+            title={
+              clientRunning
+                ? "客户端正在运行：请先退出 WorkBuddy 客户端再清理"
+                : redundantCleanable === 0
+                  ? "没有检测到冗余副本（同组同账号多份才算冗余）"
+                  : `删除 ${redundantCleanable} 条同账号重复副本，每组保留最新一条；跨账号的合法副本不会删除`
+            }
+            onClick={onCleanRedundant}
+          >
+            <Trash2 className="size-3.5" />
+            一键清理冗余副本{redundantCleanable > 0 ? `（${redundantCleanable} 条）` : ""}
+          </Button>
+        </DemoAction>
       </div>
 
       {clientRunning ? (
         <div className="rounded-lg border border-warning-border bg-warning-soft px-3 py-2 text-xs text-warning-foreground">
-          客户端正在运行：会话清理会被拒绝。请先退出 WorkBuddy 客户端再操作（单文件勾选同样要求退出）。
+          客户端正在运行：会话清理会被拒绝。请先退出 WorkBuddy 客户端再操作（单文件勾选、一键清理冗余副本同样要求退出）。
         </div>
       ) : null}
 

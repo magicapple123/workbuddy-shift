@@ -11,6 +11,7 @@ use std::path::Path;
 
 mod bench;
 mod fixture;
+mod redundant;
 mod reveal;
 mod snapshot;
 
