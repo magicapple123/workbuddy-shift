@@ -12,8 +12,8 @@ pub(super) fn first_number(value: &Value, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| parse_number(value.get(*key)))
 }
 
-pub(super) fn parse_timestamp_ms(value: Option<&Value>) -> Option<i64> {
-    let value = value?;
+/// 解析时间字段为毫秒时间戳；纯日期字符串（`%Y-%m-%d`）补上 `date_only_hms`。
+fn parse_timestamp_at(value: &Value, date_only_hms: (u32, u32, u32)) -> Option<i64> {
     if let Some(number) = parse_number(Some(value)) {
         let millis = if number.abs() < 10_000_000_000.0 {
             number * 1000.0
@@ -45,9 +45,14 @@ pub(super) fn parse_timestamp_ms(value: Option<&Value>) -> Option<i64> {
     }
     NaiveDate::parse_from_str(text, "%Y-%m-%d")
         .ok()
-        .and_then(|date| date.and_hms_opt(23, 59, 59))
+        .and_then(|date| date.and_hms_opt(date_only_hms.0, date_only_hms.1, date_only_hms.2))
         .and_then(|date| Local.from_local_datetime(&date).single())
         .map(|date| date.timestamp_millis())
+}
+
+/// 到期时间等字段：纯日期按当日 `23:59:59`（当天结束）解析。
+pub(super) fn parse_timestamp_ms(value: Option<&Value>) -> Option<i64> {
+    parse_timestamp_at(value?, (23, 59, 59))
 }
 
 pub(super) fn value_at_path<'a>(mut current: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -151,6 +156,22 @@ pub(super) fn resolve_expire_at(raw: &Value, now: i64) -> Option<i64> {
     expire_at.filter(|value| value.saturating_sub(now) <= far_future_ms)
 }
 
+/// 获取时间：周期型基础包的 `CreateTime` / `DeductionStartTime` 可能是首次建号时间，
+/// `CycleStartTime` 才是当前周期的发放时间。按优先级取第一个可解析值；纯日期按本地零点。
+fn resolve_start_at(raw: &Value) -> Option<i64> {
+    [
+        "CycleStartTime",
+        "cycleStartTime",
+        "DeductionStartTime",
+        "deductionStartTime",
+        "CreateTime",
+        "createTime",
+    ]
+    .into_iter()
+    .filter_map(|key| raw.get(key))
+    .find_map(|value| parse_timestamp_at(value, (0, 0, 0)))
+}
+
 pub(super) fn resource_summary(raw: &Value, now: i64) -> Value {
     let slice = first_value(raw, &["SlicePeriodUsageDetails", "slicePeriodUsageDetails"])
         .and_then(Value::as_array)
@@ -221,6 +242,7 @@ pub(super) fn resource_summary(raw: &Value, now: i64) -> Value {
         "used": used,
         "status": status,
         "expireAt": expire_at,
+        "startAt": resolve_start_at(raw),
         "expired": expired,
         "expiringSoon": expiring_soon,
     })

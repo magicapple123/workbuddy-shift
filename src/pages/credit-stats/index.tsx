@@ -849,6 +849,7 @@ export default function CreditStatsPage() {
                       creditMap={creditMap}
                       creditLoadingMap={creditLoadingMap}
                       heading={false}
+                      range={range}
                     />
                   </AccordionContent>
                 </AccordionItem>
