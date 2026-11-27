@@ -111,14 +111,23 @@ export interface StorageSessionsPayload {
   /** 复用服务端快照（同一 TTL 内会话树只走一遍）。 */
   cached?: boolean;
   clientRunning: boolean;
+  /**
+   * 「一键清理冗余副本」实际会删掉的条数（Σ(每组每账号存活数-1)，每组留最新一条）。
+   *
+   * 由服务端算，与 `redundantAll` 的取舍同源：按钮上的数字必须等于点下去真正删掉的条数，
+   * 前端不自己数（自己数会和「软删成员算不算」的口径打架）。
+   */
+  redundantCleanable: number;
   sessions: StorageSession[];
 }
 
-/** 清理目标：分类 / 会话子项 / 冗余副本。 */
+/** 清理目标：分类 / 会话子项 / 冗余副本（单组或一键全部）。 */
 export type StorageCleanTarget =
   | { kind: "category"; id: string }
   | { kind: "session"; id: string; entries?: StorageEntryKind[]; deleteRow?: boolean }
-  | { kind: "redundant"; groupId: string; keepSessionId?: string };
+  | { kind: "redundant"; groupId: string; keepSessionId?: string }
+  /** 一键清理：所有「同组同账号多份」的副本，每组每账号保留最新一条（跨账号副本不删）。 */
+  | { kind: "redundantAll" };
 
 export interface StorageCleanPlanItem {
   path: string;
@@ -137,6 +146,8 @@ export interface StorageCleanPlan {
   bytes: number;
   files: number;
   warnings: string[];
+  /** 面向用户的一句话说明（一键清理冗余副本讲清「删几条、保留哪条」）。 */
+  note?: string | null;
 }
 
 export interface StorageCleanResult {
@@ -149,6 +160,8 @@ export interface StorageCleanResult {
   failures: { path?: string; sessionId?: string; error: string }[];
   warnings: string[];
   labels: string[];
+  /** 与计划里同一条说明：删了几条重复副本、按什么规则保留。 */
+  note?: string | null;
   manifest: string;
 }
 

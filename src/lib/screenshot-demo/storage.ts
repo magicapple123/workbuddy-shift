@@ -143,7 +143,8 @@ function sessions(): StorageSessionsPayload {
       { kind: "changes-detail", label: "变更明细", path: `${cwd}/changes-detail/${id}/`, bytes: 120 * 1024, files: 2, exists: presence === "present" },
     ],
   }));
-  return { variant: "cn", clientRunning: false, sessions: rows };
+  // 演示数据里同组同账号有 3 份存活副本 → 留 1 份，可清理 2 条。
+  return { variant: "cn", clientRunning: false, redundantCleanable: 2, sessions: rows };
 }
 
 function trash(): StorageTrashPayload {

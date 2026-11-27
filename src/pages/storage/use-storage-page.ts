@@ -37,6 +37,8 @@ export type StorageTab = "categories" | "sessions" | "trash";
 interface UseStoragePage {
   scan: StorageScan | null;
   sessions: StorageSession[] | null;
+  /** 一键清理冗余副本会删掉的条数（服务端算，与 `redundantAll` 同源）。 */
+  redundantCleanable: number;
   trash: StorageTrashPayload | null;
   /** 总览（首屏）加载中。 */
   scanLoading: boolean;
@@ -86,6 +88,9 @@ export function useStoragePage(): UseStoragePage {
     const cached = readStorageSessionsCache();
     return cached === null ? null : cached.sessions;
   });
+  const [redundantCleanable, setRedundantCleanable] = useState(
+    () => readStorageSessionsCache()?.redundantCleanable ?? 0,
+  );
   const [trash, setTrash] = useState<StorageTrashPayload | null>(() => readStorageTrashCache());
   const [scanLoading, setScanLoading] = useState(true);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -125,6 +130,7 @@ export function useStoragePage(): UseStoragePage {
     try {
       const payload = await loadStorageSessions({ force });
       setSessions(payload.sessions);
+      setRedundantCleanable(payload.redundantCleanable ?? 0);
       loadedRef.current.sessions = true;
     } catch (cause) {
       setSessionsError(api.asError(cause));
@@ -331,10 +337,12 @@ export function useStoragePage(): UseStoragePage {
           description: result.failures[0]?.error,
         });
       } else {
+        const detail = `${formatMb(result.bytes)} 已移入回收站 ${
+          result.deletedRows > 0 ? `· 删除 ${result.deletedRows} 条会话行` : ""
+        }`;
         toast.success(`已清理 ${result.moved} 项`, {
-          description: `${formatMb(result.bytes)} 已移入回收站 ${
-            result.deletedRows > 0 ? `· 删除 ${result.deletedRows} 条会话行` : ""
-          }`,
+          // 一键清理冗余副本会带一句「删了几条、按什么规则保留」的说明，优先展示它。
+          description: result.note ? `${result.note} · ${detail}` : detail,
         });
       }
       for (const warning of result.warnings) toast.info(warning);
@@ -428,6 +436,7 @@ export function useStoragePage(): UseStoragePage {
   return {
     scan,
     sessions,
+    redundantCleanable,
     trash,
     scanLoading,
     sessionsLoading,

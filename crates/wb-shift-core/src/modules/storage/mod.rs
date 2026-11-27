@@ -15,6 +15,7 @@ mod catalog;
 mod catalog_client;
 mod clean;
 mod protected;
+mod redundancy;
 mod revalidate;
 mod reveal;
 mod roots;
@@ -191,6 +192,9 @@ pub fn sessions_payload(roots: &StorageRoots, variant: WbVariant, data_root: &Pa
         "variant": variant.as_str(),
         "cached": reused,
         "clientRunning": snapshot.client_running,
+        // 「一键清理冗余副本」实际会删掉的条数：与 `clean` 的 `redundantAll` 同源同口径。
+        // 前端按钮上的数字取这里，避免自己算出一个「点了会报错」的数字。
+        "redundantCleanable": redundancy::cleanable_redundant_total(&snapshot.bundles),
         "sessions": snapshot.bundles.iter().map(|bundle| bundle.to_json()).collect::<Vec<_>>(),
     })
 }

@@ -53,6 +53,70 @@ impl Sandbox {
         }
     }
 
+    /// 「客户端正在运行」的同一份上下文：会话类清理必须整体拒绝。
+    pub(super) fn ctx_running(&self) -> CleanContext {
+        CleanContext {
+            client_running: true,
+            ..self.ctx()
+        }
+    }
+
+    /// 带指定账号与更新时间的会话行（冗余副本用例需要同组多账号 + 新旧次序）。
+    pub(super) fn make_db_rows(&self, rows: &[(&str, &str, i64)]) {
+        let conn = Connection::open(self.data_root.join("workbuddy.db")).expect("建库");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, cwd TEXT NOT NULL, user_id TEXT NOT NULL,
+                title TEXT, custom_title TEXT, status TEXT NOT NULL DEFAULT 'Completed',
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                deleted_at INTEGER, is_playground INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .expect("建表");
+        for (id, uid, updated_at) in rows {
+            conn.execute(
+                "INSERT INTO sessions (id, cwd, user_id, title, created_at, updated_at, deleted_at, is_playground)
+                 VALUES (?1, 'D:/proj', ?2, ?3, 1, ?4, NULL, 0)",
+                rusqlite::params![id, uid, format!("标题 {id}"), updated_at],
+            )
+            .expect("写行");
+        }
+    }
+
+    /// 直接落一份关联主表原文（同一组里塞多个账号 / 同账号多份）。
+    pub(super) fn write_links(&self, groups: serde_json::Value) {
+        let payload = serde_json::json!({"version": 1, "revision": 1, "groups": groups});
+        std::fs::write(
+            self.roots.store.join("session_links.json"),
+            serde_json::to_string_pretty(&payload).expect("序列化关联主表"),
+        )
+        .expect("写关联主表");
+    }
+
+    /// 一个关联组的 JSON（成员按 `(uid, sessionId)` 给出，全部 active）。
+    pub(super) fn group_json(id: &str, members: &[(&str, &str)]) -> serde_json::Value {
+        let members: Vec<serde_json::Value> = members
+            .iter()
+            .map(|(uid, session_id)| {
+                serde_json::json!({
+                    "memberId": format!("m-{uid}-{session_id}"),
+                    "uid": uid,
+                    "sessionId": session_id,
+                    "variant": "cn",
+                    "state": "active",
+                    "linkedAt": 1,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "id": id,
+            "variant": "cn",
+            "createdAt": 1,
+            "members": members,
+            "pairBases": [],
+        })
+    }
+
     pub(super) fn make_db(&self, ids: &[(&str, Option<i64>)]) {
         let conn = Connection::open(self.data_root.join("workbuddy.db")).expect("建库");
         conn.execute_batch(

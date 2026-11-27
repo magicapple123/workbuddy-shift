@@ -12,6 +12,7 @@ use super::trash::{self, RowSnapshot, TrashEntry};
 use crate::modules::variant::WbVariant;
 use serde_json::{json, Value};
 mod db;
+mod redundant;
 
 pub(crate) use db::{backup_db, delete_row, remove_group_members};
 
@@ -84,6 +85,10 @@ struct Plan {
     rows: Vec<RowWork>,
     warnings: Vec<String>,
     labels: Vec<String>,
+    /// 计划阶段的说明（「将删除 N 条…」）：一键清理冗余副本用它讲清保留规则。
+    note: Option<String>,
+    /// 执行阶段的同一条说明（「已删除 N 条…」）：只改时态，数字与计划一致。
+    note_done: Option<String>,
 }
 
 impl Plan {
@@ -243,32 +248,18 @@ pub fn clean(ctx: &CleanContext, dry_run: bool, targets: &Value) -> Result<Value
                 if ctx.client_running {
                     return Err("请先退出 WorkBuddy 客户端，再清理冗余副本".to_string());
                 }
-                let doomed: Vec<&Bundle> = all
-                    .iter()
-                    .filter(|bundle| bundle.group_id.as_deref() == Some(group_id))
-                    .filter(|bundle| bundle.row_status == "live")
-                    .filter(|bundle| Some(bundle.id.as_str()) != keep)
-                    .collect();
-                if doomed.is_empty() {
-                    return Err("该关联组没有可清理的冗余副本".to_string());
+                // 按 (组, 账号) 分桶：跨账号的合法副本不在同一桶里，因此不会被删；
+                // `keepSessionId` 为空时保留最新一条，绝不整桶删光（见 `redundant` 模块）。
+                redundant::plan_group(&mut plan, ctx, all, group_id, keep)?;
+            }
+            "redundantAll" => {
+                let all = bundles
+                    .get_or_insert_with(|| scan_sessions(ctx.store(), &ctx.data_root, ctx.variant));
+                if ctx.client_running {
+                    return Err("请先退出 WorkBuddy 客户端，再清理冗余副本".to_string());
                 }
-                let root_id = variant_root_id(ctx.variant);
-                for bundle in doomed {
-                    for entry in bundle.entries.iter().filter(|entry| entry.exists) {
-                        plan.works.push(Work {
-                            root_id,
-                            root: ctx.data_root.clone(),
-                            path: entry.path.clone(),
-                            usage: entry.usage,
-                            category: format!("session.{}", entry.kind),
-                            session_id: Some(bundle.id.clone()),
-                        });
-                    }
-                    plan.rows.push(RowWork {
-                        bundle: bundle.clone(),
-                    });
-                }
-                plan.labels.push(format!("关联组 {group_id} 的冗余副本"));
+                // 批量：扫出所有「同组同账号多份」的桶，每组每账号保留最新一条。
+                redundant::plan_all(&mut plan, ctx, all)?;
             }
             other => return Err(format!("未知的 target 类型：{other}")),
         }
@@ -300,6 +291,7 @@ pub fn clean(ctx: &CleanContext, dry_run: bool, targets: &Value) -> Result<Value
             "bytes": plan.totals().bytes,
             "files": plan.totals().files,
             "warnings": plan.warnings,
+            "note": plan.note,
         }));
     }
 
@@ -402,6 +394,7 @@ fn execute(ctx: &CleanContext, plan: Plan) -> Result<Value, String> {
         "failures": failures,
         "warnings": plan.warnings,
         "labels": plan.labels,
+        "note": plan.note_done.or(plan.note),
         "manifest": trash::entry_dir(&ctx.roots, &stamp)?.join(trash::MANIFEST_NAME).to_string_lossy(),
     }))
 }
