@@ -28,6 +28,11 @@ pub fn load_travel_config() -> Value {
     load_travel_config_at(&travel_config_file(), &travel_cache_file())
 }
 
+/// 设置页回包：配置 + 出厂默认值（`defaults`，纯增量字段）。
+pub fn load_travel_config_with_defaults() -> Value {
+    with_defaults(load_travel_config(), default_travel_config())
+}
+
 pub(crate) fn load_travel_config_at(config_path: &Path, cache_path: &Path) -> Value {
     let input = std::fs::read_to_string(config_path)
         .ok()

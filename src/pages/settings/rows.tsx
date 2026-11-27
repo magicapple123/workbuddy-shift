@@ -28,7 +28,11 @@ export function SettingsGroup({ id, title, children }: SettingsGroupProps) {
   return (
     <section className="min-w-0 space-y-2.5" aria-labelledby={id}>
       <div className="px-1">
-        <h2 id={id} className="text-[13px] font-medium leading-5">
+        {/*
+          `scroll-mt-24`：这一行就是目录跳转与 `#hash` 深链的落点。滚动到「贴顶」会被
+          sticky 的应用顶栏盖住标题（跳过去只看到半张卡片），留出顶栏高度的余量。
+        */}
+        <h2 id={id} className="scroll-mt-24 text-[13px] font-medium leading-5">
           {title}
         </h2>
       </div>

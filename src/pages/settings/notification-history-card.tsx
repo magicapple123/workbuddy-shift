@@ -55,7 +55,14 @@ export function NotificationHistoryCard() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!open) return;
+    /*
+      挂载即预取，展开时再刷一次（T05 第 6 项）。
+      此前只在展开时请求，导致「清空」按钮在收起态永远是禁用的（`items === null`），
+      用户必须先展开才能清空——而清空按钮本来就在收起态可见。
+      演示模式不预取：那条命令不在只读白名单里，预取只会把「演示模式不支持」的错误
+      提前显示在面板里；演示页要展开时才看到提示即可。
+    */
+    if (!open && api.isDemoMode()) return;
     let cancelled = false;
     setError("");
     api

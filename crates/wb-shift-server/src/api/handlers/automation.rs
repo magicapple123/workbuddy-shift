@@ -9,8 +9,9 @@ use serde_json::json;
 use serde_json::Value;
 use wb_shift_core::modules::*;
 
+/// 回包额外带 `defaults`（出厂默认值，纯增量字段）：设置页「恢复默认」按它落盘。
 pub(crate) async fn api_rotate_config() -> Response {
-    json_ok(config::load_auto_rotate_config())
+    json_ok(config::load_auto_rotate_config_with_defaults())
 }
 
 pub(crate) async fn api_save_rotate_config(Json(body): Json<Value>) -> Response {

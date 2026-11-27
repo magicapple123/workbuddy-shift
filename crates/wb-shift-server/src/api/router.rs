@@ -227,6 +227,11 @@ pub fn router(state: SharedState) -> Router {
             post(api_restore_settings_sync_backup),
         )
         .route("/api/refresh-token", post(api_refresh_token))
+        // 设置页「关于 / 设置包」：数据目录只读回路径；导出与导入走同一份 core 白名单校验
+        // （导入任一键非法即整体拒绝、零写入，见 config/configs/bundle.rs）。
+        .route("/api/data-dir", get(api_data_dir))
+        .route("/api/settings/export", get(api_export_settings_bundle))
+        .route("/api/settings/import", post(api_import_settings_bundle))
         .route("/api/update/check", get(api_update_check))
         .route(
             "/api/update/config",

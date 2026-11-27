@@ -21,6 +21,7 @@ import { useAccountsStore } from "@/stores/accounts";
 import { AutoTravelRow } from "./auto-travel-row";
 import { CHECKIN_NUMBER_FIELDS, CheckinNumberKey, checkinWindowIssue, formatTime, logLabel } from "./helpers";
 import { AccordionSettingsRow, INSET_PANEL, NumberSettingRow, PANEL_ROW, SettingsFieldRow, SettingsGroup } from "./rows";
+import { RestoreDefaultsRow, stripDefaults } from "./restore-defaults";
 import { useConfigAutosave } from "./use-config-autosave";
 
 /** 自动签到配置 + 一键签到 + 日志（含自动旅行行）。 */
@@ -98,6 +99,20 @@ export function AutoCheckinCard() {
         ? { title: "签到时间段已保存", description: `${next.checkin_start} 至 ${next.checkin_end}` }
         : { title: "已清除签到时间段限制" },
     );
+  }
+
+  /**
+   * 「恢复默认」：参数取自后端回包里的 `defaults`，前端不硬编码任何默认值。
+   *
+   * 走同一条落盘链（`updateDraft` 即时回显 + `enqueueSave` 串行提交），
+   * 因此恢复默认与手改参数的回滚、失败提示行为完全一致。
+   */
+  function restoreDefaults() {
+    const defaults = cfg?.defaults;
+    if (!defaults) return;
+    const patch = stripDefaults(defaults);
+    autosave.updateDraft(patch);
+    autosave.enqueueSave(patch, { title: "已恢复默认参数" });
   }
 
   /** 「清除」按钮：两端清空属完整语义，立即落盘。 */
@@ -283,6 +298,11 @@ export function AutoCheckinCard() {
                     value={autosave.numDraft.lazy_refresh_hours ?? String(cfg.lazy_refresh_hours)}
                     onChange={(text) => autosave.onNumberChange("lazy_refresh_hours", text)}
                     onCommit={(raw) => autosave.onNumberCommit("lazy_refresh_hours", raw)}
+                  />
+                  <RestoreDefaultsRow
+                    description="把签到时间段、保活阈值、惰性刷新与参与名单恢复为出厂默认。"
+                    disabled={autosave.saving || !cfg.defaults}
+                    onRestore={restoreDefaults}
                   />
                 </div>
               </AccordionSettingsRow>

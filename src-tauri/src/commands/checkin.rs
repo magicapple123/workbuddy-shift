@@ -37,9 +37,12 @@ pub async fn checkin_all(variant: Option<String>, respect_window: Option<bool>) 
 }
 
 /// GET /api/checkin/config —— 自动签到配置。
+///
+/// 回包额外带 `defaults`（出厂默认值，纯增量字段）：设置页的「恢复默认」按它落盘，
+/// 前端不再硬编码任何默认值。
 #[tauri::command]
 pub fn get_auto_checkin_config() -> Value {
-    crate::modules::config::load_checkin_config()
+    crate::modules::config::load_checkin_config_with_defaults()
 }
 
 /// POST /api/checkin/config —— 保存自动签到配置。
@@ -74,7 +77,7 @@ pub async fn get_travel_status(account_id: String) -> Result<Value, String> {
 /// GET /api/travel/config —— 自动旅行配置。
 #[tauri::command]
 pub fn get_auto_travel_config() -> Value {
-    crate::modules::config::load_travel_config()
+    crate::modules::config::load_travel_config_with_defaults()
 }
 
 /// POST /api/travel/config —— 保存自动旅行配置。开启时立刻跑一轮派发/领取。
@@ -98,7 +101,7 @@ pub fn save_auto_travel_config(config: Value) -> Result<Value, String> {
 /// GET /api/rotate/config —— 自动轮换配置。
 #[tauri::command]
 pub fn get_auto_rotate_config() -> Value {
-    crate::modules::config::load_auto_rotate_config()
+    crate::modules::config::load_auto_rotate_config_with_defaults()
 }
 
 /// POST /api/rotate/config —— 保存自动轮换配置。
@@ -129,4 +132,32 @@ pub async fn run_rotate(app: tauri::AppHandle) -> Value {
 #[tauri::command]
 pub fn get_rotate_logs() -> Value {
     json!({ "logs": rotate::rotate_logs() })
+}
+
+// ---------------------------------------------------------------------------
+// 设置页：数据目录 / 设置包导出导入
+// ---------------------------------------------------------------------------
+
+/// GET /api/data-dir —— 工具数据目录（设置页「关于」显示路径，桌面端可一键定位）。
+///
+/// 只回路径字符串：这是用户自己的数据目录，不含凭据；不做任何写操作。
+#[tauri::command]
+pub fn get_data_dir() -> Value {
+    json!({ "path": crate::modules::config::store_dir().to_string_lossy() })
+}
+
+/// GET /api/settings/export —— 导出设置包（checkin / travel / rotate / rateLimit 四份）。
+///
+/// 不导出更新（GitHub）配置：那份可能带代理口令，明文落盘会泄漏（见 core 的 `bundle.rs`）。
+#[tauri::command]
+pub fn export_settings_bundle() -> Value {
+    crate::modules::config::export_settings_bundle()
+}
+
+/// POST /api/settings/import —— 白名单校验后导入设置包。
+///
+/// 写入前备份现有配置；任一键非法整体拒绝，不半写（校验与回滚都在 core）。
+#[tauri::command]
+pub fn import_settings_bundle(bundle: Value) -> Result<Value, String> {
+    crate::modules::config::import_settings_bundle(&bundle)
 }
