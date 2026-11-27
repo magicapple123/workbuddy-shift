@@ -180,17 +180,21 @@ export function AccountStatusChips({
   }
 
   // 8）需重新登录 / Token 已过期（阻断使用）。
+  // T01：「需重新登录」多是本工具与官方客户端抢刷同一份 refresh token 的结果，客户端往往
+  // 仍能正常使用，真实恢复路径是「从本机导入」（把客户端手上的新凭据读回账号库）。
+  // 提示只挂在 `title` 上：肉眼看到的仍是同一个 chip，视觉结构不变。
   const reloginLabel = account.needsRelogin
     ? "需重新登录"
     : typeof account.expiresAt === "number" && account.expiresAt < Date.now()
       ? "Token 已过期"
       : null;
   if (reloginLabel) {
+    const hint = "若客户端仍可正常使用，请用『从本机导入』恢复";
     chips.push({
       key: "relogin",
       priority: STATUS_PRIORITY.relogin,
       detail: reloginLabel,
-      node: <Badge variant="warning" className={chipClass}>{reloginLabel}</Badge>,
+      node: <Badge variant="warning" className={chipClass} title={hint}>{reloginLabel}</Badge>,
     });
   }
 
