@@ -203,9 +203,12 @@ export default function CreditStatsPage() {
    * 「置 loading → 切窗口 → 30 天走缓存 / 其它窗口走接口」。
    *
    * 失败直接抛给调用方：点选要回滚选择，自动同步只能交给错误条（见各自的 catch）。
+   *
+   * 非 30 天窗口默认不刷账号列表（点选 / 跨标签同步时账号已由首屏载入）；
+   * 首屏恢复与错误条重试传 `withAccounts`，先 `fetchAll` 再取数。
    */
   const loadWindow = useCallback(
-    async (nextDataRange: CreditRange) => {
+    async (nextDataRange: CreditRange, options?: { withAccounts?: boolean }) => {
       const seq = ++loadSeqRef.current;
       setRangeLoading(true);
       setDataRange(nextDataRange);
@@ -214,9 +217,11 @@ export default function CreditStatsPage() {
           await load(false);
           return;
         }
-        await fetchAll();
-        const accountState = useAccountsStore.getState();
-        if (accountState.error) throw new Error(accountState.error);
+        if (options?.withAccounts) {
+          await fetchAll();
+          const accountState = useAccountsStore.getState();
+          if (accountState.error) throw new Error(accountState.error);
+        }
         const nextStats = await api.getCreditStatistics(false, nextDataRange);
         // 期间又切了范围（seq 变化）或已卸载：本次结果作废，别覆盖新窗口的数字。
         if (loadSeqRef.current !== seq || unmountedRef.current) return;
@@ -257,7 +262,8 @@ export default function CreditStatsPage() {
   /** 错误条上的「重试」：跟随当前取数窗口，不会把 90 天/账本悄悄换回 30 天。 */
   async function reloadCurrentRange() {
     try {
-      await loadWindow(dataRange);
+      // 重试可能是在接首屏账号拉取失败，所以连账号一起刷。
+      await loadWindow(dataRange, { withAccounts: true });
     } catch (cause) {
       setError(api.asError(cause));
     }
@@ -290,7 +296,8 @@ export default function CreditStatsPage() {
     initialRangeRef.current = null;
     void (async () => {
       try {
-        await loadWindow(target);
+        // 非 30 天窗口不经过 load()，首屏需要在这里先载入账号列表。
+        await loadWindow(target, { withAccounts: true });
       } catch (cause) {
         if (!unmountedRef.current) setError(api.asError(cause));
       }
