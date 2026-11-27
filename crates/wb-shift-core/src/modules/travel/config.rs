@@ -39,16 +39,16 @@ pub(super) async fn travel_request(
     body: Option<Value>,
     account: &Value,
 ) -> Value {
-    // R6-06：先尝试用本机 live 凭据解出临时副本（写开关打开时才生效）。
-    let resolved = crate::modules::at_rest::usable_account(
+    // R6-06：先尝试用本机 live 凭据解出临时副本（写开关打开时才生效）；
+    // 解不出来才回退信封提示（issue #94 的文案与形状逐字不变）。
+    let resolved = match crate::modules::at_rest::resolve_or_envelope_error(
         account,
         crate::modules::at_rest::AccessMode::Write,
-    );
+    ) {
+        Ok(temp) => temp,
+        Err(err) => return json!({"code": -2, "message": err}),
+    };
     let account = resolved.as_ref().unwrap_or(account);
-    // 加密信封凭据短路：不发空 Bearer，直接给出可读错误（issue #94）。
-    if let Some(err) = account::envelope_token_error(account) {
-        return json!({"code": -2, "message": err});
-    }
     let url = format!("{WORKBUDDY_API_ENDPOINT}{path}");
     let headers = build_travel_headers(account);
     let mut resp = http_request(&url, method, body.clone(), Some(&headers)).await;
