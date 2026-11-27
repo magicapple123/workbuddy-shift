@@ -14,6 +14,7 @@
  * 或本地数据跨度不足 90 天（Token 页）就不渲染该按钮，避免给出一个必然降级的选项。
  */
 import { dateDaysAgo, dateKey } from "@/lib/format";
+import type { PersistedPreferenceOptions } from "@/lib/persisted-preference";
 import type { CreditRange } from "@/lib/types";
 
 /** 全局统计范围。`all` 与后端 `range=\"all\"`（本地账本）语义一致。 */
@@ -51,6 +52,16 @@ export function statsRangeOptions(include90d: boolean): StatsRangeOption[] {
   const all = BASE_OPTIONS[BASE_OPTIONS.length - 1];
   return [...BASE_OPTIONS.slice(0, -1), NINETY_DAYS_OPTION, all];
 }
+
+/** 两页共用的范围偏好：localStorage 键名 + 同页事件名 + 默认值。 */
+export const STATS_RANGE_PREFERENCE: PersistedPreferenceOptions<StatsRangeKey> = {
+  key: "workbuddy-shift.stats.range",
+  fallback: DEFAULT_STATS_RANGE,
+  // 只接受选项表里出现过的键（含 90d），损坏值返回 null 由 hook 回退默认
+  parse: (raw) => statsRangeOptions(true).find((option) => option.key === raw)?.key ?? null,
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:stats-range-changed",
+};
 
 /** 范围标签（导出文件名 / 提示 / 折叠标题共用，避免各处手写字面量）。 */
 export function statsRangeLabel(range: StatsRangeKey): string {

@@ -11,10 +11,10 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { formatDate, formatDateTime } from "@/lib/format";
+import { usePersistedPreferenceState } from "@/lib/persisted-preference";
 import {
-  DEFAULT_STATS_RANGE,
   statsDateSpanDays,
-  type StatsRangeKey,
+  STATS_RANGE_PREFERENCE,
 } from "@/lib/stats-range";
 import {
   isTokenStatisticsCacheFresh,
@@ -76,8 +76,11 @@ export default function TokenStatsPage() {
   /** 0 = 首次进入（缓存新鲜时不发请求）；>0 = 用户点了刷新/重试，强制重新扫描。 */
   const [reload, setReload] = useState(0);
   const [detailOpen, setDetailOpen] = useState(false);
-  /** 全局唯一的展示范围：四指标、结论、趋势图、用量分布都按它切片。 */
-  const [range, setRange] = useState<StatsRangeKey>(DEFAULT_STATS_RANGE);
+  /**
+   * 全局唯一的展示范围：四指标、结论、趋势图、用量分布都按它切片。
+   * 持久化到 localStorage，与积分统计页共用同一份。
+   */
+  const [range, setRange] = usePersistedPreferenceState(STATS_RANGE_PREFERENCE);
 
   useEffect(() => {
     const force = reload > 0;
