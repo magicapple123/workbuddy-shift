@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Card, CardDescription, CardHeader } from "@/components/ui/card";
 import { formatDateTime } from "@/lib/format";
+import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditExpiry,
   CreditOfficialUsage,
@@ -12,11 +13,20 @@ import { isOfficialUsageAvailable } from "./data";
 import { OfficialUsageBreakdown } from "./official-usage";
 import { ResourcesByAccount } from "./resources-by-account";
 
+/**
+ * 「所有账号」只来自用户主动选择。已选账号失效（账号列表刷新）时回退首账号，
+ * 不能被当成选了全部，否则明细会在用户没操作的情况下突然变成全量。
+ */
+type DetailAccountSelection =
+  | { kind: "all" }
+  | { kind: "account"; accountId: string | null };
+
 export function SelectedAccountDetails({
   stats,
   officialUsage,
   creditMap,
   creditLoadingMap,
+  range,
   heading = true,
 }: {
   stats: CreditStatistics;
@@ -25,20 +35,23 @@ export function SelectedAccountDetails({
   creditLoadingMap: Record<string, boolean>;
   /** 折叠标题已承担 `h2` 角色时不再重复渲染标题。 */
   heading?: boolean;
+  /** 页面统一的统计范围；卡片内不再另设范围按钮。 */
+  range: StatsRangeKey;
 }) {
   const [detailTab, setDetailTab] = useState<"credits" | "requests">("credits");
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
   const filterAccounts = official ? official.accounts : stats.accounts;
-  /** 本卡片仅允许选择单个账号，默认第一个账号 */
-  const [accountFilter, setAccountFilter] = useState<string | null>(
-    () => filterAccounts[0]?.accountId ?? null,
-  );
+  /** 默认仍选首账号；`all` 只由用户主动选择 */
+  const [accountSelection, setAccountSelection] = useState<DetailAccountSelection>(() => ({
+    kind: "account",
+    accountId: filterAccounts[0]?.accountId ?? null,
+  }));
   const activeFilterAccount =
-    accountFilter && filterAccounts.some((account) => account.accountId === accountFilter)
-      ? filterAccounts.find((account) => account.accountId === accountFilter)
+    accountSelection.kind === "account" && accountSelection.accountId !== null
+      ? filterAccounts.find((account) => account.accountId === accountSelection.accountId)
       : undefined;
-  // 筛选失效（如账号列表刷新变化）时回退到第一个账号
-  const effectiveFilter = activeFilterAccount?.accountId ?? filterAccounts[0]?.accountId ?? null;
+  const effectiveFilter =
+    accountSelection.kind === "all" ? null : (activeFilterAccount?.accountId ?? filterAccounts[0]?.accountId ?? null);
   const visibleAccounts = effectiveFilter
     ? stats.accounts.filter((account) => account.accountId === effectiveFilter)
     : stats.accounts;
@@ -55,7 +68,7 @@ export function SelectedAccountDetails({
 
   // R5-15：不随账号切换重置 detailTab。切号后保持当前子 Tab，
   // 无数据 / 查询失败由 OfficialUsageBreakdown 自身的空态与错误态覆盖，
-  // 分页仍由该组件在 accountId 变化时回到第 1 页。
+  // 分页仍由该组件在 accountId 或 range 变化时回到第 1 页。
   return (
     <div className="flex min-w-0 flex-col gap-12">
       <section
@@ -76,9 +89,11 @@ export function SelectedAccountDetails({
               <AccountFilterMenu
                 accounts={filterAccounts}
                 accountFilter={effectiveFilter}
-                onAccountFilterChange={setAccountFilter}
+                onAccountFilterChange={(accountId) =>
+                  setAccountSelection(accountId === null ? { kind: "all" } : { kind: "account", accountId })
+                }
                 ariaLabel="按账号筛选积分明细"
-                allowAll={false}
+                allowAll={true}
               />
             </div>
             <div className="mt-3 flex max-w-full gap-1 rounded-lg bg-muted p-1" role="tablist" aria-label="积分详情类型">
@@ -107,10 +122,15 @@ export function SelectedAccountDetails({
           </CardHeader>
           {detailTab === "credits" ? (
             <div className="min-w-0">
-              <ResourcesByAccount accounts={visibleAccounts} creditMap={creditMap} creditLoadingMap={creditLoadingMap} />
+              <ResourcesByAccount
+                accounts={visibleAccounts}
+                creditMap={creditMap}
+                creditLoadingMap={creditLoadingMap}
+                range={range}
+              />
             </div>
           ) : (
-            <OfficialUsageBreakdown officialUsage={officialUsage} accountId={effectiveFilter} />
+            <OfficialUsageBreakdown officialUsage={officialUsage} accountId={effectiveFilter} range={range} />
           )}
         </Card>
       </section>

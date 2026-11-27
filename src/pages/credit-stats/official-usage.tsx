@@ -6,8 +6,10 @@ import type {
   CreditOfficialUsage,
   CreditOfficialUsageRequest,
 } from "@/lib/types";
+import type { StatsRangeKey } from "@/lib/stats-range";
 
 import { RequestSortKey, SortDirection, compareRequests, isOfficialUsageAvailable, officialAccountFor } from "./data";
+import { filterRequestsByAccountAndRange, isRequestInRange } from "./detail-filters";
 
 function OfficialRequestRow({
   request,
@@ -82,19 +84,22 @@ function SortableHeader({
 export function OfficialUsageBreakdown({
   officialUsage,
   accountId,
+  range,
 }: {
   officialUsage?: CreditOfficialUsage;
   accountId: string | null;
+  /** 页面统一的统计范围；只过滤明细列表，不影响官方总数与截断提示。 */
+  range: StatsRangeKey;
 }) {
   const [sortKey, setSortKey] = useState<RequestSortKey>("time");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [page, setPage] = useState(0);
   const officialAvailable = isOfficialUsageAvailable(officialUsage);
 
-  // 换账号或换排序都回到第一页；重新采集后数据整体更换，同样重置
+  // 换账号、日期范围或排序都回到第一页；重新采集后数据整体更换，同样重置
   useEffect(() => {
     setPage(0);
-  }, [accountId, sortKey, sortDirection, officialUsage?.collectedAt]);
+  }, [accountId, range, sortKey, sortDirection, officialUsage?.collectedAt]);
 
   const toggleSort = (key: RequestSortKey) => {
     if (key === sortKey) {
@@ -129,15 +134,16 @@ export function OfficialUsageBreakdown({
     );
   }
 
-  const requests = account
-    ? officialUsage.requests.filter((request) => request.accountId === account.accountId)
-    : officialUsage.requests;
+  // 先按账号收窄一次，再在 accountRequests 上按日期范围过滤
+  const accountRequests = filterRequestsByAccountAndRange(officialUsage.requests, accountId, "all");
+  const requests = range === "all" ? accountRequests : accountRequests.filter((request) => isRequestInRange(request, range));
   const totalRequests = account
     ? (account.reportedTotal ?? account.requestCount)
     : officialUsage.accounts.reduce((sum, item) => sum + (item.reportedTotal ?? item.requestCount), 0);
   const detailTruncated = account
     ? account.detailTruncated
     : officialUsage.accounts.some((item) => item.detailTruncated);
+  // 沿用既有行为：未命中单个账号（含「所有账号」）时显示账号列
   const showAccount = !account;
 
   const sortedRequests = [...requests].sort((left, right) =>
@@ -160,7 +166,11 @@ export function OfficialUsageBreakdown({
       )}
       {requests.length === 0 ? (
         <div className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">
-          {totalRequests > 0 ? "官方返回了请求总数，但明细未通过格式校验。" : "官方暂无请求用量。"}
+          {range !== "all" && accountRequests.length > 0
+            ? "当前筛选范围暂无请求明细。"
+            : totalRequests > 0
+              ? "官方返回了请求总数，但明细未通过格式校验。"
+              : "官方暂无请求用量。"}
         </div>
       ) : (
         <div className="min-w-0 overflow-x-auto">

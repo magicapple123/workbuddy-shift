@@ -202,6 +202,8 @@ export interface CreditResource {
   used: number;
   status: number | null;
   expireAt: number | null;
+  /** 当前周期获取时间；企业配额、旧缓存或无法解析的来源可能缺失。 */
+  startAt?: number | null;
   expired: boolean;
   expiringSoon: boolean;
 }

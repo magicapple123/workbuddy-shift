@@ -34,6 +34,66 @@
         assert!(parse_timestamp_ms(Some(&json!("2099-01-02 03:04:05"))).is_some());
     }
 
+    fn local_ms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+        Local.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn start_at_uses_priority_and_falls_back_from_invalid_values() {
+        let now = 1_800_000_000_000_i64;
+        let cycle = local_ms(2026, 11, 1, 0, 0, 0);
+        let resource = resource_summary(&json!({
+            "CycleStartTime": "2026-11-01 00:00:00",
+            "DeductionStartTime": now - 3_600_000,
+            "CreateTime": now - 7_200_000,
+        }), now);
+        assert_eq!(resource["startAt"].as_i64(), Some(cycle));
+
+        let resource = resource_summary(&json!({
+            "CycleStartTime": "invalid", "cycleStartTime": "",
+            "DeductionStartTime": now - 3_600_000, "CreateTime": now - 7_200_000,
+        }), now);
+        assert_eq!(resource["startAt"].as_i64(), Some(now - 3_600_000));
+        let resource = resource_summary(&json!({
+            "cycleStartTime": "2026-11-02 03:04:05", "createTime": now,
+        }), now);
+        assert_eq!(resource["startAt"].as_i64(), Some(local_ms(2026, 11, 2, 3, 4, 5)));
+        let resource = resource_summary(&json!({
+            "CycleStartTime": null, "DeductionStartTime": "invalid", "createTime": now,
+        }), now);
+        assert_eq!(resource["startAt"].as_i64(), Some(now));
+    }
+
+    #[test]
+    fn start_at_parses_seconds_milliseconds_and_date_only_midnight() {
+        let now = 1_800_000_000_000_i64;
+        assert_eq!(resource_summary(&json!({"CreateTime": 1_800_000_000}), now)["startAt"], json!(now));
+        assert_eq!(resource_summary(&json!({"createTime": now}), now)["startAt"], json!(now));
+        assert_eq!(
+            resource_summary(&json!({"CycleStartTime": "2026-11-01"}), now)["startAt"],
+            json!(local_ms(2026, 11, 1, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn start_at_is_null_without_a_parseable_source() {
+        let now = 1_800_000_000_000_i64;
+        assert_eq!(resource_summary(&json!({"PackageCode": "quota"}), now)["startAt"], Value::Null);
+        assert_eq!(resource_summary(&json!({
+            "CycleStartTime": "", "DeductionStartTime": null, "CreateTime": "invalid",
+        }), now)["startAt"], Value::Null);
+    }
+
+    #[test]
+    fn expiry_date_only_still_uses_end_of_day() {
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2026-11-01"))),
+            Some(local_ms(2026, 11, 1, 23, 59, 59))
+        );
+    }
+
     #[test]
     fn extracts_nested_accounts() {
         let response = json!({

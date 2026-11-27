@@ -132,6 +132,7 @@ function creditExpiry(accountId: string): CreditExpiry {
     used: Number((total - remaining).toFixed(2)),
     status: 1,
     expireAt: futureAt(expireDays),
+    startAt: atLocalTime(Math.max(0, 30 - expireDays), 0, 17),
     expired: false,
     expiringSoon: expireDays <= 7,
   }));
