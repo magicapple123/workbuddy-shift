@@ -28,19 +28,14 @@ export function desktopPlatform(): DesktopPlatform {
   return "unknown";
 }
 
-/** 当前宿主是否 macOS（三个权限按钮只在 macOS 存在）。 */
-export function isMacos(): boolean {
-  return desktopPlatform() === "macos";
-}
-
-/** 当前宿主是否 Windows。 */
+/**
+ * 当前宿主是否 Windows。
+ *
+ * 平台判断统一走 `desktopPlatform()` 的比较（调用方拿完整平台值再决定渲染哪些按钮），
+ * 单独的 `isXxx()` 便捷函数没有人调用，已删除，避免留下第二套判断入口。
+ */
 export function isWindows(): boolean {
   return desktopPlatform() === "windows";
-}
-
-/** 当前宿主是否 Linux。 */
-export function isLinux(): boolean {
-  return desktopPlatform() === "linux";
 }
 
 /** 订阅后端事件；回调只接收 payload，返回值用于取消订阅。 */
