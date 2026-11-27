@@ -298,9 +298,11 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
                     </div>
                     <div className="mt-1 flex flex-wrap items-center justify-between gap-1.5"><span className="text-xs tabular-nums text-muted-foreground">{member.recordCount == null ? "内容条数无法确认" : `${member.recordCount} 条内容`}</span>{divergence && commonMemberIds.has(member.memberId) ? <Badge variant="warning" className="text-[10px]">共同旧版</Badge> : branchIndex != null ? <Badge variant="outline" data-branch-badge className="text-[10px]">分支 {branchIndex + 1}</Badge> : (!conflict || !member.canBeSource) && <MemberStatus status={status} equal={equal} />}</div>
                     <Collapsible className="mt-0.5">
-                      <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[11px] text-muted-foreground">{formatDateTime(member.updatedAt, "更新时间未知")}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-5 gap-0.5 px-0 text-[11px] text-primary">{conflict && member.canBeSource ? "查看内容" : "副本详情"}<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
+                      <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[11px] text-muted-foreground">{formatDateTime(member.updatedAt, "更新时间未知")}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-5 gap-0.5 px-0 text-[11px] text-primary">{member.canBeSource ? "查看内容" : "副本详情"}<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
                       <CollapsibleContent className="space-y-1.5 py-1.5 text-[11px] leading-4 text-muted-foreground">
-                        {conflict && member.canBeSource && <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-md bg-muted/60 p-2">
+                        {/* 最近内容不再只在「有分歧」时出现：`canBeSource` == 副本可读（`active` 且正文已就绪），
+                            内容一致时同样该能一眼看到「这条会话聊了什么」，否则用户只能靠打开对应客户端确认。 */}
+                        {member.canBeSource && <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-md bg-muted/60 p-2">
                           {member.contentPreview?.length ? <><p>最近 {member.contentPreview.length} 条可读内容：</p>{member.contentPreview.map((item, previewIndex) => <p key={previewIndex} className="break-words"><span className="font-medium text-foreground">{item.speaker}：</span>{item.text}</p>)}</> : <p>此副本暂无可展示的内容预览，请在对应客户端查看完整会话。</p>}
                         </div>}
                         <p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p>

@@ -78,6 +78,11 @@ pub fn read_session_content(conv_dir: &Path, conversation_id: &str) -> ContentSt
         text: String::from_utf8_lossy(&index_bytes).to_string(),
         full_digest: full_digest_of(&raw),
         normalized,
+        // 插件侧正文是「一条消息一格文件」的索引，时间戳口径与 WorkBuddy 的 JSONL 正文
+        // 不同；这里不做推测，一律 `None`，调用方（组视图）据此回退到会话行的
+        // `updated_at`，保持与改造前一致的展示时间。
+        latest_at: None,
+        list_facts: None,
     })
 }
 

@@ -381,6 +381,8 @@ include!("query_spaces.rs");
 
 include!("copy.rs");
 
+include!("copy_same_content.rs");
+
 include!("pinned.rs");
 
 include!("run.rs");

@@ -21,6 +21,7 @@ mod plan;
 mod plan_execute;
 mod plan_prepare;
 mod repair;
+mod same_content;
 
 pub(in crate::modules::session) use body::*;
 pub(in crate::modules::session) use db::*;
@@ -35,6 +36,11 @@ pub(in crate::modules::session) use plan_execute::*;
 pub(in crate::modules::session) use plan_prepare::*;
 // 源正文兜底（严格校验失败时的容错修复）：只被 `copy_one_session` 调用。
 pub(in crate::modules::session) use repair::repair_source_snapshot;
+// 复制前的内容级去重（issue #22）：目标账号已有同标题 / 同目录 / 同正文的未关联会话时
+// 直接复用并登记成员，不再写第二份副本。
+pub(in crate::modules::session) use same_content::{
+    find_same_content_session, link_existing_member,
+};
 // 单测注入入口 / 测试夹具：生产路径走同模块的公开入口与内部编排，这里只为 `session::tests` 转出。
 #[allow(unused_imports)]
 pub(in crate::modules::session) use entry::{

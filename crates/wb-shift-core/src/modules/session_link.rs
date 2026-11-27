@@ -40,9 +40,9 @@ pub(crate) use content::{
 #[cfg(test)]
 pub(crate) use content::real_read_count;
 pub(crate) use content::{
-    full_digest_of, line_digest_of, normalize_jsonl, normalize_last_incomplete,
-    read_content_snapshot, to_hex, total_digest_of, ContentSnapshot, ContentState,
-    NormalizedContent, NORMALIZATION_VERSION, SESSION_ID_MARKER,
+    full_digest_of, line_digest_of, normalize_jsonl, normalize_jsonl_with_latest,
+    normalize_last_incomplete, read_content_snapshot, to_hex, total_digest_of, ContentSnapshot,
+    ContentState, ListFacts, NormalizedContent, NORMALIZATION_VERSION, SESSION_ID_MARKER,
 };
 // 正文记录的毫秒时间戳：只服务 `sessions.last_activity_at`（复制/同步写库时取正文最新值），
 // 与内容判定口径无关。

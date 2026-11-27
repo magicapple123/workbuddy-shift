@@ -233,11 +233,13 @@ export function buildDemoSessionGroups(
     return true;
   });
   const memberAccounts = candidates.length > 0 ? candidates : allAccounts.slice(0, 2);
+  // `excerpt` 与真实后端同口径：每组「最新有内容的活跃副本的最近一条用户消息」，
+  // 卡片摘要与详情里的「用户：」那句都用它，避免演示态出现「卡片没摘要」的假象。
   const scenario = [
-    { title: "跨档复制内核改造", status: "behind" as const, count: 2 },
-    { title: "会话筛选和分页", status: "latest" as const, count: 3 },
-    { title: "整理长时间未完成的任务", status: "diverge" as const, count: 2 },
-    { title: "恢复后历史会话索引", status: "missing" as const, count: 2 },
+    { title: "跨档复制内核改造", status: "behind" as const, count: 2, excerpt: "把复制内核里的档位判断收拢到一处，别在各处硬编码国内版和国际版。" },
+    { title: "会话筛选和分页", status: "latest" as const, count: 3, excerpt: "列表要能搜项目名和摘要里的词，还要能按项目折叠起来。" },
+    { title: "整理长时间未完成的任务", status: "diverge" as const, count: 2, excerpt: "整理长期未完成的任务，并确认下一步安排。" },
+    { title: "恢复后历史会话索引", status: "missing" as const, count: 2, excerpt: "恢复备份以后历史会话列表是空的，先看看索引文件还在不在。" },
   ];
   return scenario.map((item, groupIndex) => {
     const groupId = `demo-${client}-${scope ?? "all"}-${groupIndex + 1}`;
@@ -276,7 +278,7 @@ export function buildDemoSessionGroups(
         updatedAt: Date.now() - (sharedBaseScenario ? memberIndex < 3 ? 8 + memberIndex : memberIndex - 3 : memberIndex + groupIndex * 2) * 1000 * 60 * 37,
         recordCount: contentState === "ready" ? (sharedBaseScenario ? memberIndex < 3 ? 14 : memberIndex === 3 ? 17 : 19 : item.status === "latest" ? 14 : Math.max(4, 14 - memberIndex * 3)) : null,
         contentPreview: contentState === "ready" ? [
-          { speaker: "用户", text: item.status === "diverge" ? "整理长期未完成的任务，并确认下一步安排。" : "继续处理这个会话。" },
+          { speaker: "用户", text: item.excerpt },
           { speaker: "助手", text: sharedBaseScenario ? memberIndex < 3 ? "已整理共同旧版的待跟进事项。" : memberIndex === 3 ? "已补充国内版分支的处理记录。" : "已补充国际版分支的处理记录。" : item.status === "diverge" ? (memberIndex === 0 ? "已整理待跟进事项，建议先处理账号同步与会话列表。" : "已补充测试和发布前检查，建议先核对剩余问题。") : "已记录当前进度。" },
         ] : [],
         contentState,
@@ -292,6 +294,8 @@ export function buildDemoSessionGroups(
       groupVariant: scope ?? members[0].variant,
       title: item.title,
       projectLabel: members[0].projectLabel,
+      // 摘要：取「最新有内容的活跃副本」的最近一条用户消息（与后端 excerpt 同口径）。
+      excerpt: members.find((member) => member.canBeSource)?.contentPreview?.[0]?.text ?? null,
       latestActivityAt: Math.max(...members.map((member) => member.updatedAt)),
       memberCount: members.length,
       activeMemberCount: members.length,

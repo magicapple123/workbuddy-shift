@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// 归一化时替代「本副本 sessionId」的固定标记。其余 sessionId 一律保留原文。
 pub const SESSION_ID_MARKER: &str = "__wb_shift_session_id__";
@@ -51,6 +51,29 @@ pub struct ContentSnapshot {
     pub text: String,
     pub full_digest: String,
     pub normalized: NormalizedContent,
+    /// 正文里最新一条记录的毫秒时间戳（口径同 [`record_timestamp_of`]：只认正数）。
+    ///
+    /// 在**归一化的同一趟逐行解析**里顺带得到（见 [`normalize_jsonl_with_latest`]），
+    /// 因此读一次正文就同时拿到「内容身份」与「最近活跃时间」，不需要为后者再扫一遍
+    /// MB 级正文。`None` = 这篇正文一个可用时间戳都没有（旧记录 / 全空行 / 时间戳写坏），
+    /// 调用方必须回退到会话行自己的 `updated_at`，不得当成 0 或「刚刚」。
+    pub latest_at: Option<i64>,
+    /// 列表页预计算的摘要与预览（缓存命中时 `text` 为空，只能靠这两个字段出内容）。
+    ///
+    /// 写路径（复制 / 同步）必须读全文并保留 `text`，此时为 `None`；列表装配路径会
+    /// 填充它，使缓存命中后不必再保留 MB 级正文原文（实测全文缓存 531 份要 3.4GB）。
+    pub list_facts: Option<Arc<ListFacts>>,
+}
+
+/// 列表页从正文里真正需要的小结果：两条摘要用文本 + 预览 + 记录数。
+///
+/// 同步判定用的逐行指纹（`normalized`）仍在 `ContentSnapshot` 里，每条约几十 KB，
+/// 远小于正文原文；这里只补上从 `text` 派生、又必须跟着缓存走的部分。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListFacts {
+    pub excerpt: Option<String>,
+    pub preview: Vec<serde_json::Value>,
+    pub record_count: Option<usize>,
 }
 
 /// 正文读取结果。`Unavailable` 表示内容不可验证（空/非法/读取期间变化），
@@ -107,6 +130,22 @@ pub(crate) fn line_digest_of(line: &str) -> String {
 /// - 仅把本副本自己的 sessionId 文本替换为固定标记，其它 sessionId 原样保留
 ///   （沿用既有复制的引用替换语义）；键序与格式差异因此会成为保守差异。
 pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedContent, String> {
+    normalize_jsonl_with_latest(text, own_session_id).map(|(normalized, _)| normalized)
+}
+
+/// [`normalize_jsonl`] + 正文里最新一条记录的毫秒时间戳（[`ContentSnapshot::latest_at`]）。
+///
+/// 两个结果来自**同一趟逐行解析**：归一化本来就要逐行过一遍（摘要与语法校验），顺手记下
+/// 最大时间戳不额外增加读取或解析次数。这正是「列表/详情的最近更新」不用再整篇扫第二遍的
+/// 原因——真实库里单个会话正文可达数 MB、一次列表装配要读数百份，二次扫描会直接放大首屏
+/// 耗时（[`latest_record_timestamp`] 单独调用一次就等于整篇再解析一遍）。
+///
+/// 时间戳只用于展示口径，不参与内容身份：坏行、缺字段、非正数一律跳过，不让「某一行的时间戳
+/// 写坏」升级成整篇内容不可读。
+pub fn normalize_jsonl_with_latest(
+    text: &str,
+    own_session_id: &str,
+) -> Result<(NormalizedContent, Option<i64>), String> {
     let own_session_id = own_session_id.trim();
     if own_session_id.is_empty() {
         return Err("缺少会话 id，无法读取内容".to_string());
@@ -123,16 +162,18 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
 
     let mut line_digests = Vec::with_capacity(lines.len());
     let mut comparable_line_digests = Vec::with_capacity(lines.len());
+    let mut latest_at: Option<i64> = None;
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if line.trim().is_empty() {
             return Err(format!("第 {} 行为空，内容可能不完整", index + 1));
         }
-        // 只做语法校验，不构建 `Value` 树：同一个解析器、同样的接受集合，
-        // 但省掉整行对象的分配与建树（长会话上约占归一化耗时的四成）。
-        serde_json::from_str::<serde::de::IgnoredAny>(line).map_err(|error| {
-            describe_parse_failure(line, index + 1, index + 1 == lines.len(), &error)
-        })?;
+        // 只声明 `timestamp` 一个字段的结构体反序列化：一次解析既完成语法校验，又顺手拿到
+        // 时间戳；未知字段由 serde 直接跳过，不必为每行分配整棵 JSON 树（与原先用
+        // `IgnoredAny` 省掉建树的理由相同）。接受集合与原先逐字一致：任何合法 JSON 都算合法行。
+        if let Some(timestamp) = probe_line_timestamp(line, index + 1, index + 1 == lines.len())? {
+            latest_at = Some(latest_at.map_or(timestamp, |previous| previous.max(timestamp)));
+        }
         // 绝大多数行不含自己的会话 id：只在真的出现时才分配替换副本。
         let marked = if line.contains(own_session_id) {
             Cow::Owned(line.replace(own_session_id, SESSION_ID_MARKER))
@@ -145,12 +186,47 @@ pub fn normalize_jsonl(text: &str, own_session_id: &str) -> Result<NormalizedCon
         line_digests.push(digest);
     }
     let total_digest = total_digest_of(&line_digests);
-    Ok(NormalizedContent {
-        record_count: line_digests.len(),
-        line_digests,
-        comparable_line_digests,
-        total_digest,
-    })
+    Ok((
+        NormalizedContent {
+            record_count: line_digests.len(),
+            line_digests,
+            comparable_line_digests,
+            total_digest,
+        },
+        latest_at,
+    ))
+}
+
+/// 单行的「可用时间戳」：一次结构体解析同时完成语法校验与取时间戳。
+///
+/// 返回值语义：
+/// - `Ok(Some(ts))`：该行合法且带正数毫秒时间戳（口径同 [`record_timestamp_of`]）；
+/// - `Ok(None)`：该行合法但没有可用时间戳——缺字段、值为 0 / 负数（1970 不是活动时间）、
+///   或「合法 JSON 但不是对象 + 整数 timestamp」（数组、字符串、`timestamp` 是字符串等）。
+///   这些形态在改造前都被 `IgnoredAny` 接受，接受集合保持不变；
+/// - `Err`：该行确实不是合法 JSON，诊断文案由 [`describe_parse_failure`] 统一产出。
+fn probe_line_timestamp(
+    line: &str,
+    line_no: usize,
+    is_last_line: bool,
+) -> Result<Option<i64>, String> {
+    match serde_json::from_str::<TimestampProbe>(line) {
+        Ok(probe) => Ok(probe.timestamp.filter(|value| *value > 0)),
+        Err(error) if error.classify() == serde_json::error::Category::Data => {
+            // 语法已通过、只是形状不符：按原口径只做一次纯语法校验（失败几乎不可能，
+            // 但保守处理，绝不把「形状不符」升级成「坏行」）。
+            serde_json::from_str::<serde::de::IgnoredAny>(line)
+                .map(|_| None)
+                .map_err(|fallback| describe_parse_failure(line, line_no, is_last_line, &fallback))
+        }
+        // 坏行：用改造前同一个解析器复跑一次，保证「第 N 行的格式无法识别（列号、错误类别
+        // …）」逐字不变（前端提示与存量排障脚本按这个骨架匹配）。代价只在坏行上多一次解析，
+        // 正常行不会走到这里。
+        Err(_) => match serde_json::from_str::<serde::de::IgnoredAny>(line) {
+            Ok(_) => Ok(None),
+            Err(error) => Err(describe_parse_failure(line, line_no, is_last_line, &error)),
+        },
+    }
 }
 
 /// 判定用的行摘要：把「末条归一签名」改写成确定性形式后再取摘要。
@@ -298,11 +374,15 @@ pub fn read_content_snapshot(path: &Path, own_session_id: &str) -> ContentState 
         Err(_) => return ContentState::Unavailable("内容格式异常，无法读取".to_string()),
     };
     let full_digest = full_digest_of(text.as_bytes());
-    match normalize_jsonl(&text, own_session_id) {
-        Ok(normalized) => ContentState::Ready(ContentSnapshot {
+    // 归一化与「正文最新时间戳」共用同一趟逐行解析：不为后者再扫一遍正文（见
+    // `normalize_jsonl_with_latest` 的文件头说明）。
+    match normalize_jsonl_with_latest(&text, own_session_id) {
+        Ok((normalized, latest_at)) => ContentState::Ready(ContentSnapshot {
             text,
             full_digest,
             normalized,
+            latest_at,
+            list_facts: None,
         }),
         Err(reason) => ContentState::Unavailable(reason),
     }

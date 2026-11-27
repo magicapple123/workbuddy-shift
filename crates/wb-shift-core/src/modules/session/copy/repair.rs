@@ -63,7 +63,9 @@ pub(in crate::modules::session) fn repair_source_snapshot(
         kept_tail_line_records,
         nul_stripped,
     } = repair;
-    let normalized = session_link::normalize_jsonl(&text, cid)
+    // 归一化与「正文最新时间戳」一次得到（`latest_at` 只用于展示口径的最近活跃时间，
+    // 不参与摘要与校验）：修复路径同样不该为此再扫一遍正文。
+    let (normalized, latest_at) = session_link::normalize_jsonl_with_latest(&text, cid)
         .map_err(|error| format!("{unrepaired}；修复后的内容仍无法校验（{error}）"))?;
     let note = describe_repair(
         dropped_tail_line,
@@ -76,6 +78,8 @@ pub(in crate::modules::session) fn repair_source_snapshot(
             full_digest: full_digest_of(text.as_bytes()),
             text,
             normalized,
+            latest_at,
+            list_facts: None,
         },
         note,
     ))

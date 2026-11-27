@@ -77,7 +77,7 @@ pub(crate) use query::LiveSessionRows;
 pub(crate) use recovery::recover_pending_session_operations;
 pub use run::sync_sessions_cross;
 pub(crate) use run::sync_sessions_for_switch;
-pub(crate) use sync::{group_any_alive, member_content_state, SyncSelection, REASON_PREVIEW_STALE};
+pub(crate) use sync::{group_any_alive, SyncSelection, REASON_PREVIEW_STALE};
 pub use sync::{parse_sync_selections, session_links_preview, session_links_preview_cross};
 
 /// 档位不支持会话复制时的统一错误文案。

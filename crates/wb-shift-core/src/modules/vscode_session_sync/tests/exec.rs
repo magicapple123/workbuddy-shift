@@ -172,6 +172,8 @@
                 comparable_line_digests: Vec::new(),
                 total_digest: String::new(),
             },
+            latest_at: None,
+            list_facts: None,
         };
         SyncItemPlan {
             group_id: "group-under-test".to_string(),
