@@ -18,20 +18,59 @@
 //! - 旁路：[`note_auth_success`] / [`ensure_fresh_token`] 只 `spawn` 复核，不 await，
 //!   触发它的那次请求的返回值不受影响。会内联刷新的账号不再 spawn（[`should_spawn_verify`]），
 //!   否则同一账号会并发打两次刷新接口，refresh token 轮换会让两次请求互相作废。
+//!
+//! # 3. 当前账号不再被「抢刷」（T01）
+//!
+//! 保活默认无条件刷新全部账号（见 [`run_keepalive_cycle`]），而官方客户端与本工具共用
+//! 同一份 refresh token：客户端刚续期过，本工具再用**账号库里的旧令牌**去刷新，服务端会
+//! 把客户端手里的新令牌轮换掉——用户看到的现象是「客户端突然掉登录」。
+//!
+//! 因此 [`refresh_account_token`] 在**抢到 `credentials.lock` 之后、构造请求之前**重读
+//! 官方认证文件（live）并三选一（判定见 [`decide_live_action`]）：
+//!
+//! - **adopt**：live 里是同一个 uid 且凭据确实更新（`auth_file::CredentialFreshness`）→ 只把快照
+//!   回填账号库，**不发刷新请求、不写 live 文件**。这样库内凭据追上客户端，下一轮保活
+//!   自然不会再去抢刷；
+//! - **skip**：live 文件存在但读不出来（通常是客户端正在写）→ 本次跳过，不改库、不发请求；
+//! - **照旧刷新**：文件不存在（该档位没有登录的官方客户端，也就没有「当前账号」）、
+//!   或 live 属于别的账号 / 并不更新 → 与改造前逐字一致。
+//!
+//! 结果通过**只在内存里**的 `refresh_outcome` 字段回传给保活循环（[`refresh_outcome`]），
+//! 它永远不进账号库：所有写入都在 `upsert_account` 之后才插入。
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::modules::account::{account_meta, build_auth_headers, upsert_account};
+use crate::modules::account::{account_meta, build_auth_headers, secret_value, upsert_account};
 use crate::modules::auth_file;
 use crate::modules::config::{
     http_request, is_html_failure, load_checkin_config, norm_ts, now_ms, RunFlagGuard,
 };
+use crate::modules::variant::WbVariant;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 static RELOGIN_SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 单测里「本进程一共真正发出过多少次刷新请求」的计数器（生产不编译）。
+///
+/// 验收要求「adopt 时 **0 次**刷新请求」，而请求本身是不可达的（也不该打真实网关），
+/// 只能用**发出前的计数不变**来证明「没有发」。放在 `http_request` 调用点前一步，
+/// 因此它统计的是「真的要发」，不是「函数被调用」。
+#[cfg(test)]
+static REFRESH_HTTP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// 单测用的刷新 URL 覆盖：`(账号 id 或 uid, 替换后的 URL)`。
+///
+/// 非当前账号必须走原刷新路径，而原路径会真的打网关（`www.codebuddy.cn` 等）。单测
+/// 改成打本机不可达端口，只验证「尝试过刷新」；**按账号身份匹配**而不是全局生效，
+/// 避免并行用例（`refresh_url_follows_account_variant`）读到别人的覆盖值。
+#[cfg(test)]
+static REFRESH_URL_OVERRIDE: Mutex<Option<(String, String)>> = Mutex::new(None);
 
 /// 本条记录「本次没有真正刷新」的内存标记键（**从不落盘**）。
 ///
@@ -41,6 +80,29 @@ static RELOGIN_SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
 const REFRESH_SKIPPED_FIELD: &str = "refresh_skipped";
 /// [`REFRESH_SKIPPED_FIELD`] 的唯一取值：抢不到凭据写入锁。
 const REFRESH_SKIPPED_LOCK_BUSY: &str = "credential_lock_busy";
+
+/// 本次刷新的**机器可读结果**字段名（**只存在于内存，从不落盘**）。
+///
+/// 与 [`REFRESH_SKIPPED_FIELD`] 的分工：那个字段只表示「抢不到锁 ⇒ 这次没刷新」，
+/// 是给宿主做响应投影用的稳定契约；本字段是**诊断**用的四值词表，覆盖「走了哪条路径」。
+const REFRESH_OUTCOME_FIELD: &str = "refresh_outcome";
+/// 采用 live 认证文件的新凭据（没有发刷新请求、没有写 live 文件）。
+const REFRESH_OUTCOME_ADOPTED: &str = "adopted";
+/// 走完了改造前的刷新路径（成功 / 暂时失败 / 吊销都在此，结论看标记字段）。
+const REFRESH_OUTCOME_REFRESHED: &str = "refreshed";
+/// live 认证文件存在但读不出来（可能在写）：本次跳过。
+const REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE: &str = "skipped_live_unreadable";
+/// 抢不到 `credentials.lock`：本次跳过。
+const REFRESH_OUTCOME_SKIPPED_CREDENTIAL_LOCK: &str = "skipped_credential_lock";
+
+/// 本次刷新的机器可读结果；不是本文件产出的对象（或没走到刷新）时返回 `None`。
+///
+/// 取值是上面四个 `REFRESH_OUTCOME_*` 常量。标记只在返回值里，`upsert_account` 之后
+/// 才插入，因此**不会**出现在账号库里（单测 `adopt_when_live_credentials_are_newer`
+/// 同时断言这一点）。
+pub fn refresh_outcome(account: &Value) -> Option<&str> {
+    account.get(REFRESH_OUTCOME_FIELD).and_then(Value::as_str)
+}
 
 /// 本次刷新是否因为抢不到凭据写入锁而被跳过（该标记只在内存里，从不落盘）。
 pub fn refresh_was_skipped(account: &Value) -> bool {
@@ -551,6 +613,17 @@ pub async fn verify_relogin(account_id: &str) -> Value {
                 .map(str::to_string),
         });
     }
+    if refresh_outcome(&verified) == Some(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE) {
+        // 认证文件正在被官方客户端写：这次没有打接口，也就没有「复核结论」。
+        // 与抢不到锁同一条语义——**不写** `needs_relogin_checked_at`（那是冷却起点，
+        // 写了等于谎报「复核失败」），下一轮再试。
+        return json!({
+            "accountId": account_id,
+            "verified": false,
+            "skipped": "live_unreadable",
+            "reason": Value::Null,
+        });
+    }
     let recovered = !has_relogin_marker(&verified);
     record_verify_result(account_id, recovered);
     json!({
@@ -617,12 +690,35 @@ pub async fn run_relogin_verify_sweep() -> Value {
 
 /// 刷新接口 URL：域名与路径前缀都按账号自身档位选（缺档位字段 → 国内版，零回归）。
 fn refresh_url(account: &Value) -> String {
+    // 单测注入：非当前账号的用例必须证明「真的去刷新了」，但不能打真实网关。
+    // 只对指定账号生效，其它用例（含 `refresh_url_follows_account_variant`）读到的
+    // 仍是按档位拼出来的真实 URL。
+    #[cfg(test)]
+    if let Some(url) = test_url_override(account) {
+        return url;
+    }
     let variant = crate::modules::account::variant_of(account);
     format!(
         "{}{}/auth/token/refresh",
         variant.api_endpoint(),
         variant.api_prefix()
     )
+}
+
+/// 取单测注入的 URL（仅当账号 id 或 uid 与注入键一致时命中）。
+#[cfg(test)]
+fn test_url_override(account: &Value) -> Option<String> {
+    // `REFRESH_URL_OVERRIDE` 是单测的注入点：中毒只可能来自用例自身 panic，
+    // 取回内部值继续用即可（不涉及任何业务状态），因此走 `recover`。
+    let guard = crate::modules::locks::recover(&REFRESH_URL_OVERRIDE);
+    let (key, url) = guard.as_ref()?;
+    let matched = ["id", "uid"].iter().any(|field| {
+        account
+            .get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == key)
+    });
+    matched.then(|| url.clone())
 }
 
 /// 构造刷新请求头：鉴权头 + 刷新会话头。
@@ -638,6 +734,157 @@ fn refresh_headers(account: &Value, refresh_token: &str) -> HashMap<String, Stri
     headers
 }
 
+/// 官方认证文件（live）的读取结果。
+///
+/// **必须区分「文件不存在」与「文件在但读不出来」**：
+/// - 不存在 → 该档位没有登录的官方客户端，也就没有「当前账号」，保活要照旧刷新
+///   （否则这台机器上没装客户端时保活会永久停摆，闲置令牌会被服务端清理）；
+/// - 存在但读不出来 → 官方客户端很可能正在写它，此刻任何结论都不可靠，只能跳过本次。
+enum LiveAuthState {
+    /// 文件不存在。
+    Absent,
+    /// 文件存在但读/解析失败。
+    Unreadable,
+    /// 解析成功的认证文件根。
+    Parsed(Value),
+}
+
+/// 读 live 认证文件，并保留「不存在 / 读不出来」的区别（[`auth_file::read_auth_file`]
+/// 把两者都压成 `None`，这里不能用它）。
+fn read_live_auth_state(variant: WbVariant) -> LiveAuthState {
+    let path = variant.auth_file_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(root) => LiveAuthState::Parsed(root),
+            Err(_) => LiveAuthState::Unreadable,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LiveAuthState::Absent,
+        Err(_) => LiveAuthState::Unreadable,
+    }
+}
+
+/// live 认证文件里可以回填到账号库的凭据快照。
+///
+/// token 一律用 [`secret_value`] 取：WorkBuddy 5.6 起 token 可能是 `$wbEncrypted`
+/// 信封对象，信封必须**原样**搬运（拆成字符串会静默毁掉登录态）。
+struct LiveCredentials {
+    /// access token（明文串或加密信封）。
+    access_token: Value,
+    /// refresh token；live 里没有时保留账号库的原值。
+    refresh_token: Option<Value>,
+    /// access token 到期时刻（毫秒）。
+    expires_at: Option<i64>,
+    /// 最近一次续期时刻（毫秒）。
+    refreshed_at: Option<i64>,
+    /// refresh token 到期时刻（毫秒）。
+    refresh_expires_at: Option<i64>,
+}
+
+impl LiveCredentials {
+    /// 从认证文件根取凭据；连 access token 都取不到时返回 `None`（没什么可 adopt 的）。
+    fn from_auth_file(root: &Value) -> Option<Self> {
+        let auth = root.get("auth");
+        let field = |key: &str| {
+            auth.and_then(|inner| secret_value(inner, key))
+                .or_else(|| secret_value(root, key))
+        };
+        let access_token = field("accessToken").or_else(|| field("access_token"))?;
+        let refresh_token = field("refreshToken").or_else(|| field("refresh_token"));
+        let freshness = auth_file::CredentialFreshness::of_auth_file(root);
+        let refresh_expires_at = auth
+            .and_then(|inner| norm_ts(inner.get("refreshExpiresAt")))
+            .or_else(|| norm_ts(root.get("refreshExpiresAt")));
+        Some(Self {
+            access_token,
+            refresh_token,
+            expires_at: freshness.expires_at(),
+            refreshed_at: freshness.refreshed_at(),
+            refresh_expires_at,
+        })
+    }
+
+    /// live 的凭据与账号库里的是否**不同**（adopt 的前提之一）。
+    ///
+    /// 只有一项也不差时不 adopt：没有信息可搬，多写一次账号库只会制造噪声。
+    fn differs_from(&self, account: &Value) -> bool {
+        let stored_access_token = secret_value(account, "access_token");
+        if stored_access_token.as_ref() != Some(&self.access_token) {
+            return true;
+        }
+        match (
+            self.refresh_token.as_ref(),
+            secret_value(account, "refresh_token"),
+        ) {
+            (Some(live), Some(stored)) => live != &stored,
+            // live 有、库里没有 → 不同；live 没有 → 不算差异（保留库内原值）。
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+}
+
+/// 抢到 `credentials.lock` 之后、构造刷新请求之前的判定结果。
+enum LiveAction {
+    /// 用 live 快照回填账号库：**不发刷新请求、不写 live 文件**。
+    Adopt(LiveCredentials),
+    /// live 文件存在但读不出来：本次跳过（不改库、不发请求、不写 `needs_relogin`）。
+    SkipUnreadable,
+    /// 与改造前一致：照常刷新。
+    RefreshAsBefore,
+}
+
+/// 判定本次该 adopt / 跳过 / 照旧刷新（整段判定必须在锁内做，理由见调用点）。
+fn decide_live_action(account: &Value, variant: WbVariant) -> LiveAction {
+    let live = match read_live_auth_state(variant) {
+        // 没有 live 文件 = 该档位没有登录的官方客户端 = 没有「当前账号」。
+        LiveAuthState::Absent => return LiveAction::RefreshAsBefore,
+        LiveAuthState::Unreadable => return LiveAction::SkipUnreadable,
+        LiveAuthState::Parsed(root) => root,
+    };
+    // 身份口径与切号写回同源（`auth_file::same_account`）：两处若各写一份，
+    // 迟早会出现「切号认为同一个账号、刷新认为不是」的分裂。
+    if !auth_file::same_account(account, &live) {
+        return LiveAction::RefreshAsBefore;
+    }
+    let Some(credentials) = LiveCredentials::from_auth_file(&live) else {
+        return LiveAction::RefreshAsBefore;
+    };
+    if !credentials.differs_from(account) {
+        return LiveAction::RefreshAsBefore;
+    }
+    // 「live 确实更新」只认两个时间戳（`lastRefreshTime` / `expiresAt`），判据与
+    // 切号写回的新鲜度校验完全同源：任一侧缺值不比较，相等不算新。
+    if auth_file::CredentialFreshness::of_auth_file(&live)
+        .newer_than(&auth_file::CredentialFreshness::of_account(account))
+        .is_none()
+    {
+        return LiveAction::RefreshAsBefore;
+    }
+    LiveAction::Adopt(credentials)
+}
+
+/// 把 live 快照回填到账号记录（纯内存；落盘由调用方 `upsert_account` 负责）。
+fn apply_live_credentials(account: &mut Value, credentials: &LiveCredentials) {
+    account["access_token"] = credentials.access_token.clone();
+    if let Some(refresh_token) = &credentials.refresh_token {
+        account["refresh_token"] = refresh_token.clone();
+    }
+    if let Some(expires_at) = credentials.expires_at {
+        account["expiresAt"] = json!(expires_at);
+    }
+    if let Some(refreshed_at) = credentials.refreshed_at {
+        account["refreshedAt"] = json!(refreshed_at);
+    }
+    if let Some(refresh_expires_at) = credentials.refresh_expires_at {
+        account["refreshExpiresAt"] = json!(refresh_expires_at);
+    }
+    // 官方客户端用这份凭据续期成功（live 比库内更新就是证据），所以「需重新登录」
+    // 与暂时失败诊断都已经过时：与真正续期成功同一语义，一起清掉。
+    // 这是 [`clear_relogin_marker`] 的第二个调用点，判据仍然是
+    // 「凭据已被证明续期过」，没有放宽「只有续期成功才清标记」的约束。
+    clear_relogin_marker(account);
+}
+
 /// 刷新单账号 token（POST /v2/plugin/auth/token/refresh），成功则落盘并返回新账号。
 ///
 /// 失败按 [`classify_refresh_failure`] 分级：
@@ -645,7 +892,15 @@ fn refresh_headers(account: &Value, refresh_token: &str) -> HashMap<String, Stri
 /// - `Temporary` / `Unknown` → **不写标记**，只写 `refresh_failed_at` /
 ///   `refresh_failed_reason`，保留原凭据等下一次重试。
 ///
-/// 成功是**唯一**清除标记的地方（`needs_relogin` / reason / since / 退避计数一起清）。
+/// 成功是**唯一**清除标记的地方（`needs_relogin` / reason / since / 退避计数一起清）；
+/// 唯一的另一种「凭据被证明续期过」是 adopt（见下），它清的是同一批字段。
+///
+/// # 当前账号不再被抢刷（T01）
+///
+/// 抢到锁之后先判定 live 认证文件（[`decide_live_action`]）：
+/// - live 是同一个 uid 且凭据确实更新 → **adopt**：只回填账号库，不发请求、不写 live；
+/// - live 存在但读不出来 → **跳过本次**（不落盘、不写标记）；
+/// - 其它情况 → 与改造前逐字一致，照常刷新。
 ///
 /// # 凭据写入互斥（issue #202）
 ///
@@ -692,13 +947,59 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
         Err(reason) => return refresh_skipped_by_credential_lock(account, reason),
     };
 
+    // ② 锁内重读 live 认证文件，先判定「这是不是当前登录的账号」。
+    //
+    // 必须在锁内、且必须在构造请求之前：`credentials.lock` 是「谁在改本机凭据」的唯一
+    // 互斥，锁外读到的新鲜度可能在这之后被一次切号改掉；而一旦发出刷新请求，服务端就会
+    // 轮换 refresh token——那条路不能回头。
+    match decide_live_action(&account, crate::modules::account::variant_of(&account)) {
+        LiveAction::Adopt(credentials) => {
+            apply_live_credentials(&mut account, &credentials);
+            let _ = upsert_account(&account);
+            // 与刷新成功路径对齐：账号库落盘后把新 access 同步给 CLI settings。
+            //
+            // 改造前当前账号一定会走真刷新，末尾（见函数尾部）会把新 access token 写进
+            // CLI settings env；adopt 提前 return 之后那段不再执行，若不同步，CLI 会一直
+            // 停在旧 access token 上，直到下一次切号或真刷新。
+            //
+            // 位置必须在 `drop(lock)` 之后：持 `credentials.lock` 期间不得再取 CLI 侧的
+            // 锁（`ensure_no_process_env_override` / settings 读改写会取另一把），
+            // 否则与切号写回形成锁序反转。诊断字段仍在同步之后写，`account` 不能提前 move。
+            drop(lock);
+            if cfg!(windows) {
+                let _ = crate::modules::codebuddy_cli::sync_windows_env_for_account(
+                    &account,
+                    previous_access_token.as_deref(),
+                );
+            }
+            // 诊断字段在落盘之后插入：它只属于本次调用，永远不进账号库。
+            account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_ADOPTED);
+            eprintln!("[refresh] 采用官方客户端的新凭据：未发刷新请求、未写认证文件");
+            return account;
+        }
+        LiveAction::SkipUnreadable => {
+            // 不 `upsert_account`、不写 `needs_relogin`、不发请求：文件正在被写时，
+            // 任何持久化结论都可能是错的；本次凭据仍可用，等下一次保活再看。
+            drop(lock);
+            account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE);
+            eprintln!("[refresh] 跳过刷新：认证文件存在但无法解析（可能正在被客户端写入）");
+            return account;
+        }
+        LiveAction::RefreshAsBefore => {}
+    }
+
     let headers = refresh_headers(&account, &rt);
     // 刷新必须走账号自身档位的域名：把国际版 token 打到国内网关等于登录失效。
     let url = refresh_url(&account);
+    // 单测据这个计数器断言「adopt 时 0 次刷新请求」（生产不编译）。
+    #[cfg(test)]
+    REFRESH_HTTP_CALLS.fetch_add(1, Ordering::SeqCst);
     let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     let recovered = apply_refresh_response(&mut account, &resp);
     let _ = upsert_account(&account);
-    // ② 账号库已经落盘，临界区到此结束；后面的 CLI 配置同步与凭据无关，不必持锁。
+    // 诊断字段同样在落盘之后插入（生产路径的取值见 `REFRESH_OUTCOME_REFRESHED`）。
+    account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_REFRESHED);
+    // ③ 账号库已经落盘，临界区到此结束；后面的 CLI 配置同步与凭据无关，不必持锁。
     drop(lock);
     // Windows 不执行 apiKeyHelper；当前 CLI 账号刷新后同步 settings env。
     // 同步失败不阻断 WorkBuddy 保活；状态接口会根据 settings 与账号库是否
@@ -720,9 +1021,11 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
 fn refresh_skipped_by_credential_lock(mut account: Value, reason: String) -> Value {
     eprintln!("[refresh] 跳过刷新：{reason}");
     account[REFRESH_SKIPPED_FIELD] = json!(REFRESH_SKIPPED_LOCK_BUSY);
-    // 与「暂时失败」同形：保活据此报 `temporary_failed`（不是 ok），且不写持久化字段。
+    // 与「暂时失败」同形：宿主据此提示「稍后重试」，且不写任何持久化字段。
     account["refresh_failed_at"] = json!(now_ms());
     account["refresh_failed_reason"] = json!(reason);
+    // 诊断取值：保活据此报 `skipped`（而不是 `temporary_failed`——账号本身没失败）。
+    account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_CREDENTIAL_LOCK);
     account
 }
 
@@ -874,7 +1177,9 @@ fn should_spawn_verify(stale: bool, has_rt: bool, marked: bool) -> bool {
 /// 账号被迫重新登录。
 ///
 /// 每个账号的结果分三档：`ok` / `failed`（吊销，需重新登录）/ `temporary_failed`
-/// （断网、5xx 等，稍后自动重试，**不算**账号失效）。
+/// （断网、5xx 等，稍后自动重试，**不算**账号失效）。T01 之后另加两档，形状不变：
+/// - `adopted`：当前登录账号的 live 凭据更新，已回填账号库（**没有**打刷新接口）；
+/// - `skipped`：本次没刷新（认证文件正在被写，或抢不到 `credentials.lock`）。
 pub async fn run_keepalive_cycle() -> Value {
     let Some(_guard) = RunFlagGuard::try_acquire(&KEEPALIVE_RUNNING) else {
         return json!({"skipped": "already_running"});
@@ -924,8 +1229,19 @@ pub async fn run_keepalive_cycle() -> Value {
             && fresh
                 .get("refresh_failed_at")
                 .is_some_and(|value| value.is_i64());
+        // 诊断取值优先于 `temporary_failed`：「adopt」与「跳过」都**不是**账号失败，
+        // 只是本次没走刷新请求。`refresh_outcome` 只在内存里，读不到就是改造前的路径。
+        let outcome = refresh_outcome(&fresh);
         let status = if failed {
             "failed"
+        } else if outcome == Some(REFRESH_OUTCOME_ADOPTED) {
+            "adopted"
+        } else if matches!(
+            outcome,
+            Some(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE)
+                | Some(REFRESH_OUTCOME_SKIPPED_CREDENTIAL_LOCK)
+        ) {
+            "skipped"
         } else if temporary {
             "temporary_failed"
         } else {
@@ -952,6 +1268,8 @@ pub async fn run_keepalive_cycle() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
 
     // -----------------------------------------------------------------------
@@ -1502,6 +1820,11 @@ mod tests {
             !crate::modules::account::LOCAL_ACCOUNT_FIELDS.is_empty(),
             "白名单为空说明已被清空，本用例失去意义，需同步调整"
         );
+        // T01 的诊断字段同理：它只属于本次调用，进白名单就会被旧值补回、长期沉在盘上。
+        assert!(
+            !crate::modules::account::LOCAL_ACCOUNT_FIELDS.contains(&REFRESH_OUTCOME_FIELD),
+            "`{REFRESH_OUTCOME_FIELD}` 不得进入 LOCAL_ACCOUNT_FIELDS"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1771,5 +2094,289 @@ mod tests {
         // 元数据本身不含 token：响应投影不能把凭据漏给浏览器。
         assert!(meta.get("access_token").is_none());
         assert!(meta.get("refresh_token").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // T01：当前账号不再被抢刷（adopt / skip / 非当前账号回归）
+    // -----------------------------------------------------------------------
+
+    /// 环境变量串行守卫：`WB_SHIFT_HOME` 是**进程级**状态，而 `cargo test` 默认多线程并行，
+    /// 两个用例同时改它就会读到对方的沙箱（一个用例的 live 文件落进另一个的目录）。
+    ///
+    /// 用 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：守卫必须**跨 await 持有**
+    /// （被测函数内部要 await 一次刷新请求），而那正是 `std` 版会触发
+    /// `clippy::await_holding_lock` 的形态——异步互斥量表达的本来就是「跨 await 的临界区」，
+    /// 不需要额外豁免。`const_new` 让它在 `static` 里可常量初始化。
+    ///
+    /// 顺带丢掉中毒语义：`tokio` 的锁不中毒，某个用例 panic 不会让后来者拿到
+    /// `PoisonError`，因此也不必再走 `locks::recover` 那条「中毒后取回 `()`」的路径。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().await
+    }
+
+    /// 临时家目录夹具：把 `WB_SHIFT_HOME` 指向临时目录，`Drop` 时恢复原值并删掉目录。
+    ///
+    /// 必须**恢复原值**而不是一律 `remove_var`：同进程里别的入口（外部脚本、其它用例）
+    /// 可能已经设过它，无条件删掉会让后续代码读写真实家目录。
+    struct SandboxHome {
+        root: PathBuf,
+        previous: Option<OsString>,
+    }
+
+    impl SandboxHome {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "workbuddy-shift-refresh-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&root).expect("创建沙箱家目录");
+            let previous = std::env::var_os(crate::modules::config::HOME_ENV_VAR);
+            std::env::set_var(crate::modules::config::HOME_ENV_VAR, &root);
+            Self { root, previous }
+        }
+    }
+
+    impl Drop for SandboxHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(crate::modules::config::HOME_ENV_VAR, value),
+                None => std::env::remove_var(crate::modules::config::HOME_ENV_VAR),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// 在沙箱里写一份 live 认证文件（路径由**生产实现**算，`WB_SHIFT_HOME` 已生效）。
+    fn write_live_auth_file(variant: WbVariant, content: &str) -> PathBuf {
+        let path = variant.auth_file_path();
+        std::fs::create_dir_all(path.parent().expect("认证文件必须有父目录"))
+            .expect("创建认证文件目录");
+        std::fs::write(&path, content).expect("写入 live 认证文件");
+        path
+    }
+
+    /// live 认证文件的 JSON 文本（字段形状与官方客户端一致：`account.uid` + `auth.*`）。
+    fn live_auth_json(
+        uid: &str,
+        access_token: &str,
+        refresh_token: &str,
+        last_refresh_time: i64,
+        expires_at: i64,
+    ) -> String {
+        serde_json::to_string_pretty(&json!({
+            "account": {"uid": uid},
+            "auth": {
+                "accessToken": access_token,
+                "refreshToken": refresh_token,
+                "lastRefreshTime": last_refresh_time,
+                "expiresAt": expires_at,
+            },
+        }))
+        .expect("序列化 live 认证文件")
+    }
+
+    /// 验收 1：库内旧、live 新（同一个 uid）→ adopt：回填账号库、**0 次刷新请求**、
+    /// live 文件一个字节都不动。
+    #[tokio::test]
+    async fn adopt_when_live_credentials_are_newer() {
+        // 守卫跨 await 持有：`WB_SHIFT_HOME` 是进程级变量，放锁后另一个并行用例会改掉它，
+        // 本用例就会读到（并写进）对方的沙箱。
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        // 13 位毫秒基准（现实的 `refreshedAt` / `expiresAt`，且必须是过去时刻：
+        // `normalize_refresh_ts` 会把未来时刻当「未知」丢弃）。
+        const STORE_REFRESHED_AT: i64 = 1_700_000_000_000;
+        const LIVE_REFRESHED_AT: i64 = STORE_REFRESHED_AT + 60_000;
+        const LIVE_EXPIRES_AT: i64 = STORE_REFRESHED_AT + 7_200_000;
+
+        let account = json!({
+            "id": "acc-adopt",
+            "uid": "uid-adopt",
+            "variant": "cn",
+            "access_token": "at-old",
+            "refresh_token": "rt-old",
+            "expiresAt": STORE_REFRESHED_AT + 3_600_000i64,
+            "refreshedAt": STORE_REFRESHED_AT,
+        });
+        crate::modules::account::save_accounts(std::slice::from_ref(&account))
+            .expect("写入沙箱账号库");
+
+        let live_path = write_live_auth_file(
+            variant,
+            &live_auth_json(
+                "uid-adopt",
+                "at-new",
+                "rt-new",
+                LIVE_REFRESHED_AT,
+                LIVE_EXPIRES_AT,
+            ),
+        );
+        let live_before = std::fs::read(&live_path).expect("读取 live 认证文件");
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let refreshed = refresh_account_token(account).await;
+
+        assert_eq!(
+            refresh_outcome(&refreshed),
+            Some(REFRESH_OUTCOME_ADOPTED),
+            "同一个 uid 且 live 更新时必须走 adopt"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "adopt 绝不允许发刷新请求（否则会顶掉客户端手上的新令牌）"
+        );
+        assert_eq!(
+            std::fs::read(&live_path).expect("读取 live 认证文件"),
+            live_before,
+            "adopt 只读 live：一个字节都不许写"
+        );
+
+        let stored = crate::modules::account::load_accounts();
+        assert_eq!(stored.len(), 1, "adopt 不得追加/删除账号");
+        assert_eq!(stored[0]["access_token"], "at-new", "库内 AT 必须追上 live");
+        assert_eq!(
+            stored[0]["refresh_token"], "rt-new",
+            "库内 RT 必须追上 live"
+        );
+        assert_eq!(stored[0]["refreshedAt"], LIVE_REFRESHED_AT);
+        assert_eq!(stored[0]["expiresAt"], LIVE_EXPIRES_AT);
+        assert!(
+            stored[0].get(REFRESH_OUTCOME_FIELD).is_none(),
+            "诊断字段只在内存里：落盘就等于给账号库加了一个永久字段"
+        );
+        assert!(!has_relogin_marker(&stored[0]));
+    }
+
+    /// 验收 2：live 文件存在但内容不是合法 JSON → 跳过本次：不发请求、不改账号库、
+    /// 不写 `needs_relogin`（文件可能正在被官方客户端写，任何结论都不可靠）。
+    #[tokio::test]
+    async fn skip_when_live_unreadable() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-skip",
+            "uid": "uid-skip",
+            "variant": "cn",
+            "access_token": "at-skip",
+            "refresh_token": "rt-skip",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        crate::modules::account::save_accounts(std::slice::from_ref(&account))
+            .expect("写入沙箱账号库");
+        let accounts_before =
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库");
+
+        let live_path = write_live_auth_file(variant, "{ 这不是合法 JSON");
+        let live_before = std::fs::read(&live_path).expect("读取 live 认证文件");
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let skipped = refresh_account_token(account).await;
+
+        assert_eq!(
+            refresh_outcome(&skipped),
+            Some(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE),
+            "文件在但读不出来必须跳过，不能退化成照常刷新"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "跳过时不得发刷新请求"
+        );
+        assert!(
+            !refresh_was_skipped(&skipped),
+            "live 读不出来是另一种跳过，不要挤占「抢不到锁」的稳定标记"
+        );
+        assert!(
+            !has_relogin_marker(&skipped),
+            "live 读不出来不是「需重新登录」：账号本身没被吊销"
+        );
+        assert!(
+            skipped.get("refresh_failed_at").is_none(),
+            "跳过不是失败：不写暂时失败诊断"
+        );
+        assert_eq!(
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库"),
+            accounts_before,
+            "跳过必须逐字节不动账号库"
+        );
+        assert_eq!(
+            std::fs::read(&live_path).expect("读取 live 认证文件"),
+            live_before,
+            "跳过不得改写 live 认证文件"
+        );
+    }
+
+    /// 验收 3（回归）：live 属于**别的**账号 → 与改造前逐字一致：照常去刷新。
+    ///
+    /// 网络部分换成「本机不可达端口」（`REFRESH_URL_OVERRIDE` 按账号身份命中），
+    /// 因此只验证「尝试过刷新」，绝不触碰真实网关。
+    #[tokio::test]
+    async fn non_current_account_still_refreshes() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-t01-non-current",
+            "uid": "uid-store",
+            "variant": "cn",
+            "access_token": "at-store",
+            "refresh_token": "rt-store",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        crate::modules::account::save_accounts(std::slice::from_ref(&account))
+            .expect("写入沙箱账号库");
+        // 客户端当前登录的是另一个账号（uid 不同）。
+        write_live_auth_file(
+            variant,
+            &live_auth_json(
+                "uid-other",
+                "at-other",
+                "rt-other",
+                1_700_000_100_000,
+                1_700_000_900_000,
+            ),
+        );
+
+        // 覆盖值按账号 id 匹配：即使本用例 panic 未清理，别的用例也读不到它。
+        let _ = crate::modules::locks::recover(&REFRESH_URL_OVERRIDE).replace((
+            "acc-t01-non-current".to_string(),
+            "http://127.0.0.1:1/v2/plugin/auth/token/refresh".to_string(),
+        ));
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let fresh = refresh_account_token(account).await;
+        let _ = crate::modules::locks::recover(&REFRESH_URL_OVERRIDE).take();
+
+        assert_eq!(
+            refresh_outcome(&fresh),
+            Some(REFRESH_OUTCOME_REFRESHED),
+            "非当前账号仍走改造前的刷新路径"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before + 1,
+            "必须真的尝试过刷新（连不上是本机端口，不是没发）"
+        );
+        // 连接失败 = 暂时失败：与改造前同一分级（不写 needs_relogin，保留原凭据）。
+        assert!(
+            !has_relogin_marker(&fresh),
+            "连不上不是吊销：不得标「需重新登录」"
+        );
+        assert_eq!(
+            fresh["access_token"], "at-store",
+            "失败时原凭据必须原样保留"
+        );
+        assert_eq!(fresh["refresh_token"], "rt-store");
+        assert!(
+            fresh.get("refresh_failed_at").is_some(),
+            "暂时失败要留诊断字段，供积分页/保活区分「稍后重试」"
+        );
     }
 }

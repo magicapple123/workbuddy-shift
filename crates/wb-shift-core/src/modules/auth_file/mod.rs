@@ -44,6 +44,9 @@ pub use sync::{
     write_back_credentials, CredentialFreshness, CREDENTIAL_LOCK_BUSY_MESSAGE,
     CREDENTIAL_LOCK_FILE, CREDENTIAL_LOCK_UNAVAILABLE_PREFIX,
 };
+// 「这是不是当前登录账号」的口径与令牌刷新侧共用（T01），因此只放到 crate 可见，
+// 不进公开 API：对外暴露账号身份判定没有调用方，也会把内部口径锁死。
+pub(crate) use sync::same_account;
 
 #[cfg(test)]
 mod tests {
