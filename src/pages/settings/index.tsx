@@ -8,6 +8,7 @@ import { AutoCheckinCard } from "./auto-checkin-card";
 import { AutoRotateCard } from "./auto-rotate-card";
 import { AutomationSyncCard } from "./automation-sync-card";
 import { CompanionCard } from "./companion-card";
+import { CredentialCard } from "./credential-card";
 import { DiagnosticsCard } from "./diagnostics-card";
 import { PendingWritesCard } from "./pending-writes-card";
 import { ErrorLogCard } from "./error-log-card";
@@ -64,6 +65,7 @@ export default function SettingsPage() {
       "settings-startup": () => <StartupCard />,
       "settings-notifications": () => <NotificationHistoryCard />,
       "settings-error-log": () => <ErrorLogCard />,
+      "settings-credential": () => <CredentialCard />,
       "settings-diagnostics": () => <DiagnosticsCard />,
       "settings-pending-writes": () => <PendingWritesCard />,
       "settings-updates": () => <UpdateCard />,

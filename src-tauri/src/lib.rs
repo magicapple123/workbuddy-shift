@@ -380,6 +380,8 @@ pub fn run() {
             commands::reveal_error_log,
             commands::get_diagnostics_report,
             commands::export_diagnostics,
+            commands::get_credential_config,
+            commands::save_credential_config,
             companion::get_companion_enabled,
             companion::set_companion_enabled,
             companion::open_companion_settings,

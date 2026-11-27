@@ -243,6 +243,11 @@ pub fn router(state: SharedState) -> Router {
         // 排障：脱敏诊断包全文（只读）。网页版只在响应里给文本，由前端复制，
         // 没有落盘路由——服务端不写用户机器上的任意路径。
         .route("/api/diagnostics", get(api_diagnostics_report))
+        // R6-06：只读写「按需解密」的三个开关位；不触发解密、不返回 token。
+        .route(
+            "/api/credential-config",
+            get(api_credential_config).post(api_save_credential_config),
+        )
         .route("/api/update/check", get(api_update_check))
         .route(
             "/api/update/config",
