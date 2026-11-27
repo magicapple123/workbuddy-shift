@@ -36,8 +36,12 @@ use crate::modules::process::cmd_builder;
 /// 取到的密钥在进程内复用的时长。
 pub(super) const KEY_TTL_MS: i64 = 10 * 60 * 1000;
 
-/// 子进程超时：实测 0.127s，2s 足够覆盖被杀软/EDR 首扫拖慢的一次。
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// 子进程超时：暖启动实测 0.097s，冷启动（客户端刚升级 / 杀软首扫）可达数秒。
+/// 取 8s：超时只会让本次降级为「读不到凭据」，宁慢不误判。
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// 首次取不到时的重试间隔：客户端单实例交接 / 刚启动时偶尔会「进程起来了但没输出」。
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 /// 取密钥的 Node 片段。字符串里不含任何用户数据，也不写 stdout 之外的地方。
 const LOGGER_GET_SCRIPT: &str = "process.stdout.write(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())";
@@ -167,9 +171,19 @@ pub(super) fn clear_cache() {
 }
 
 /// 真正取密钥：定位可执行文件 → 子进程取 `loggerGet()` 载荷 → 派生。
+///
+/// 首次失败重试一次：客户端刚被拉起（或正在被单实例交接）时，子进程会正常退出却
+/// 什么都不打印，表现为「空载荷」。这种失败是瞬时的，再 spawn 一次即可；真失败
+/// （exe 丢失 / 绑定不存在）会在第二次同样失败，代价只是多 150ms。
 fn fetch_key_from(app_path: &Path) -> Result<AtRestKey, AtRestError> {
     let exe = resolve_executable(app_path).ok_or(AtRestError::BindingMissing)?;
-    let payload = run_logger_get(&exe)?;
+    let payload = match run_logger_get(&exe) {
+        Ok(payload) => payload,
+        Err(_first) => {
+            std::thread::sleep(SPAWN_RETRY_DELAY);
+            run_logger_get(&exe)?
+        }
+    };
     let secret = payload
         .get("atRestSecretKey")
         .and_then(Value::as_str)
