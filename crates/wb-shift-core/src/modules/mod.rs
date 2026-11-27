@@ -8,6 +8,7 @@ pub mod codebuddy_ide;
 pub mod codebuddy_ide_session;
 pub mod codebuddy_ide_session_sync;
 pub mod config;
+pub mod credential_events;
 pub mod credit_ledger;
 pub mod credit_usage;
 pub mod credits;
