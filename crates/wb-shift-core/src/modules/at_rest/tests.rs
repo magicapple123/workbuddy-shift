@@ -826,4 +826,3 @@ fn usable_account_ignores_plaintext_account() {
     assert!(is_temp(&json!({"__at_rest": true})));
     assert!(!is_temp(&json!({"__at_rest": false})));
 }
-
