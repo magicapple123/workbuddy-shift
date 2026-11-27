@@ -171,11 +171,11 @@
     fn rejects_error_and_missing_data_shapes() {
         assert!(matches!(
             parse_page(&json!({"code": 500, "msg": "bad"})),
-            Err(error) if error == "官方请求失败（code=500）：bad"
+            Err(error) if error.message == "官方请求失败（code=500）：bad"
         ));
         assert!(matches!(
             parse_page(&json!({"code": 0, "data": {"total": 0}})),
-            Err(error) if error == "官方响应格式无效"
+            Err(error) if error.message == "官方响应格式无效"
         ));
         assert_eq!(
             error_message(&json!({"code": -1, "message": "secret token"})),
@@ -265,4 +265,38 @@
             official_usage_url_for(&json!({"uid": "u-3", "domain": "www.workbuddy.ai"})),
             AI_OFFICIAL_USAGE_URL
         );
+    }
+
+    /// 上游失败带档位时，`UsageFetchError` 必须把 `failureKind` / `httpStatus` 带上来——
+    /// 这是 `officialUsage.errors[]` 能给出「下一步动作」的唯一来源。
+    #[test]
+    fn parse_page_failure_carries_failure_kind() {
+        let response = json!({
+            "code": 502,
+            "message": "服务端返回了网页而不是数据，可能是代理或网关拦截",
+            "failureKind": "gateway_html",
+            "httpStatus": 502,
+        });
+
+        let error = parse_page(&response).expect_err("502 必须判失败");
+        // 文案逐字不变（与改造前同一个 `error_message`）。
+        assert_eq!(error.message, error_message(&response));
+        assert_eq!(
+            error.failure_kind.as_deref(),
+            Some("gateway_html"),
+            "档位必须带上来"
+        );
+        assert_eq!(error.http_status, Some(502));
+        // `Display` 就是文案本身：probe 的 reason 与错误日志沿用旧口径。
+        assert_eq!(error.to_string(), error.message);
+    }
+
+    /// 业务错误 JSON（没有结构化字段）→ 两个字段都是 `None`，聚合出的 `errors[]` 项不变。
+    #[test]
+    fn parse_page_business_error_has_no_failure_kind() {
+        let response = json!({"code": 10085, "msg": "请求不合法，如有疑问请联系客服"});
+        let error = parse_page(&response).expect_err("非 0/200 一律失败");
+        assert_eq!(error.message, error_message(&response));
+        assert!(error.failure_kind.is_none());
+        assert!(error.http_status.is_none());
     }

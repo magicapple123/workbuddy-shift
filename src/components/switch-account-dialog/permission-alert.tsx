@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { FailureActions } from "@/components/failure-actions";
 import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -10,6 +11,8 @@ interface Props {
   error: string;
   needsPermission: boolean;
   permCheck: string | null;
+  /** 结构化失败（可选）：带 `failureKind` 时在文案下方渲染下一步按钮。 */
+  failure?: api.ApiFailure | null;
   /** 打开系统「完全磁盘访问」设置面板（仅 macOS；失败由调用方提示）。 */
   onOpenPermissionSettings: () => void;
   /** 立即做一次权限自检。 */
@@ -22,11 +25,16 @@ interface Props {
  * 与设置页「权限检测」卡片同一套平台差异（第三轮第 11 条）：macOS 是「完全磁盘访问」
  * 拖拽授权；Windows / Linux 没有这个开关，能做的只有定位认证文件与检查占用 / 只读。
  * 之前的实现把 macOS 文案和按钮无条件渲染出来，在 Windows 上点了毫无反应。
+ *
+ * 除了「无权限」这条既有分支，失败还可能带着结构化档位（`failureKind`）：那类失败交给
+ * {@link FailureActions} 渲染下一步；没有档位时它返回 `null`，这一块与改造前逐像素相同。
+ * 两条分支互不影响（可能同时成立，也可能都不成立）。
  */
 export function SwitchAccountPermissionAlert({
   error,
   needsPermission,
   permCheck,
+  failure,
   onOpenPermissionSettings,
   onRunPermissionCheck,
 }: Props) {
@@ -58,6 +66,7 @@ export function SwitchAccountPermissionAlert({
     <Alert variant={needsPermission ? "warning" : "destructive"} className="min-w-0 shrink-0 break-all">
       <AlertDescription className="min-w-0 break-all">
         <div className="min-w-0 break-all">{error}</div>
+        <FailureActions failure={failure ?? null} source="switch-account" />
         {needsPermission && (
           <div className="mt-2 space-y-2">
             {macos ? (

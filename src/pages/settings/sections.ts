@@ -185,6 +185,28 @@ export const SETTINGS_SECTIONS: SettingsSectionSpec[] = [
     availability: "always",
   },
   {
+    // 反馈前的「一次导出」入口：含版本、宿主、客户端安装情况与最近错误日志，
+    // 全部自动脱敏。桌面端落盘、网页版下载/复制，因此两种形态都要能看见（`always`）。
+    id: "settings-diagnostics",
+    title: "诊断包",
+    group: "desktop",
+    rows: ["预览诊断包", "导出诊断包"],
+    keywords: [
+      "诊断",
+      "诊断包",
+      "导出",
+      "复制",
+      "日志",
+      "反馈",
+      "报障",
+      "issue",
+      "排障",
+      "脱敏",
+      "support",
+    ],
+    availability: "always",
+  },
+  {
     id: "settings-updates",
     title: "自动更新",
     group: "desktop",
@@ -227,6 +249,19 @@ export function sectionVisible(availability: SettingsAvailability): boolean {
 /** 当前环境下渲染的节（顺序同注册表）。 */
 export function visibleSettingsSections(): SettingsSectionSpec[] {
   return SETTINGS_SECTIONS.filter((section) => sectionVisible(section.availability));
+}
+
+/**
+ * 指定 id 的节在当前环境下是否真的会渲染。
+ *
+ * 给「跳到某一节」的深链入口用（例如失败动作里的「检查更新代理」跳
+ * `/settings#settings-updates`）：目标节不可见时 `SettingsToc` 找不到节点会静默放弃，
+ * 结果就是一个点了没反应的按钮，所以调用方必须先问这一句。未知 id 一律 `false`
+ * （拼错 id 的深链同样不该渲染按钮）。
+ */
+export function isSectionVisible(id: string): boolean {
+  const section = SETTINGS_SECTIONS.find((entry) => entry.id === id);
+  return section ? sectionVisible(section.availability) : false;
 }
 
 /** 搜索归一化：去首尾空白 + 小写。中文没有大小写，但英文关键词要能大小写不敏感地命中。 */

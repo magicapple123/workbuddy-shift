@@ -37,6 +37,20 @@ function downloadBlob(fileName: string, blob: Blob): void {
 }
 
 /**
+ * 纯文本下载（诊断包这类「网页版不落盘」的导出用）。
+ *
+ * 桌面端不走这里：那条路径要先弹系统保存对话框再调命令原子写入
+ * （WebView2 里 Blob 下载不会落盘，2026-11-19 实机确认）。
+ */
+export function downloadTextFile(
+  fileName: string,
+  content: string,
+  mime = "text/plain;charset=utf-8",
+): void {
+  downloadBlob(fileName, new Blob([content], { type: mime }));
+}
+
+/**
  * 保存 xlsx：二进制在前端生成。
  *
  * - WebUI / 演示模式：浏览器 Blob 下载；

@@ -80,7 +80,7 @@ Workspace 成员与共享依赖版本见根 [`Cargo.toml`](../Cargo.toml)。
 | 存储查看与清理 | `storage/`（`catalog` 分类聚合、`snapshot` 单次遍历快照（总览/会话/回收站共用）、`protected` 受保护目录判定与延迟计量、`reveal` 文件管理器定位（`scope=storage` 白名单 / `scope=cwd` 只读任意绝对目录）、`roots/` 白名单根） |
 | 限额 | `limits/`（`scan` 日志扫描、`parse/{mod,workbuddy,ide_cli}` 解析分类、`ledger/{mod,cache,payload}` 台账与缓存、`payload` 输出、`vscode_ext` VS Code 插件日志能力探测（只诊断，不产出限额条目））、`rate_limit_events/`（`state`/`parse`/`watch`）、`rate_limit_hook/`（`install`/`uninstall`/`status`） |
 | 统计与自动化 | `credits/`（`http` 取数、`resources` 投影）、`credit_usage/`（`collect`/`project`）、`official_usage/`（`fetch`/`parse`/`aggregate`）、`token_stats/`（`jsonl` 解码、`ide` 数据源、`projection` 聚合、`cache` 文件缓存）、`checkin/`（`status`、`window` 时间段、`cycle` 轮次、`logs`）、`travel/`（`status`/`cycle`/`config`）、`rotate/`（`decision`/`cycle`/`logs`）、`refresh.rs` |
-| 基础设施 | `config/`（`paths` 路径与环境变量、`store` 原子写/通用 JSON、`http` 请求与错误归一化 + 共享 `is_unauthorized`/`parse_number`、`configs/{mod,checkin,travel,automation}` 业务配置）、`notifications.rs`、`session_backup/`（`backup`/`lifecycle`/`cleanup`）、`error_log.rs`、`update.rs`、`switch/`、`linux_keyring.rs`（仅 Linux）、`locks.rs`（进程内锁获取 helper：中毒返回错误或显式恢复） |
+| 基础设施 | `config/`（`paths` 路径与环境变量、`store` 原子写/通用 JSON、`http` 请求与错误归一化 + 共享 `is_unauthorized`/`parse_number`、`configs/{mod,checkin,travel,automation}` 业务配置）、`notifications.rs`、`session_backup/`（`backup`/`lifecycle`/`cleanup`）、`error_log.rs`、`diagnostics/`（`redact` 脱敏纯函数、`report` 报告装配与 `.txt` 落盘）、`update.rs`、`switch/`、`linux_keyring.rs`（仅 Linux）、`locks.rs`（进程内锁获取 helper：中毒返回错误或显式恢复） |
 
 > `session` / `session_link` 已拆成目录模块（文件即子边界）；对外仍从 `session::` /
 > `session_link::` 的 re-export 使用，调用方不需要跟着改路径。
@@ -169,6 +169,26 @@ Workspace 成员与共享依赖版本见根 [`Cargo.toml`](../Cargo.toml)。
   校验请求体 DTO 与 Tauri 参数一致；`node scripts/check-companion-contract.mjs`
   校验悬浮窗演示桥的 postMessage channel 两端一致；`node scripts/check-structure.mjs`
   校验长文件豁免表、core 依赖方向、旧名称与 capability 最小化。
+- **结构化失败**：`src/lib/api/failure.ts` 里的 `ApiFailure`（`extends Error`）负责把
+  `{ code, message, failureKind, httpStatus }` 从两端还原出来——webui 取非 2xx 响应体，
+  桌面端对 `invoke` 的 `Err(String)` 做 `JSON.parse`（`failure_response` 的序列化结果本身就是
+  JSON）。**协议只有这四个字段**：「下一步动作」是界面决策，由前端 `ACTION_BY_KIND` 映射
+  （`login_expired→relogin`、`gateway_html→check_proxy`、`malformed→copy_diagnostic`、
+  `upstream→无`），不往传输层加字段。`asError()` 的返回值**逐字未变**（仍读 `message`），
+  新增的 `asFailure()` 只服务需要动作的新代码；Tauri 侧只有真正解析出结构时才替换抛出值。
+  注意：切号（本地文件操作，不经过 `http_request`）与 OAuth 的 `fail_oauth` 都**不产生四档**，
+  那些界面上动作行只在真有 `failureKind` 时出现，否则整块不渲染。
+- **积分链路走「结果字段」而不是「异常」**：`get_credit_expiry` 返回 `Value`（不是 `Result`），
+  失败也是一个正常 resolve 的 `{ ok:false, error, failureKind?, httpStatus? }`。
+  档位由 core 的 `credits::credit_failure_result`（`resources.rs`）从上游响应原样透传
+  （没有就**不写这个键**，`error` 文案一字不改），前端由
+  `src/pages/credit-stats/credit-failure.ts` 的 `findCreditFailure` 从 `creditMap` 里挑出来，
+  交给 `failureFromResponse()` 还原成 `ApiFailure` 再渲染动作行。**这条路径不能用
+  `asFailure()`**——那读的是 reject 值，这里没有 reject。
+- `get_credit_expiry` 结果里的 `failureKind` / `httpStatus` 目前是**预留字段**（前端
+  `CreditExpiry` 不消费，动作画面已改由 `officialUsage.errors[]` 承载），由
+  `credits/tests/failure.rs` 守护形状。**不要因为「没人用」就删**——那是契约的加法式扩展，
+  删掉以后想再用还得再改一次协议面。
 
 ### Demo Mode
 
@@ -221,6 +241,41 @@ channel 由 `scripts/check-companion-contract.mjs` 校验。
 
 三个关联命名空间互不可见：文件名 / 目录名不同，避免 WorkBuddy、VS Code 插件、
 CodeBuddy IDE 的关联关系互相污染（见 `session/paths.rs` 的 `LinkNamespace`）。
+
+### 诊断包（排障用的一次性导出）
+
+`crates/wb-shift-core/src/modules/diagnostics/` 把「作者必问的那几项」装配成一段脱敏文本
+（版本 / OS-arch / 宿主形态 / 语言 / `error.log` 最近 20 条 / 设置项**键名 + 值类型** /
+账号数量区间 / 各客户端装没装 / 工具数据目录状态（只读判断，不写盘）/ 限额 hook 安装状态），**不落任何自有
+文件**：桌面端写到用户选的 `.txt`（`export_diagnostics`，非 ROUTES 路由），网页版由前端
+复制或浏览器下载（`GET /api/diagnostics` 只返回文本）。
+
+两条结构性约束（不是注释，是编译期事实）：
+
+1. 模块树里**没有** `account` / `auth_file` / `oauth` / `session` 的 `use`——账号条数由宿主层
+   以 `usize` 传入（只做区间分桶），客户端探测结果同理；因此「不小心把 `accounts.json` 的
+   字段带出来」在类型层面就做不到；
+2. 脱敏在 `redact.rs` 里是一组**纯函数**（`<path>` / `<url>` / `<email>` / `<token>` /
+   `<uuid>` / `<num>` / `<user>` 七种占位符，风格与既有的 `limits::vscode_ext::redact` 对齐；
+   URL 保留 `scheme://host` 便于判断是哪家网关，路径与 query 抹成 `<url>`），单测直接喂含
+   真实令牌与邮箱的日志样本，断言输出里一个原文片段都不出现；另有顺序断言守住
+   「UUID / 令牌先于长数字」（否则 `550e8400-…-446655440000` 会被数字规则拆碎）。
+
+脱敏的三条边界（**不是 bug，别反复改**）：
+
+- **`Bearer` 之后的短令牌一定抹**：长度规则只认 ≥32 字符，`Authorization: Bearer
+  sk-secret-123` 里 13 字符的令牌靠「前一个词是 `Bearer`」的上下文规则认出来，抹成
+  `<token>`；刻意**不**扩展到 `token=` / `access_token=` / `password=` 这类键值形态——
+  那会把正常文案（`password=见文档`）一起吃掉。
+- **`KEY=长令牌` 会连键名一起吞**：`GH_TOKEN=ghp_…` 整词变 `<token>`（`=` 是词字符）。
+  这是「宁可比必要的更狠」的有意取舍（少一个键名只让作者少一个线索，反向漏一个令牌是事故）。
+  同理，**含空格的路径**只保证「不留路径残片」：`/Users/a/Library/Application Support/WB/`
+  会变成 `<path> <path>`（前一个词判成路径后，后续仍含 `/` 且长度 > 3 的片段继续抹），
+  但路径之后**不含 `/` 的普通词**不会被抹——那是正常英文，抹掉只会让报告读不懂。
+- **「工具数据目录可写」是疑似不是事实**：探针改成纯只读判断（`metadata` + `read_dir`，
+  任何情况下都不创建 / 不修改 / 不删除文件，避免进程中途被杀留下垃圾文件）。POSIX 的
+  mode 位判不了 root 与 ACL，Windows 上目录的 readonly 属性基本无意义，所以报告文案保留
+  「可能」，不要改成断言句。
 
 ### 各客户端数据
 
@@ -324,6 +379,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/limits/tests.rs` | 2329 | 测试 | 限额模块测试整体随模块搬迁，测试名与基线一致；第六轮加入「无模型条目按同账号同 resetAt 归并」「多日志根 union」「插件目录过滤」三组用例后超过原登记值。 | 同上，保留；继续膨胀时按「时间戳/归因」「页载荷聚合」「来源枚举」三组拆文件。 |
 | `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1518 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/vscode_cn_inject/tests/inject.rs` | 542 | 测试 | state.vscdb 锁冲突与重试用例（busy_timeout / 失败分类 / 重试循环）共用同一套 `hold_exclusive` + `insert_row` 夹具，拆开会让「同一把库、同一把锁、唯一变量是 attempts」的对照失效。 | 测试继续膨胀时把「锁冲突与重试」用例组拆到 `tests/inject_lock.rs`。 |
+| `crates/wb-shift-core/src/modules/diagnostics/redact.rs` | 540 | 脱敏纯函数 + 逐规则单测 | 占位符规则与「看前一个词」的两条上下文规则（`Bearer` 短令牌、含空格路径的后续片段）互相抢匹配，顺序本身就是契约，单测必须与实现同文件才能一眼对上顺序；测试约占 40%。 | 规则集稳定后把测试移到 `diagnostics/redact/tests.rs`（需要把文件改成目录模块）。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1282 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/sync.rs` | 1737 | 测试 | 会话同步主题测试分组（含「末条 incomplete 归一后不得永久分歧」的四条收敛用例，以及走真实复制链路 + 组载荷装配（`detail_at`）断言 `summaryStatus` 的三成员组场景，见 issue #3 最后一条）。「三成员组不得被末条归一误判为分歧」这条另带反假绿锚点（成员正文必须真读到：三个成员 `contentState == "ready"` 且 `recordCount > 0`），避免断言在空载荷上假绿。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/session/tests/exec.rs` | 1390 | 测试 | 会话执行/恢复主题测试分组（本轮加入「同步侧把未来时间戳夹到本次写入时刻」的用例，以及「目标侧既有未来值不得被夹小」的对照用例）。 | 同上，保留。 |
@@ -382,8 +438,8 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/session_link/content.rs` | 1021 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。本轮加入「比较口径」`comparable_line_digests`（把复制/同步写目标时的末条归一签名折算成确定性形式），它必须与存储口径（`line_digests`/`total_digest`）在读同一行的同一个循环里算出，两套口径分开维护正是不拆的理由。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`；比较口径随 `normalize_jsonl` 留在本文件。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 566 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |
 | `src/pages/credit-stats/data.ts` | 701 | 纯逻辑 | 档位过滤、客户端筛选（明细重算）、账本形状转换三套口径都在这里收敛，页面只调用；拆开会让同一口径出现多份实现。 | 下一轮把账本转换抽到 credit-stats/ledger-view.ts。 |
-| `src/pages/credit-stats/index.tsx` | 868 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
-| `crates/wb-shift-core/src/modules/credits/resources.rs` | 509 | 资源解析与投影 | 个人版资源包与企业配额共用同一套取值与时间戳解析（`first_number` / `first_value` / `parse_timestamp_ms`）以及 `credit_result` 投影：企业配额以单条资源呈现，必须与个人版保持同一份字段口径（如 `expireAt` 纯日期按 23:59:59），拆开会出现第二份口径。为资源包补充可选 `startAt`（`parse_timestamp_at` + `resolve_start_at`，按 `CycleStartTime → DeductionStartTime → CreateTime` 取值，纯日期按本地零点）后越过阈值；该次只做积分明细筛选，不在收尾里搬迁文件。 | 下次改企业配额时把 `parse_enterprise_usage` / `enterprise_credit_result` / `enterprise_id_from_accounts` / `credit_error_result` 与 `EnterpriseUsage` 抽到 `credits/enterprise.rs`，共用取值与时间戳解析留在本文件。 |
+| `src/pages/credit-stats/index.tsx` | 941 | 页面编排 | 范围/档位/客户端三个筛选维度与导出、渐进刷新共享同一份 stats 快照；拆成子组件要跨文件传递 8 个以上状态。失败动作从 `officialUsage.errors[]` 的档位派生（数据通道：桌面端取数失败也是正常 resolve，`catch` 不执行），文案仍走 `asError()`。 | 下一轮把 header（三个筛选 + 导出）抽到 credit-stats/header.tsx。 |
+| `crates/wb-shift-core/src/modules/credits/resources.rs` | 541 | 资源解析与投影 | 个人版资源包与企业配额共用同一套取值与时间戳解析（`first_number` / `first_value` / `parse_timestamp_ms`）以及 `credit_result` 投影：企业配额以单条资源呈现，必须与个人版保持同一份字段口径（如 `expireAt` 纯日期按 23:59:59），拆开会出现第二份口径。为资源包补充可选 `startAt`（`parse_timestamp_at` + `resolve_start_at`，按 `CycleStartTime → DeductionStartTime → CreateTime` 取值，纯日期按本地零点）后越过阈值；该次只做积分明细筛选，不在收尾里搬迁文件。本次新增 `credit_failure_result`（把上游 `failureKind` / `httpStatus` 透传给前端，供错误条给下一步动作），只是同一份投影的失败分支，仍不建议单独搬迁。 | 下次改企业配额时把 `parse_enterprise_usage` / `enterprise_credit_result` / `enterprise_id_from_accounts` / `credit_error_result` 与 `EnterpriseUsage` 抽到 `credits/enterprise.rs`，共用取值与时间戳解析留在本文件。 |
 
 | `crates/wb-shift-core/src/modules/credit_ledger/mod.rs` | 573 | 本地账本 | 建表/去重写入/官方修正回写/日-模型-客户端-账号四组聚合/降级策略共用同一份 schema 与 SQL，拆开会让「账本口径」出现多份定义。 | 下一轮把只读聚合抽到 `credit_ledger/query.rs`，写入与 schema 留在 `mod.rs`。 |
 

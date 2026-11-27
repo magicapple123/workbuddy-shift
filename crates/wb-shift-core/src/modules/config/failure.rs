@@ -35,6 +35,13 @@
 //! `refresh::classify_refresh_failure` 决定（`Revoked` 才写 `needs_relogin`）。
 //! 两边通过 [`FailureKind::as_wire`] / [`is_html_failure`] 这一对字段通信，
 //! 刷新分级读到 `failureKind` 就知道「这是一张网页」，从而维持原来的「暂时失败」。
+//!
+//! # 为什么不带「下一步动作」
+//!
+//! 「下一步做什么」是**界面决策**，不是协议字段：同一档失败在不同界面的落点不同
+//! （登录页退到扫码、统计页退到检查代理），写进传输层会让协议替 UI 做决定。
+//! 因此这里只给机读的 [`FailureKind`]，动作映射放在前端
+//! （`src/lib/api/failure.ts` 的 `ACTION_BY_KIND`）。
 
 use serde_json::{json, Value};
 

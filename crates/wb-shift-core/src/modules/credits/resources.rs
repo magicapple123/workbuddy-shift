@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::modules::config::{FAILURE_KIND_FIELD, HTTP_STATUS_FIELD};
+
 pub(super) fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     keys.iter().find_map(|key| value.get(*key))
 }
@@ -450,10 +452,40 @@ pub(super) fn credit_error_result(account: &Value, error: String) -> Value {
     })
 }
 
+/// 积分查询失败结果（**带结构化失败字段**）：手里有上游响应时用这个。
+///
+/// 与 [`credit_error_result`] 的唯一区别是「档位透传」：`http_request`
+/// （`config/failure.rs`）已经把「响应不是预期 JSON」的失败分成了四档，并写进
+/// [`FAILURE_KIND_FIELD`] / [`HTTP_STATUS_FIELD`]；这里**原样复制**进结果对象，
+/// 前端才有依据给出下一步动作（`src/lib/api/failure.ts` 的 `ACTION_BY_KIND`）。
+///
+/// **这两处字段目前是「预留字段」**：前端 `CreditExpiry` 暂不消费它们（`creditMap` 那条
+/// 通道已被 `officialUsage.errors[]` 取代），但 core 用例守护这个形状。**不要因为「没人用」
+/// 就删**——那是契约的加法式扩展，删了将来要用还得再改一次协议面。
+///
+/// 约束：
+/// - `error` 仍取 [`response_error`]，**文案一个字不变**（既有单测与用户看到的话都靠它）；
+/// - 响应里没有这些字段时**不写这个键**（不塞 `null`），因此纯本地错误、老服务端
+///   返回的结果形状与改造前逐字段相同；
+/// - 只复制协议里真实存在的两个字段，不发明新键（「动作」是界面决策，不是协议字段）。
+pub(super) fn credit_failure_result(account: &Value, response: &Value) -> Value {
+    let mut result = credit_error_result(account, response_error(response));
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    for field in [FAILURE_KIND_FIELD, HTTP_STATUS_FIELD] {
+        if let Some(value) = response.get(field) {
+            object.insert(field.to_string(), value.clone());
+        }
+    }
+    result
+}
+
 /// 企业配额响应 → `CreditExpiry`（与个人版同形，多一个 `unlimited` 标记）。
 pub(super) fn enterprise_credit_result(account: &Value, response: &Value, now: i64) -> Value {
     if !is_success(response) {
-        return credit_error_result(account, response_error(response));
+        // 上游失败：透传档位，前端才能给出「重新登录 / 检查代理 / 复制诊断」。
+        return credit_failure_result(account, response);
     }
     let Some(usage) = parse_enterprise_usage(response) else {
         return credit_error_result(account, "企业配额数据无法解析".to_string());

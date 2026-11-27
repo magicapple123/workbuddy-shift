@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
+import { FailureActions } from "@/components/failure-actions";
 import { DEFAULT_VARIANT, variantAppName, variantLabel } from "@/lib/variant";
 import type { AccountMeta, WbVariant } from "@/lib/types";
 import { useAccountsStore } from "@/stores/accounts";
@@ -53,6 +54,12 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
   const [loginId, setLoginId] = useState<string | null>(null);
   const [uri, setUri] = useState("");
   const [error, setError] = useState("");
+  /**
+   * 结构化失败：登录链路的失败常常是「网关返回了网页」或「登录已失效」，
+   * 只给一句红字用户不知道下一步做什么。这里保留后端字段，由 `FailureActions`
+   * 按 `recoveryAction` 渲染「重新登录 / 检查代理 / 复制诊断」。
+   */
+  const [failure, setFailure] = useState<api.ApiFailure | null>(null);
   const [result, setResult] = useState<AccountMeta | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -63,6 +70,7 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
       setLoginId(null);
       setUri("");
       setError("");
+      setFailure(null);
       setResult(null);
       setCopied(false);
     }
@@ -82,14 +90,20 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
             await reconcileAccounts();
             if (!cancelled) setResult(res.result);
           } else if (!cancelled) {
+            // 采集失败：后端只给文案，没有结构化字段 → 只显示红字，不渲染动作行。
             setError(res.error || "登录失败");
+            setFailure(null);
           }
           if (timer !== undefined) window.clearInterval(timer);
           return;
         }
         timer = window.setTimeout(poll, 1500);
       } catch (e) {
-        if (!cancelled) setError(api.asError(e));
+        if (!cancelled) {
+          // 文案口径逐字不变（`api.asError` 读 `message`），另存一份结构给动作行用。
+          setError(api.asError(e));
+          setFailure(api.asFailure(e));
+        }
         if (timer !== undefined) window.clearInterval(timer);
       }
     };
@@ -104,6 +118,7 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
   async function start() {
     setBusy(true);
     setError("");
+    setFailure(null);
     try {
       const res = await api.oauthStart(variant);
       setLoginId(res.loginId);
@@ -113,7 +128,9 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
         await openInBrowser(res.verificationUri);
       }
     } catch (e) {
+      // 文案口径逐字不变（`api.asError` 读 `message`），另存一份结构给动作行用。
       setError(api.asError(e));
+      setFailure(api.asFailure(e));
     } finally {
       setBusy(false);
     }
@@ -203,6 +220,12 @@ export function OAuthLoginDialog({ open, onOpenChange, variant = DEFAULT_VARIANT
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
+            {/* 有动作才渲染按钮行（无动作时组件返回 null，不留空位）。 */}
+            <FailureActions
+              failure={failure}
+              source="oauth-login"
+              onRelogin={() => void start()}
+            />
           </Alert>
         )}
 

@@ -95,7 +95,12 @@ pub use http::{api_base_for, authenticated_post};
 mod tests {
     use super::*;
 
+    // 用 `include!` 而不是 `mod`：`tests/` 下这些文件共用同一个 `use super::*` 作用域，
+    // 每个文件不是独立模块（改成 `mod` 就要给每个文件补一套导入、helper 也要逐文件重复）。
+    // 另一个作用是控制文件规模：新增一组用例时可以单独开一个文件，不必因为几行测试
+    // 把某个测试文件推过 500 行硬线、再去 `docs/ARCHITECTURE.md` 登记豁免。
     include!("tests/fixtures.rs");
     include!("tests/resources.rs");
     include!("tests/http.rs");
+    include!("tests/failure.rs");
 }

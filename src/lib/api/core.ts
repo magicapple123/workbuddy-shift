@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { WbVariant } from "../types";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled } from "../demo-mode";
 import { screenshotDemoResponse } from "../screenshot-demo/index";
+import { failureFromResponse, structuredFailureOf } from "./failure";
 
 /**
  * 双通道适配层：
@@ -169,6 +170,9 @@ const ROUTES: Record<string, Route> = {
   get_data_dir: { method: "GET", path: "/api/data-dir" },
   export_settings_bundle: { method: "GET", path: "/api/settings/export" },
   import_settings_bundle: { method: "POST", path: "/api/settings/import" },
+  // 排障：脱敏诊断包全文（只读）。落盘导出是桌面专属（`export_diagnostics`），
+  // 网页版拿到文本后自己复制 —— 服务端不往用户机器上写任意路径。
+  get_diagnostics_report: { method: "GET", path: "/api/diagnostics" },
 };
 
 /**
@@ -223,7 +227,9 @@ export async function httpCall<T>(cmd: string, args?: Record<string, unknown>): 
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.message || data.error || `请求失败 (${res.status})`);
+    // 结构化失败：`message` 与改造前逐字一致，额外带上 `failureKind` / `httpStatus` /
+    // `recoveryAction`（见 `./failure`）。`asError()` 读 `message`，因此既有调用点不变。
+    throw failureFromResponse(res.status, data);
   }
   return data as T;
 }
@@ -236,7 +242,17 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
     if (!DEMO_READ_COMMANDS.has(cmd)) throw new Error(DEMO_UNAVAILABLE_MESSAGE);
     return screenshotDemoResponse(cmd, args) as T;
   }
-  if (!isWebui()) return invoke<T>(cmd, args);
+  if (!isWebui()) {
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (e) {
+      // Tauri 的 `Err(String)` 可能是 core 结构化失败对象的 JSON 串（如 `failureKind`）。
+      // 只在**真的解析出结构**时替换抛出值；普通字符串 / 对象原样放行，
+      // 既有 `catch` 分支拿到的形状与改造前完全一致。
+      const structured = structuredFailureOf(e);
+      throw structured ?? e;
+    }
+  }
   return httpCall<T>(cmd, args);
 }
 

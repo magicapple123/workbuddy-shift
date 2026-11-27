@@ -376,6 +376,8 @@ pub fn run() {
             commands::log_error,
             commands::get_error_log_path,
             commands::reveal_error_log,
+            commands::get_diagnostics_report,
+            commands::export_diagnostics,
             companion::get_companion_enabled,
             companion::set_companion_enabled,
             companion::open_companion_settings,

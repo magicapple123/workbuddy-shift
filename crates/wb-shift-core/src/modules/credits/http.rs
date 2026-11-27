@@ -410,12 +410,8 @@ pub(super) fn legacy_credit_result(account: &Value, response: &Value, now: i64) 
             .collect();
         return credit_result(account, resources, now);
     }
-    json!({
-        "ok": false,
-        "accountId": account.get("id").cloned().unwrap_or(Value::Null),
-        "accountName": account_display_name(account),
-        "error": response_error(response),
-    })
+    // 个人版失败分支（手里有上游响应）：档位透传给前端做下一步动作。
+    credit_failure_result(account, response)
 }
 
 /// 企业配额取数：注入企业 ID 后复用 `authenticated_post`（惰性刷新 + 401 重试一次

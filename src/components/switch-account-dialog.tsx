@@ -67,6 +67,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [tab, setTab] = useState<"links" | "copy">("links");
   /** 关联会话区块上报的状态：tab 徽标与常驻提示用。 */
   const [linksMeta, setLinksMeta] = useState<SessionLinksMeta | null>(null);
+  /**
+   * 结构化失败（**数据驱动接入**）：只有后端真的给出 `failureKind` 时才渲染动作行，
+   * 没有就整块不出现（不留空 div / 空 gap）。切号是本地文件操作、不经过 `http_request`，
+   * 这条路径今天不会产生四档，所以这里不硬造按钮、也不改 switch 的宿主契约。
+   * 文案仍走既有 `asError()` 口径（`needsPermission` 依赖它包含「无权限」）。
+   */
+  const [failure, setFailure] = useState<api.ApiFailure | null>(null);
 
   const variant = accountVariant(account);
   const accountId = account?.id;
@@ -87,6 +94,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     setExpanded(new Set());
     setPermCheck(null);
     setError("");
+    setFailure(null);
     setSessions([]);
     setCurrentUid(null);
     setSyncSelections([]);
@@ -145,6 +153,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     setBusy(true);
     setProgress("正在切换账号…");
     setError("");
+    setFailure(null);
     const requestedCopy = selected.size > 0;
     const requestedSync = syncSelections.length > 0;
     try {
@@ -159,7 +168,9 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       onOpenChange(false);
       onDone?.();
     } catch (e) {
+      // 文案口径逐字不变（`asError` 读 `message`），额外留一份结构给动作行。
       setError(api.asError(e));
+      setFailure(api.asFailure(e));
     } finally {
       setBusy(false);
       setProgress("");
@@ -292,6 +303,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
             error={error}
             needsPermission={needsPermission}
             permCheck={permCheck}
+            failure={failure}
             onOpenPermissionSettings={openPermissionSettings}
             onRunPermissionCheck={runPermissionCheck}
           />

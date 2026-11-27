@@ -8,7 +8,7 @@ pub(super) async fn fetch_account_usage(
     account: &Value,
     range_start: NaiveDate,
     range_end: NaiveDate,
-) -> Result<AccountFetch, String> {
+) -> Result<AccountFetch, UsageFetchError> {
     let url = official_usage_url_for(account);
     let end_time = format!("{range_end} 23:59:59");
     let mut start_time = format!("{range_start} 00:00:00");
@@ -53,10 +53,10 @@ pub(super) async fn fetch_account_usage(
             SweepDecision::Continue(newest_ts) => {
                 rounds += 1;
                 if rounds >= OFFICIAL_USAGE_MAX_ROUNDS {
-                    return Err("官方用量分页超过安全上限".to_string());
+                    return Err(UsageFetchError::new("官方用量分页超过安全上限"));
                 }
-                start_time =
-                    start_time_at(newest_ts).ok_or_else(|| "官方用量分页时间无效".to_string())?;
+                start_time = start_time_at(newest_ts)
+                    .ok_or_else(|| UsageFetchError::new("官方用量分页时间无效"))?;
                 previous_newest = Some(newest_ts);
             }
         }
@@ -110,7 +110,7 @@ pub async fn collect_official_usage_with_window(
     // 先并发把各账号的明细取回来，再按账号原始顺序聚合：
     // 聚合里用到的「累计到当前账号」的派生值（如单账号每日序列）依赖处理顺序，
     // 因此只并行网络取数，不并行聚合，保证输出与串行实现逐字一致。
-    let mut fetched: Vec<(usize, Result<AccountFetch, String>)> =
+    let mut fetched: Vec<(usize, Result<AccountFetch, UsageFetchError>)> =
         Vec::with_capacity(accounts.len());
     if !accounts.is_empty() {
         let permits = Arc::new(Semaphore::new(
@@ -223,11 +223,26 @@ pub async fn collect_official_usage_with_window(
                         official_usage_url_for(account),
                     ),
                 );
-                errors.push(json!({
+                // 档位随文案一起进 `errors[]`：界面据此给「重新登录 / 检查代理 / 复制诊断」。
+                let UsageFetchError {
+                    message,
+                    failure_kind,
+                    http_status,
+                } = error;
+                let mut item = json!({
                     "accountId": account_id,
                     "accountName": account_name,
-                    "error": error,
-                }));
+                    "error": message,
+                });
+                if let Some(object) = item.as_object_mut() {
+                    if let Some(kind) = failure_kind {
+                        object.insert("failureKind".to_string(), json!(kind));
+                    }
+                    if let Some(status) = http_status {
+                        object.insert("httpStatus".to_string(), json!(status));
+                    }
+                }
+                errors.push(item);
                 account_rows.push(json!({
                     "accountId": account_id,
                     "accountName": account_name,

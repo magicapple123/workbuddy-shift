@@ -12,6 +12,7 @@ pub mod credit_ledger;
 pub mod credit_usage;
 pub mod credits;
 pub mod daily_activity;
+pub mod diagnostics;
 pub mod error_log;
 pub mod export_file;
 pub mod export_import;

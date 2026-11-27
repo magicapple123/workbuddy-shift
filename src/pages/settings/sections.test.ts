@@ -15,7 +15,10 @@ import {
 const LEGACY_SECTION_IDS = [
   "settings-appearance",
   "settings-tools",
+  "settings-archive-sync",
   "settings-sync",
+  "settings-bundle",
+  "settings-about",
   "settings-automation-sync",
   "settings-permission",
   "settings-auto-checkin",
@@ -90,5 +93,17 @@ describe("设置页节注册表", () => {
     expect(visible).toContain("settings-updates");
     expect(visible).toContain("settings-bundle");
     expect(visible).toContain("settings-about");
+  });
+
+  it("诊断包一节可被「诊断 / 导出 / 日志 / 反馈 / issue / 排障」搜到，且所有形态都可见", () => {
+    const ids = (query: string) => filterSections(SETTINGS_SECTIONS, query).map((s) => s.id);
+    for (const query of ["诊断", "导出", "日志", "反馈", "issue", "排障"]) {
+      expect(ids(query), `关键词「${query}」应命中诊断包`).toContain("settings-diagnostics");
+    }
+    // 网页版也要能复制 / 下载诊断包（服务端不落盘），因此不能是桌面专属可见性。
+    const section = SETTINGS_SECTIONS.find((entry) => entry.id === "settings-diagnostics");
+    expect(section?.availability).toBe("always");
+    // 行标题必须与卡片里渲染的控件文字一致，否则搜不到眼前这一行。
+    expect(section?.rows).toEqual(["预览诊断包", "导出诊断包"]);
   });
 });

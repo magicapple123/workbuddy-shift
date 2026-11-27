@@ -18,10 +18,12 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { FailureActions } from "@/components/failure-actions";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DemoAction } from "@/components/demo-action";
 import { ExportMenu } from "@/components/export-menu";
+import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
 import { StatsRangeControl } from "@/components/stats-range";
 import * as api from "@/lib/api";
 import { formatAmount, formatDateTime } from "@/lib/format";
@@ -51,6 +53,13 @@ import type {
 import { accountVariant } from "@/lib/variant";
 import { useAccountsStore } from "@/stores/accounts";
 import { SelectedAccountDetails } from "./account-details";
+import {
+  creditFailureActionsProps,
+  findCreditFailure,
+  reloginAccountOf,
+  reloginVariantOf,
+  type CreditFailureHit,
+} from "./credit-failure";
 import { AccountUsageShare } from "./account-usage-share";
 import { ClientFilterMenu } from "./client-filter-menu";
 import {
@@ -124,6 +133,20 @@ export default function CreditStatsPage() {
     dataRange === "30d" ? readCreditStatisticsCache() === null : true,
   );
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 错误条的结构化失败（**只服务抛异常的分支**：`fetchAll` / `loadCreditStatistics`，
+   * 例如 webui 的 `!res.ok`）。这些分支没有账号上下文，因此不给「重新登录」handler。
+   *
+   * 积分取数失败**不走这里**：`get_credit_expiry` 失败也是正常 resolve
+   * （`{ok:false, error, failureKind?}`），桌面端 `catch` 根本不执行。那条链路的动作行
+   * 由 `officialFailure`（`officialUsage.errors[]`，见下方派生处）负责。
+   *
+   * 这里**不读全局 store**：读 `creditMap` 会在「本轮没发起查询」时把上一次的失败重新
+   * 显示出来（`loadCredits` 只补未缓存的 id，旧失败条目不会被重查）。
+   */
+  const [loadFailure, setLoadFailure] = useState<CreditFailureHit | null>(null);
+  /** 「重新登录」复用现有的 OAuth 登录弹窗（不新造流程）。 */
+  const [oauthOpen, setOauthOpen] = useState(false);
   const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
   /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
   const [clientView, setClientView] = useState<CreditClientKey>("all");
@@ -153,6 +176,7 @@ export default function CreditStatsPage() {
       invalidateCreditStatisticsCache();
       setStats(next);
       setError(null);
+      setLoadFailure(null);
     },
     refreshCredits,
     range: dataRange,
@@ -170,12 +194,14 @@ export default function CreditStatsPage() {
         setStats(cached);
         setLoading(false);
         setError(null);
+        setLoadFailure(null);
         return;
       }
       // 后台刷新时保留已渲染的旧数据：采集 12 个账号的官方用量要几秒，
       // 把整页推回骨架屏等于让用户重新等一次，而这期间旧数据仍然可用。
       if (!background) setLoading(true);
       setError(null);
+      setLoadFailure(null);
       try {
         await fetchAll();
         const accountState = useAccountsStore.getState();
@@ -190,7 +216,10 @@ export default function CreditStatsPage() {
         // 共享模块负责 single-flight 与成功缓存：与启动预热共用同一份数据来源。
         setStats(await loadCreditStatistics(refresh));
       } catch (cause) {
-        if (!background) setError(api.asError(cause));
+        if (!background) {
+          setError(api.asError(cause));
+          setLoadFailure({ failure: api.asFailure(cause), accountId: null, accountName: null });
+        }
       } finally {
         if (!background) setLoading(false);
       }
@@ -227,6 +256,7 @@ export default function CreditStatsPage() {
         if (loadSeqRef.current !== seq || unmountedRef.current) return;
         setStats(nextStats);
         setError(null);
+        setLoadFailure(null);
       } finally {
         if (loadSeqRef.current === seq && !unmountedRef.current) {
           setRangeLoading(false);
@@ -266,6 +296,7 @@ export default function CreditStatsPage() {
       await loadWindow(dataRange, { withAccounts: true });
     } catch (cause) {
       setError(api.asError(cause));
+      setLoadFailure({ failure: api.asFailure(cause), accountId: null, accountName: null });
     }
   }
 
@@ -299,7 +330,10 @@ export default function CreditStatsPage() {
         // 非 30 天窗口不经过 load()，首屏需要在这里先载入账号列表。
         await loadWindow(target, { withAccounts: true });
       } catch (cause) {
-        if (!unmountedRef.current) setError(api.asError(cause));
+        if (!unmountedRef.current) {
+          setError(api.asError(cause));
+          setLoadFailure({ failure: api.asFailure(cause), accountId: null, accountName: null });
+        }
       }
     })();
   }, [loadWindow]);
@@ -320,6 +354,7 @@ export default function CreditStatsPage() {
         // 回滚会留下「按钮高亮 90 天、数字还是 30 天、再点同一个按钮又被 next === range 挡住」
         // 的死状态。改为交给页面错误条 + 「重试」（reloadCurrentRange 跟随当前 dataRange）。
         setError(api.asError(cause));
+        setLoadFailure({ failure: api.asFailure(cause), accountId: null, accountName: null });
         // 清掉去重键，后续切范围或探测更新时允许重试同一个窗口。
         syncedWindowKeyRef.current = null;
       }
@@ -512,6 +547,12 @@ export default function CreditStatsPage() {
   const officialFailureText = (failureSource?.errors ?? [])
     .map((item) => `${item.accountName}: ${item.error}`)
     .join("；");
+  /**
+   * 失败动作走**数据通道**：`errors[]` 里的档位。桌面端 `get_credit_expiry` /
+   * `get_credit_statistics` 失败时也是正常 resolve（`catch` 不执行），所以动作不能
+   * 挂在 catch 上。没有档位时 `null` → 动作行整块不渲染，这个 Alert 与改造前逐像素相同。
+   */
+  const officialFailure = useMemo(() => findCreditFailure(failureSource?.errors), [failureSource]);
 
   // 明细已取到但总览仍回退本地时额外提示，避免「明细有数字、总览是另一个数」的自相矛盾。
   const detailHasData =
@@ -656,6 +697,10 @@ export default function CreditStatsPage() {
           <AlertTitle>统计加载失败</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center gap-3">
             <span>{error}</span>
+            {/* 有档位、且动作有落点才渲染（否则组件返回 null，不留空位）。 */}
+            <FailureActions
+              {...creditFailureActionsProps(loadFailure, accounts, () => setOauthOpen(true))}
+            />
             <Button size="sm" variant="outline" onClick={() => void reloadCurrentRange()}>
               重试
             </Button>
@@ -703,6 +748,12 @@ export default function CreditStatsPage() {
                     {officialFailureText && (
                       <span className="text-xs text-warning-foreground">{officialFailureText}</span>
                     )}
+                    {/* 有档位、且动作有落点才渲染（否则组件返回 null，不留空位）。 */}
+                    <FailureActions
+                      {...creditFailureActionsProps(officialFailure, accounts, () =>
+                        setOauthOpen(true),
+                      )}
+                    />
                   </AlertDescription>
                 </Alert>
               )}
@@ -720,6 +771,21 @@ export default function CreditStatsPage() {
                     {officialFailureText && (
                       <span className="text-xs text-warning-foreground">{officialFailureText}</span>
                     )}
+                    {/*
+                      partial（部分账号失败）才是最常见的现场：动作行同样挂在数据通道上。
+                      `error` 非空时**不渲染动作行**：刷新抛错后红条「统计加载失败」与这条
+                      黄条会同屏（stats 保留旧值），两条各带一行动作按钮会让用户不知道点哪个。
+                      只掐动作行，黄条本身（「部分账号未同步」的信息）仍然保留。
+                    */}
+                    {error
+                      ? null
+                      : (
+                          <FailureActions
+                            {...creditFailureActionsProps(officialFailure, accounts, () =>
+                              setOauthOpen(true),
+                            )}
+                          />
+                        )}
                   </AlertDescription>
                 </Alert>
               )}
@@ -863,6 +929,13 @@ export default function CreditStatsPage() {
           暂无统计数据，请点击刷新重试。
         </div>
       )}
+
+      {/* 失败动作里的「重新登录」复用现有 OAuth 弹窗；拿不到账号上下文时按钮本就不渲染。 */}
+      <OAuthLoginDialog
+        open={oauthOpen}
+        onOpenChange={setOauthOpen}
+        variant={reloginVariantOf(reloginAccountOf(loadFailure, accounts))}
+      />
     </div>
   );
 }

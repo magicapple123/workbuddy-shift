@@ -1,6 +1,7 @@
 
 
 import { WbVariant } from "./account";
+import type { FailureKind } from "./failure";
 
 export interface CheckinConfig {
   enabled: boolean;
@@ -338,6 +339,9 @@ export interface CreditOfficialUsageError {
   accountId: string;
   accountName: string;
   error: string;
+  /** 失败档位 + 上游状态码（core 的 `official_usage::UsageFetchError` 透传，成对出现）。 */
+  failureKind?: FailureKind;
+  httpStatus?: number;
 }
 
 export interface CreditOfficialUsage {

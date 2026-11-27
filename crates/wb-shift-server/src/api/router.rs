@@ -232,6 +232,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/data-dir", get(api_data_dir))
         .route("/api/settings/export", get(api_export_settings_bundle))
         .route("/api/settings/import", post(api_import_settings_bundle))
+        // 排障：脱敏诊断包全文（只读）。网页版只在响应里给文本，由前端复制，
+        // 没有落盘路由——服务端不写用户机器上的任意路径。
+        .route("/api/diagnostics", get(api_diagnostics_report))
         .route("/api/update/check", get(api_update_check))
         .route(
             "/api/update/config",

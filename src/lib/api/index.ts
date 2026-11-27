@@ -6,6 +6,8 @@
  */
 
 export * from "./core";
+export * from "./failure";
+export * from "./diagnostics";
 export * from "./accounts";
 export * from "./automation";
 export * from "./clients";

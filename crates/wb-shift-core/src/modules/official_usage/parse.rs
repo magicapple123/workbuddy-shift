@@ -2,6 +2,63 @@
 
 use super::*;
 
+use crate::modules::config::{FAILURE_KIND_FIELD, HTTP_STATUS_FIELD};
+use std::fmt;
+
+/// 官方用量取数的失败：一句文案 +（可选）上游档位与状态码。
+///
+/// 为什么不是 `String`：`config::http_request` 已经把「响应不是预期 JSON」分成四档并写进
+/// [`FAILURE_KIND_FIELD`] / [`HTTP_STATUS_FIELD`]；这条链路要一路走到 `officialUsage.errors[]`
+/// 才能让界面的错误条给出下一步动作。中途退化成 `String` 的话，档位就永久丢了
+/// （改造前正是如此，所以桌面端永远出不了「重新登录」按钮）。
+///
+/// 保持不变的部分：`message` 与改造前的错误文案**逐字一致**（[`error_message`] 未改），
+/// 因此 `Display` 出去的内容、错误日志、页面文案都与改造前相同。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UsageFetchError {
+    /// 用户可见文案（写进 `errors[].error`）。
+    pub(super) message: String,
+    /// 上游档位（`failureKind`）；本地错误为 `None`。
+    pub(super) failure_kind: Option<String>,
+    /// 上游 HTTP 状态码；本地错误为 `None`。
+    pub(super) http_status: Option<u16>,
+}
+
+impl UsageFetchError {
+    /// 只有文案的本地错误（分页上限、响应形状不符）：**不编造档位**。
+    pub(super) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            failure_kind: None,
+            http_status: None,
+        }
+    }
+
+    /// 从 `http_request` 的失败响应里取「文案 + 档位」。
+    ///
+    /// 响应里没有结构化字段时（老服务端 / 业务错误 JSON），两个字段都是 `None`，
+    /// 聚合出来的 `errors[]` 项与改造前逐字段相同。
+    pub(super) fn from_response(response: &Value) -> Self {
+        Self {
+            message: error_message(response),
+            failure_kind: response
+                .get(FAILURE_KIND_FIELD)
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            http_status: response
+                .get(HTTP_STATUS_FIELD)
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok()),
+        }
+    }
+}
+
+impl fmt::Display for UsageFetchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RequestRow {
     pub(super) request_id: String,
@@ -150,15 +207,15 @@ pub(super) fn normalize_row(value: &Value) -> Option<RequestRow> {
     })
 }
 
-pub(super) fn parse_page(response: &Value) -> Result<OfficialPage, String> {
+pub(super) fn parse_page(response: &Value) -> Result<OfficialPage, UsageFetchError> {
     if response_code(response) != Some(0) && response_code(response) != Some(200) {
-        return Err(error_message(response));
+        return Err(UsageFetchError::from_response(response));
     }
     let Some(data) = response.get("data").and_then(Value::as_object) else {
-        return Err("官方响应格式无效".to_string());
+        return Err(UsageFetchError::new("官方响应格式无效"));
     };
     let Some(raw_rows) = data.get("data").and_then(Value::as_array) else {
-        return Err("官方响应格式无效".to_string());
+        return Err(UsageFetchError::new("官方响应格式无效"));
     };
     // `data.total` 会被服务端一起截断（31 天窗口固定回报 3000），不能当总数用。
     Ok(OfficialPage {

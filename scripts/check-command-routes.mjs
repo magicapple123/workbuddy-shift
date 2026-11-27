@@ -113,6 +113,9 @@ const DESKTOP_ONLY = new Set([
   "get_companion_enabled",
   "set_companion_enabled",
   "open_companion_settings",
+  // 诊断包落盘：桌面弹保存对话框后由宿主重新生成并原子写入；WebUI 用浏览器下载 /
+  // 剪贴板复制（报告文本经 `get_diagnostics_report` 的 GET 路由取），不映射落盘路由。
+  "export_diagnostics",
   // xlsx 二进制保存：桌面弹保存框后写入；WebUI 用浏览器 Blob 下载，不映射路由。
   "save_bytes_file",
 ]);
