@@ -4,6 +4,9 @@
 //! 末尾按需挂接增强数据（置顶、工作记忆）。
 use super::super::recovery::recover_pending_session_operations_at_with;
 use super::entry::{CopyOptions, CopySide};
+// 显式导入：`plan` 与 `same_content` 互相引用（后者要 `CopyContext`），glob 化会让
+// `same_content` 的转出在本文件被解析成空集。
+use super::same_content::SessionRowIndex;
 use super::*;
 
 /// 国际版支持性探测的统一封装：只有国际版需要数据根同构检查（design D6）。
@@ -78,6 +81,8 @@ pub(in crate::modules::session) fn run_copy(
         target_account_id: target.account_id.clone(),
         pending: &pending,
         ignore_aux: options.ignore_aux,
+        // 整批评审用同一份会话行索引（见 `copy/same_content.rs`）。
+        rows: SessionRowIndex::default(),
     };
 
     let mut copied: Vec<Value> = Vec::new();
@@ -261,6 +266,9 @@ pub(in crate::modules::session) struct CopyContext<'a> {
     pub(in crate::modules::session) pending: &'a [Operation],
     /// 用户显式忽略账本（用量 + 中断记录）：本次新建的操作记录带 `auxSkipped`。
     pub(in crate::modules::session) ignore_aux: bool,
+    /// 会话行索引（懒加载）：复制前的内容级去重需要按账号查会话列表，
+    /// 整批复制复用同一份结果，避免逐会话重复打开数据库与扫描 `projects/`。
+    pub(in crate::modules::session) rows: SessionRowIndex,
 }
 
 /// 把「忽略账本」标记落到**未完成**操作的记录上（「仍然复制」的重试路径）。

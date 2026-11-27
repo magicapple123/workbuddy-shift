@@ -227,7 +227,9 @@
             account_name: account_key.to_string(),
             title: member_id.to_string(),
             project_label: String::new(),
-            updated_at: 0,
+            // 用例构造的成员没有真实会话行：活跃时间与 `updated_at` 一致（生产路径由
+            // `view::activity_at_of` 从正文最新消息时间推导）。
+            activity_at: 0,
             content,
             reason: String::new(),
             version_status: "unknown",
@@ -239,6 +241,8 @@
         ContentState::Ready(ContentSnapshot {
             full_digest: full_digest_of(text.as_bytes()),
             normalized: normalize_jsonl(&text, &format!("session-{member_id}")).unwrap(),
+            latest_at: session_link::latest_record_timestamp(&text),
+            list_facts: None,
             text,
         })
     }
@@ -252,6 +256,8 @@
         ContentState::Ready(ContentSnapshot {
             full_digest: full_digest_of(text.as_bytes()),
             normalized: normalize_jsonl(&text, "unrelated-session-id").unwrap(),
+            latest_at: session_link::latest_record_timestamp(&text),
+            list_facts: None,
             text,
         })
     }

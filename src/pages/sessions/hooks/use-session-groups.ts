@@ -3,7 +3,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import type { SessionGroupClient, SessionGroupSummary, WbVariant } from "@/lib/types";
 
-import { PAGE_SIZE, groupListCache } from "../constants";
+import { groupListCache } from "../constants";
+import {
+  filterAndSortGroups,
+  groupByProject,
+  paginateList,
+  type SessionGroupMode,
+  type SessionGroupSection,
+} from "../list-view";
+
+// 类型原来定义在这里，现挪到纯函数模块 `../list-view` 以便单测；这里转出以保持既有 import 路径可用。
+export type { SessionGroupMode, SessionGroupSection };
 
 export interface SessionGroupsController {
   groups: SessionGroupSummary[];
@@ -17,23 +27,48 @@ export interface SessionGroupsController {
   pruneBlocked: string | null;
   storeStatus: "missing" | "ready" | "unavailable";
   storeError: string | null;
+  /** 首次加载（无快照）：页面显示骨架屏。 */
   loading: boolean;
+  /**
+   * 刷新中（含「已有快照、后台重新拉取」这一路）。
+   *
+   * 与 `loading` 分开：有快照时刷新不能退回骨架屏，但按钮必须立刻变成「刷新中…」并禁用，
+   * 否则用户点了没有任何反馈、还会连点出多个请求（首屏一次 `list` 在大库上要几十秒）。
+   */
+  refreshing: boolean;
+  /** 最近一次成功拉到列表的本地时刻（`null` = 还没有成功过）。页头据此显示「更新于 HH:MM」。 */
+  updatedAt: number | null;
   loadError: string | null;
   statusFilter: string;
   setStatusFilter: (value: string) => void;
   sortOrder: string;
   setSortOrder: (value: string) => void;
+  /** 搜索词：同时匹配标题、项目名与卡片摘要；与状态筛选、排序并存。 */
+  query: string;
+  setQuery: (value: string) => void;
+  groupMode: SessionGroupMode;
+  setGroupMode: (value: SessionGroupMode) => void;
   page: number;
   setPage: (value: number) => void;
+  /** 状态筛选 + 搜索之后、分页之前的全部会话组（计数与排序口径都以它为准）。 */
   filteredGroups: SessionGroupSummary[];
+  /** 按项目分组的全部节（折叠节的水位与节内条目都在这里）。 */
+  sections: SessionGroupSection[];
   pageCount: number;
   currentPage: number;
+  /** 当前页要渲染的会话组（分组模式下是当前页各节的组按节顺序展平）。 */
   visibleGroups: SessionGroupSummary[];
+  /** 当前页要渲染的节（仅分组模式有内容）。 */
+  visibleSections: SessionGroupSection[];
+  /** 是否处于分组模式（决定页面渲染节还是渲染卡片网格）。 */
+  grouped: boolean;
+  /** 是否显示底部分页条：条目太少时一页装得下，去掉更清爽。 */
+  showPagination: boolean;
   reloadGroups: () => Promise<void>;
 }
 
 /**
- * 关联会话列表：加载、缓存快照、状态筛选、排序与分页。
+ * 关联会话列表：加载、缓存快照、状态筛选、搜索、排序、分组与分页。
  *
  * 竞态守卫沿用原来的两道：listRequestId 自增 + 当前 client:scope 上下文键，
  * 切换客户端/档位后旧请求的结果直接丢弃，避免把上一个客户端的数据写入当前列表。
@@ -48,9 +83,13 @@ export function useSessionGroups(
   const [storeStatus, setStoreStatus] = useState<"missing" | "ready" | "unavailable">("missing");
   const [storeError, setStoreError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("recent");
+  const [query, setQuery] = useState("");
+  const [groupMode, setGroupMode] = useState<SessionGroupMode>("none");
   const [page, setPage] = useState(1);
 
   const listRequestId = useRef(0);
@@ -64,6 +103,8 @@ export function useSessionGroups(
     const requestId = ++listRequestId.current;
     // 已有快照时不再退回骨架屏：刷新是「替换数据」，不是「重新加载页面」。
     if (!groupListCache.has(key)) setLoading(true);
+    // 刷新标记**立刻**置上（不等响应）：这是「点了刷新马上有反馈」的唯一来源。
+    setRefreshing(true);
     setLoadError(null);
     setStoreError(null);
     try {
@@ -81,13 +122,17 @@ export function useSessionGroups(
       setPruneBlocked(result.pruneBlocked ?? null);
       setStoreStatus(result.storeStatus);
       setStoreError(result.storeError ?? null);
+      setUpdatedAt(Date.now());
     } catch (error) {
       if (currentContextKey() !== key || listRequestId.current !== requestId) return;
       setGroups([]);
       setLoadError(api.asError(error));
       groupListCache.delete(key);
     } finally {
-      if (currentContextKey() === key && listRequestId.current === requestId) setLoading(false);
+      if (currentContextKey() === key && listRequestId.current === requestId) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [client, scope]);
 
@@ -97,6 +142,8 @@ export function useSessionGroups(
     const key = listContextKey;
     const cached = groupListCache.get(key);
     setLoading(!cached);
+    // 挂载/切客户端后也有一个在途请求：即使有快照也要顶住「刷新」按钮，避免重复请求。
+    setRefreshing(true);
     setLoadError(null);
     if (cached) {
       setGroups(cached.groups);
@@ -119,6 +166,7 @@ export function useSessionGroups(
       setPruneBlocked(result.pruneBlocked ?? null);
       setStoreStatus(result.storeStatus);
       setStoreError(result.storeError ?? null);
+      setUpdatedAt(Date.now());
     }).catch((error) => {
       if (!live || listRequestId.current !== requestId || currentContextKey() !== key) return;
       // 有旧快照时保留画面，把失败留给下一次刷新/操作提示，不把已有内容清空。
@@ -126,27 +174,33 @@ export function useSessionGroups(
       setGroups([]);
       setLoadError(api.asError(error));
     }).finally(() => {
-      if (live && listRequestId.current === requestId && currentContextKey() === key) setLoading(false);
+      if (live && listRequestId.current === requestId && currentContextKey() === key) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     });
     return () => { live = false; };
   }, [client, scope, listContextKey]);
 
-  const filteredGroups = useMemo(() => {
-    const result = groups.filter((group) => {
-      return statusFilter === "all" || group.summaryStatus === statusFilter;
-    });
-    result.sort((left, right) => sortOrder === "oldest"
-      ? left.latestActivityAt - right.latestActivityAt
-      : left.latestActivityAt === right.latestActivityAt
-        ? left.title.localeCompare(right.title)
-        : right.latestActivityAt - left.latestActivityAt);
-    return result;
-  }, [groups, statusFilter, sortOrder]);
-  const pageCount = Math.max(1, Math.ceil(filteredGroups.length / PAGE_SIZE));
-  const currentPage = Math.min(page, pageCount);
-  const visibleGroups = filteredGroups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  // 状态筛选 + 搜索 + 排序：三个维度正交，纯函数见 `../list-view`。
+  const filteredGroups = useMemo(
+    () => filterAndSortGroups(groups, { statusFilter, sortOrder, query }),
+    [groups, statusFilter, sortOrder, query],
+  );
 
-  useEffect(() => { setPage(1); }, [statusFilter, sortOrder, client, scope]);
+  const sections = useMemo(() => groupByProject(filteredGroups), [filteredGroups]);
+
+  const grouped = groupMode === "project";
+  // 分页口径见 `paginateList`：平铺按条目、分组按节（节内条目全给）。
+  const { pageCount, currentPage, visibleGroups, visibleSections, showPagination } = paginateList(
+    filteredGroups,
+    sections,
+    grouped,
+    page,
+  );
+
+  // 筛选/搜索/分组/排序/客户端变化都回到第一页：留在第 3 页看空列表是最常见的困惑。
+  useEffect(() => { setPage(1); }, [statusFilter, sortOrder, query, groupMode, client, scope]);
 
   return {
     groups,
@@ -155,17 +209,27 @@ export function useSessionGroups(
     storeStatus,
     storeError,
     loading,
+    refreshing,
+    updatedAt,
     loadError,
     statusFilter,
     setStatusFilter,
     sortOrder,
     setSortOrder,
+    query,
+    setQuery,
+    groupMode,
+    setGroupMode,
     page,
     setPage,
     filteredGroups,
+    sections,
     pageCount,
     currentPage,
     visibleGroups,
+    visibleSections,
+    grouped,
+    showPagination,
     reloadGroups,
   };
 }

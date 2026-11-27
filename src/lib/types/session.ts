@@ -270,6 +270,13 @@ export interface SessionGroupSummary {
   title: string;
   projectLabel: string;
   latestActivityAt: number;
+  /**
+   * 卡片摘要：最近一条用户消息（没有用户消息时取助手消息），约 120 字。
+   *
+   * 只下发 1 条以控制列表载荷；`null` / 缺省 = 正文里没有可读消息（前端不占位）。
+   * 老后端没有该字段：按「没有摘要」处理，卡片不渲染摘要行。
+   */
+  excerpt?: string | null;
   memberCount: number;
   activeMemberCount: number;
   /**

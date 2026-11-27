@@ -10,6 +10,17 @@ export const PAGE_SIZE = 8;
 /** 列表不超过该数量时隐藏底部分页条：一页装得下，去掉更清爽。 */
 export const PAGINATION_HIDE_MAX = 4;
 
+/**
+ * 按项目分组时每页的**节**数（不是会话数）。
+ *
+ * 分组后的分页语义选的是「按节分页，节内条目全给」，理由：
+ * - 节头文案是 `项目 X · N 个会话`，N 必须是该节**全部**会话数。若改成「按条目分页」，
+ *   同一个项目会被切到两页上，节头只能显示「本页 N 个」，用户会以为这个项目只有几条；
+ * - 一页 4 节在 1440 宽的 2 列网格里正好是 8 张卡（≈ 原 `PAGE_SIZE`），首屏高度不失控；
+ * - 折叠起来以后一屏能看到多个项目，比「一个项目占满整页」更接近「按项目收拢」的目的。
+ */
+export const PROJECT_SECTIONS_PER_PAGE = 4;
+
 export const CLIENTS: { id: SessionGroupClient; title: string; description: string }[] = [
   { id: "workbuddy", title: "WorkBuddy", description: "含国内版与国际版会话" },
   { id: "vscodeExt", title: "CodeBuddy 插件", description: "VS Code 扩展会话" },

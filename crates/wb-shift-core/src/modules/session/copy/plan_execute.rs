@@ -57,6 +57,23 @@ pub(in crate::modules::session) fn copy_one_session(
             group_id: resolution.group_id.unwrap_or_default(),
         });
     }
+    // issue #22：目标账号里已有一条**内容完全相同但从未建立关联**的会话（用户以前手动
+    // 同步 / 历史版本重复复制留下的多副本）。关联表里查不到它，若直接往下走就会再写一份，
+    // 于是每操作一次多一条同名会话。命中时只登记成员、不写副本，报告为「已关联」。
+    if let Some((session_id, target_snapshot)) = find_same_content_session(context, cid, &snapshot)
+    {
+        let group_id = link_existing_member(
+            context,
+            cid,
+            &session_id,
+            resolution.group_id,
+            &target_snapshot.normalized,
+        )?;
+        return Ok(CopyOutcome::AlreadyLinked {
+            session_id,
+            group_id,
+        });
+    }
 
     // 预分配身份：维护记录（allocating）先于任何备份与业务写入（design §3）。
     // 任何副本写入之前，生命周期身份必须已可靠落盘，恢复/补清理才有依据。

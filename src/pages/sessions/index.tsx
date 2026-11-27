@@ -4,15 +4,20 @@ import {
   ChevronRight,
   CheckCircle2,
   Eraser,
-  Loader2,
+  FolderTree,
   Layers3,
+  LayoutList,
+  Loader2,
   RefreshCw,
+  Search,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 import { DemoAction } from "@/components/demo-action";
 import { GroupDetailPanel } from "@/components/session-group-detail";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
@@ -22,17 +27,22 @@ import type { SessionGroupClient, WbVariant } from "@/lib/types";
 import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 import { AddLinkedSessionDialog } from "./add-linked-session-dialog";
-import { CLIENTS, PAGE_SIZE, PAGINATION_HIDE_MAX } from "./constants";
+import { CLIENTS, PAGE_SIZE } from "./constants";
 import { ScanProgressHint } from "@/components/scan-progress-hint";
 
-import { ClientMark, GroupSkeleton, SessionGroupCard } from "./group-list";
+import { ClientMark, GroupSkeleton, ProjectSection, SessionGroupCard } from "./group-list";
 import type { RebuildLinkPrefill, RebuildLinkRequest } from "./blocked-target";
 import { useSessionActions } from "./hooks/use-session-actions";
 import { useSessionDetail } from "./hooks/use-session-detail";
-import { useSessionGroups } from "./hooks/use-session-groups";
+import { useSessionGroups, type SessionGroupMode } from "./hooks/use-session-groups";
 import { canPruneGroups, pruneConfirmDescription, showPruneEntry } from "./prune";
 import { restartDialogCopy } from "./restart";
 import { selectSyncAllCandidates, syncAllDialogCopy } from "./sync-all";
+
+/** 页头的「更新于 HH:MM」：只到分钟，和卡片里的相对时间不重复。 */
+function timeOfDay(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
 
 export default function SessionsPage() {
   const { accounts, fetchAll } = useAccountsStore();
@@ -170,6 +180,15 @@ export default function SessionsPage() {
   ];
   const pages = Array.from({ length: list.pageCount }, (_, index) => index + 1)
     .filter((value) => value === 1 || value === list.pageCount || Math.abs(value - list.currentPage) <= 1);
+  /**
+   * 刷新按钮的「忙」判定：三处来源都算——首次加载、后台刷新、详情在途。
+   *
+   * 按钮禁用是「连点只发一次请求」的唯一保证（不另加节流层）：从点击到 `refreshing` 置位
+   * 之间没有任何 await，React 的同一次提交就把它变成禁用态。
+   */
+  const refreshBusy = list.loading || list.refreshing || detail.detailLoading;
+  /** 卡片网格列数：分组模式与平铺模式共用同一套断点。 */
+  const gridColumns = contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1";
 
   return (
     <div data-detail-mode={detailMode} className="mx-auto w-full max-w-[1180px] min-w-0 px-6 py-8 sm:px-8 sm:py-9">
@@ -178,10 +197,12 @@ export default function SessionsPage() {
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
               <h1 className="text-[28px] font-semibold tracking-tight">关联会话</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">统一管理各账号下的会话副本，按需复制或同步。</p>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">统一管理各账号下的会话副本，按需复制或同步。
+                {list.updatedAt != null && <span role="status" className="ml-2 whitespace-nowrap text-xs tabular-nums">更新于 {timeOfDay(list.updatedAt)}</span>}
+              </p>
             </div>
             <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
-              <Button variant="outline" size="sm" className="shrink-0" onClick={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={list.loading || detail.detailLoading}><RefreshCw className={list.loading ? "animate-spin" : undefined} />刷新</Button>
+              <Button variant="outline" size="sm" className="shrink-0" aria-busy={refreshBusy} onClick={() => void (detailOpen && selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={refreshBusy}><RefreshCw className={refreshBusy ? "animate-spin" : undefined} />{refreshBusy ? "刷新中…" : "刷新"}</Button>
               {syncAllCandidates.groupCount > 0 && <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.requestSyncAll(list.groups)} disabled={actions.actionBusy || list.loading}><RefreshCw className={actions.actionBusy ? "animate-spin" : undefined} />同步 {syncAllCandidates.groupCount} 个待同步组</Button>}
               {showPruneEntry({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount }) && <span className="shrink-0" title={list.pruneBlocked ?? undefined}><Button variant="outline" size="sm" onClick={() => void actions.requestPrune()} disabled={!canPruneGroups({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount, busy: actions.actionBusy || list.loading, blockedReason: list.pruneBlocked })}><Eraser />清理失效关联组</Button></span>}
               <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} prefill={rebuildPrefill} onPrefillConsumed={() => setRebuildPrefill(null)} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
@@ -205,6 +226,24 @@ export default function SessionsPage() {
           <div className="my-4 flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
               {client === "codebuddyIde" && <Select value={variantScope} onValueChange={(value) => { setVariantScope(value as WbVariant); setSelectedGroupId(null); setDetailOpen(false); }}><SelectTrigger size="sm" className="w-32 bg-background text-xs" aria-label="选择 CodeBuddy IDE 档位"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cn">国内版</SelectItem><SelectItem value="ai">国际版</SelectItem></SelectContent></Select>}
+              {/* 搜索放在筛选之前：列表最主要的入口是「我记得那个项目 / 那句话」。
+                  它是**受控 + 即时**过滤（本地过滤 `filteredGroups`，不再请求后端），
+                  与状态筛选、排序、分组四个维度正交，互不覆盖。 */}
+              <div className="relative w-full min-w-0 sm:w-60">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input
+                  value={list.query}
+                  onChange={(event) => list.setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    // Esc 清空搜索：键盘用户不必去够那个小叉。
+                    if (event.key === "Escape" && list.query) list.setQuery("");
+                  }}
+                  placeholder="搜索标题、项目或摘要"
+                  aria-label="搜索会话"
+                  className="h-8 pl-8 pr-8 text-xs"
+                />
+                {list.query && <Button variant="ghost" size="icon" className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-muted-foreground hover:text-foreground" aria-label="清空搜索" title="清空搜索" onClick={() => list.setQuery("")}><X className="size-3.5" /></Button>}
+              </div>
               <Tabs value={list.statusFilter} onValueChange={list.setStatusFilter} className="min-w-0 max-w-full gap-0">
                 <TabsList className="h-auto max-w-full flex-wrap justify-start gap-0.5" aria-label="按状态筛选">
                   {statusOptions.filter(([value]) => ["all", "behind", "diverge", "latest"].includes(value) || value === list.statusFilter || list.groups.some((group) => group.summaryStatus === value)).map(([value, label]) => <TabsTrigger key={value} value={value} className="h-8 gap-1.5 px-2.5 hover:bg-background/60">
@@ -212,13 +251,54 @@ export default function SessionsPage() {
                   </TabsTrigger>)}
                 </TabsList>
               </Tabs>
+              {/* 「不分组 / 按项目」只改**呈现方式**：搜索、状态筛选、排序都照旧先生效，
+                  分组是在结果集之上再收拢一层，因此不会覆盖筛选条件。 */}
+              <Tabs value={list.groupMode} onValueChange={(value) => list.setGroupMode(value as SessionGroupMode)} className="min-w-0 gap-0">
+                <TabsList className="h-auto gap-0.5" aria-label="分组方式">
+                  <TabsTrigger value="none" className="h-8 gap-1.5 px-2.5 hover:bg-background/60"><LayoutList className="size-3.5" aria-hidden="true" />不分组</TabsTrigger>
+                  <TabsTrigger value="project" className="h-8 gap-1.5 px-2.5 hover:bg-background/60"><FolderTree className="size-3.5" aria-hidden="true" />按项目</TabsTrigger>
+                </TabsList>
+              </Tabs>
             </div>
             <Select value={list.sortOrder} onValueChange={list.setSortOrder}><SelectTrigger size="sm" className="w-auto min-w-28 gap-1.5 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground" aria-label="排序方式"><SlidersHorizontal className="size-4" aria-hidden="true" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">最近更新</SelectItem><SelectItem value="oldest">最早更新</SelectItem></SelectContent></Select>
           </div>
           {(list.storeStatus === "unavailable" || list.storeError) && <p role="status" className="mb-3 rounded-lg border border-warning-border p-3 text-sm text-muted-foreground">{list.storeError ?? "关联组存储暂不可用，当前只展示可读取的数据。"}</p>}
           {list.loadError && <div role="alert" className="mb-3 rounded-lg border border-danger-border p-3 text-sm text-danger">{list.loadError}<Button variant="outline" size="sm" className="ml-2" onClick={() => void list.reloadGroups()}>重试</Button></div>}
-          {list.loading ? <div className="space-y-3"><ScanProgressHint /><GroupSkeleton /></div> : list.filteredGroups.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center"><Layers3 className="size-7 text-muted-foreground" /><h3 className="mt-3 text-sm font-medium">{list.groups.length === 0 ? (list.deadGroupCount > 0 ? "关联组都已失效" : "还没有关联会话组") : "没有符合条件的会话"}</h3><p className="mt-2 text-sm text-muted-foreground">{list.groups.length === 0 ? (list.deadGroupCount > 0 ? `有 ${list.deadGroupCount} 个组的会话已被删除，可用上方「清理失效关联组」移除关联关系。` : "从账号切换时复制会话后，关联组会显示在这里。") : "试试其它筛选条件。"}</p></div> : <div className={`grid min-w-0 gap-3 ${contentWidth >= 600 ? "grid-cols-2" : "grid-cols-1"}`}>{list.visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} onRequestDelete={() => actions.setDeleteTarget(group)} />)}</div>}
-          {!list.loading && list.filteredGroups.length > PAGINATION_HIDE_MAX && <div className="mt-6 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground"><span>显示 {(list.currentPage - 1) * PAGE_SIZE + 1}–{Math.min(list.currentPage * PAGE_SIZE, list.filteredGroups.length)}，共 {list.filteredGroups.length} 个会话</span><nav aria-label="会话分页" className="flex flex-wrap items-center gap-1.5"><Button variant="outline" size="icon" className="size-8" aria-label="上一页" disabled={list.currentPage <= 1} onClick={() => list.setPage(list.currentPage - 1)}><ChevronLeft /></Button>{pages.map((value, index) => <span key={value} className="flex items-center gap-1.5">{index > 0 && value - pages[index - 1] > 1 && <span>…</span>}<Button variant={value === list.currentPage ? "default" : "outline"} className={`size-8 p-0 ${value === list.currentPage ? "bg-brand text-brand-foreground hover:bg-brand/90" : ""}`} aria-label={`第 ${value} 页`} aria-current={value === list.currentPage ? "page" : undefined} onClick={() => list.setPage(value)}>{value}</Button></span>)}<Button variant="outline" size="icon" className="size-8" aria-label="下一页" disabled={list.currentPage >= list.pageCount} onClick={() => list.setPage(list.currentPage + 1)}><ChevronRight /></Button></nav></div>}
+          {list.loading ? (
+            <div className="space-y-3"><ScanProgressHint /><GroupSkeleton /></div>
+          ) : list.filteredGroups.length === 0 ? (
+            <div className="flex min-h-56 flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center">
+              <Layers3 className="size-7 text-muted-foreground" />
+              <h3 className="mt-3 text-sm font-medium">{list.groups.length === 0 ? (list.deadGroupCount > 0 ? "关联组都已失效" : "还没有关联会话组") : list.query.trim() ? `没有匹配「${list.query.trim()}」的会话` : "没有符合条件的会话"}</h3>
+              <p className="mt-2 max-w-sm text-sm text-muted-foreground">{list.groups.length === 0 ? (list.deadGroupCount > 0 ? `有 ${list.deadGroupCount} 个组的会话已被删除，可用上方「清理失效关联组」移除关联关系。` : "从账号切换时复制会话后，关联组会显示在这里。") : list.query.trim() ? "搜索会匹配标题、项目名与卡片摘要；换个词或清空再看。" : "试试其它筛选条件。"}</p>
+              {list.groups.length > 0 && (list.query.trim() !== "" || list.statusFilter !== "all") && <Button variant="outline" size="sm" className="mt-3" onClick={() => { list.setQuery(""); list.setStatusFilter("all"); }}>清空搜索与筛选</Button>}
+            </div>
+          ) : list.grouped ? (
+            /* 分组模式：每节一个 `项目 X · N 个会话` 折叠节头（默认展开，见 `ProjectSection`）。
+               分页口径是「按节分页、节内条目全给」，所以同一项目的会话永远落在同一页的同一节里，
+               节头里的 N 也是该项目的**全部**会话数。 */
+            <div className="min-w-0 space-y-4">
+              {list.visibleSections.map((section) => <ProjectSection key={section.project || "__none__"} section={section} columns={gridColumns} selectedGroupId={selectedGroupId} onSelectGroup={openDetail} onRequestDelete={(group) => actions.setDeleteTarget(group)} />)}
+            </div>
+          ) : (
+            <div className={`grid min-w-0 gap-3 ${gridColumns}`}>
+              {list.visibleGroups.map((group) => <SessionGroupCard key={group.key} group={group} selected={group.groupId === selectedGroupId} onSelect={() => openDetail(group.groupId)} onRequestDelete={() => actions.setDeleteTarget(group)} />)}
+            </div>
+          )}
+          {/* 分页条：显隐规则交给 `list.showPagination`（平铺看条目数，分组看节数），
+              页面不再自己算一遍阈值，避免两处规则漂移。 */}
+          {!list.loading && list.showPagination && (
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+              <span>{list.grouped
+                ? `显示 ${list.visibleSections.length} / 共 ${list.sections.length} 个项目 · 本页 ${list.visibleGroups.length} 个会话`
+                : `显示 ${(list.currentPage - 1) * PAGE_SIZE + 1}–${Math.min(list.currentPage * PAGE_SIZE, list.filteredGroups.length)}`}，共 {list.filteredGroups.length} 个会话</span>
+              <nav aria-label="会话分页" className="flex flex-wrap items-center gap-1.5">
+                <Button variant="outline" size="icon" className="size-8" aria-label="上一页" disabled={list.currentPage <= 1} onClick={() => list.setPage(list.currentPage - 1)}><ChevronLeft /></Button>
+                {pages.map((value, index) => <span key={value} className="flex items-center gap-1.5">{index > 0 && value - pages[index - 1] > 1 && <span>…</span>}<Button variant={value === list.currentPage ? "default" : "outline"} className={`size-8 p-0 ${value === list.currentPage ? "bg-brand text-brand-foreground hover:bg-brand/90" : ""}`} aria-label={`第 ${value} 页`} aria-current={value === list.currentPage ? "page" : undefined} onClick={() => list.setPage(value)}>{value}</Button></span>)}
+                <Button variant="outline" size="icon" className="size-8" aria-label="下一页" disabled={list.currentPage >= list.pageCount} onClick={() => list.setPage(list.currentPage + 1)}><ChevronRight /></Button>
+              </nav>
+            </div>
+          )}
         </section>
       </div>
       <Dialog open={detailOpen} onOpenChange={(open) => { if (!open) closeDetail(); }}>

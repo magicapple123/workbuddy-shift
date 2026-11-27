@@ -35,9 +35,22 @@
 //! JetBrains 是项目 key。读写都按 [`history_scopes_in`] 枚举出来的多项目历史根进行，
 //! 绝不把该级硬编码成 uid。
 //!
-//! TODO(未验证)：JetBrains 插件还写了 `check-point/`、`file-tree/`、`plan-task/` 三个与
-//! `history/` 并列的目录（同样按 `<bucket>/<convId>` 分层）。**不要**为了「让复制体打开」
-//! 就盲目复制这三个目录——它们是否需要随会话一起复制尚未在真机验证，本轮只复制 `history/`。
+//! 关于 `check-point/`、`file-tree/`、`plan-task/` 三个与 `history/` 并列的目录
+//! （同样按 `<bucket>/<convId>` 分层）——**本轮仍只复制 `history/`**：
+//!
+//! - **2026-11-27 真机检查结论**（JetBrains 2026.2 / IntelliJ + PyCharm 已装插件）：
+//!   路径 `%LOCALAPPDATA%\CodeBuddyExtension\Data\<uid>\JetBrains\<projectKey>\` 下，
+//!   `check-point/`、`file-tree/`、`plan-task/` 三个目录**全部没有有效内容**——只有
+//!   0 字节 `meta.json`、空的 `files/` 或空目录；
+//! - **对照**：同一台机器的 VS Code 数据仓（`<uid>\VSCode\<uid>\history\` 同一级）这三个
+//!   目录里有真实内容（单个工作区最多 1138 个文件 / 17MB）。说明「客户端有内容时会写进
+//!   来」这件事成立，只是 JetBrains 侧本机没有产生计划/文件树数据；
+//! - 因此**没有可复制的数据**：把三个空目录跟着会话搬过去既不会让复制体多出功能，
+//!   还会在目标账号目录里留下无意义（且可能与源账号互相覆盖）的空结构；
+//! - 若将来在 JetBrains 侧**观察到非空**的 `check-point/`（计划）/ `file-tree/`（工作区
+//!   文件树）/ `plan-task/`（任务列表），需要**重新评估**是否随会话复制，并按 `AGENTS.md`
+//!   第 4 节处理：这些目录是插件运行时写入的活数据，必须走「先关进程 + 备份 + 锁内合并」
+//!   那套流程，不能直接 `copy_dir_recursive` 了事（索引可能被并发写坏）。
 //!
 //! 约定与约束：
 //! - 会话 / 消息 / 请求 id 一律 **32 位小写 hex**（扩展 `generateId()` 产物），

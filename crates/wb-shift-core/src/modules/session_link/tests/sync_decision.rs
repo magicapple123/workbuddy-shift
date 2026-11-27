@@ -26,6 +26,8 @@ fn content_from(text: &str) -> ContentState {
         text: text.to_string(),
         full_digest: full_digest_of(text.as_bytes()),
         normalized: normalized_from(text),
+        latest_at: crate::modules::session_link::latest_record_timestamp(text),
+        list_facts: None,
     })
 }
 
