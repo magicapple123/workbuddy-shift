@@ -101,6 +101,8 @@ const ROUTES: Record<string, Route> = {
   copy_sessions_cross: { method: "POST", path: "/api/sessions/copy-cross" },
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
   session_links_preview_cross: { method: "POST", path: "/api/session-links/preview-cross" },
+  session_pending_writes: { method: "GET", path: "/api/session-writes/pending" },
+  session_discard_write: { method: "POST", path: "/api/session-writes/discard" },
   session_sync_cross: { method: "POST", path: "/api/session-sync/cross" },
   list_session_groups: { method: "POST", path: "/api/session-groups/list" },
   get_session_group: { method: "POST", path: "/api/session-groups/detail" },

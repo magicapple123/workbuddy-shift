@@ -74,7 +74,7 @@ Workspace 成员与共享依赖版本见根 [`Cargo.toml`](../Cargo.toml)。
 | 主题 | 模块（`src/modules/` 下） |
 | --- | --- |
 | 账号与切换 | `account/`（`store`/`display`/`identity`）、`auth_file/`（`read`/`sync`）、`switch/`（`plan`/`execute`）、`variant.rs`（档位单一来源）、`oauth.rs`、`export_import/`（`export`/`import`）；`process/`（`mod.rs` 公共入口 + `windows/`（进程/注册表/解析）+ `win_close.rs`（Windows 可见窗口 `SC_CLOSE` 投递与窗口标题探测，当前由 `vscode_ext` 使用，二期接入其余客户端）+ `macos.rs`） |
-| 会话复制 / 同步 / 恢复 | `session/mod.rs`（公共入口与共享口径）、`session/paths.rs`（存储/数据根与命名空间）、`session/query.rs`（会话列表、DB 探测与会话行存活索引 `LiveSessionRows`）、`session/copy/{mod,body,db,db_spaces,plan,plan_prepare,plan_execute,repair}.rs`、`session/exec/{mod,backup,write,write_replay}.rs`、`session/sync/{mod,preview,liveness,plan,wait}.rs`、`session/recovery.rs`、`session/run.rs`、`session/tests/`、`session_backup.rs`、`session_groups/`（`view` 列表/详情、`liveness` 插件/IDE 的组级存活汇总与清理拒绝原因、`sync` 配对、`sync_all` 跨组安全批量（一次确认同步所有可安全快进的副本，分歧组整组跳过、编辑器只关/开一次）、`members` 成员操作、`graph` 统一批次、`maintenance` 失效组清理、`jetbrains_guard` 切换前的组一致性守卫） |
+| 会话复制 / 同步 / 恢复 | `session/mod.rs`（公共入口与共享口径）、`session/paths.rs`（存储/数据根与命名空间）、`session/query.rs`（会话列表、DB 探测与会话行存活索引 `LiveSessionRows`）、`session/copy/{mod,body,db,db_spaces,plan,plan_prepare,plan_execute,repair}.rs`、`session/exec/{mod,backup,write,write_replay}.rs`、`session/sync/{mod,preview,liveness,plan,wait}.rs`、`session/recovery.rs`、`session/discard.rs`（手动结束卡住的同步记录）、`session/run.rs`、`session/tests/`、`session_backup.rs`、`session_groups/`（`view` 列表/详情、`liveness` 插件/IDE 的组级存活汇总与清理拒绝原因、`sync` 配对、`sync_all` 跨组安全批量（一次确认同步所有可安全快进的副本，分歧组整组跳过、编辑器只关/开一次）、`members` 成员操作、`graph` 统一批次、`maintenance` 失效组清理、`jetbrains_guard` 切换前的组一致性守卫） |
 | 会话关联存储与判定 | `session_link.rs`（模块声明与 re-export）与其子模块 `session_link/{content,content_repair,link_store,link_store/{baseline,store},operation_log,preview,sync_decision}.rs`、`session_link/tests/` |
 | 其它客户端 | `codebuddy_cli/`（`state`/`settings`/`helper`/`switch`）、`codebuddy_ide/`、`codebuddy_cn_ide/`、`codebuddy_ide_session/`、`codebuddy_ide_session_sync/`、`vscode_ext/`、`vscode_session/`、`vscode_session_sync/`（`index` 工作区索引四态/定位/会话目录证据、`liveness` 会话存活判定（三处消费方共用）、`register` 复制后登记、`preview` 预览、`plan`/`exec` 同步、`backup` 回滚）、`vscode_session_link/`、`vscode_cn_inject/`、`jetbrains/`（`mod/status/switch/detect/...`，`diagnose` 输出切换前诊断与阻断原因） |
 | 存储查看与清理 | `storage/`（`catalog` 分类聚合、`snapshot` 单次遍历快照（总览/会话/回收站共用）、`protected` 受保护目录判定与延迟计量、`reveal` 文件管理器定位（`scope=storage` 白名单 / `scope=cwd` 只读任意绝对目录）、`roots/` 白名单根） |
@@ -300,6 +300,13 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 - **生命周期**：维护记录 `session-links/backup-lifecycle/` 标记 `allocating → protected →
   cleanupPending`；备份不完整时零写入，中断的操作由 `session/recovery.rs` 按同一份清单
   补完或回滚，可靠完成后再清理临时目录（`session_backup.rs`）。
+- **手动结束**：自动恢复拒绝的现场（目标被其它程序改写、备份清单损坏、目标行归属异常）
+  会一直挡住同一条会话之后的同步。`session/discard.rs` 提供唯一的出口，语义只有一条：
+  **把记录置为放弃**，不碰正文、不碰会话行。是否保留备份由现场决定——正文仍是写入前的
+  样子（`PreSync`，或状态同步在 `prepared` 阶段的 `Ours`）时备份没有保留价值，交回维护
+  入口回收；正文已不存在或已被改写时保留备份并明说「可能不是同步后的状态」。正文正好是
+  本次写入的完整内容（`Ours` 且已推进到写正文）时不提供放弃：那一步自动恢复能补完。
+  不提供「复制」的中断记录——复制牵涉新建的会话行与映射，结束会留下孤儿行。
 - **写入范围**：复制 / 同步只写目标正文与 `workbuddy.db` 的 sessions 行；
   `edge-sync-mapping-*.db` 的云端映射行由客户端 edge-sync 扩展在下次启动时自行写入，
   本工具不预写（预写会让客户端判定「已迁移」从而跳过上传）。
@@ -377,7 +384,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/limits/scan.rs` | 554 | 来源枚举 | 六个来源的**候选文件收窗**共用同一套判据（按文件 mtime 而非目录名收窗、字节级 BMH 粗筛、`MERGE_WINDOW_MS` 去重），这四件事互为前提：改任一处口径都会让「同一次 429」在另一个来源里重复或消失。第六轮加入「插件宿主多日志根 union + 插件目录过滤」后越过阈值。 | 下一轮把「插件宿主 agent 日志」（`agent_log_roots` / `agent_log_files` / `is_codebuddy_extension_dir` / `walk_agent_logs`）整体抽到 `limits/scan/agent.rs`，公共收窗与去重留在本文件。 |
 | `crates/wb-shift-core/src/modules/session/tests/copy.rs` | 3465 | 测试 | 本轮拆分后的测试分组（原 session/tests.rs 6696 行按主题拆分），不属于生产逻辑；再按行数机械切只增加跳转成本。 | 测试文件继续显著膨胀时，按用例主题再拆；当前保留。 |
 | `crates/wb-shift-core/src/modules/limits/tests.rs` | 2329 | 测试 | 限额模块测试整体随模块搬迁，测试名与基线一致；第六轮加入「无模型条目按同账号同 resetAt 归并」「多日志根 union」「插件目录过滤」三组用例后超过原登记值。 | 同上，保留；继续膨胀时按「时间戳/归因」「页载荷聚合」「来源枚举」三组拆文件。 |
-| `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1518 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
+| `crates/wb-shift-core/src/modules/session/tests/recovery.rs` | 1601 | 测试 | 会话恢复主题测试分组。 | 同上，保留。 |
 | `crates/wb-shift-core/src/modules/vscode_cn_inject/tests/inject.rs` | 542 | 测试 | state.vscdb 锁冲突与重试用例（busy_timeout / 失败分类 / 重试循环）共用同一套 `hold_exclusive` + `insert_row` 夹具，拆开会让「同一把库、同一把锁、唯一变量是 attempts」的对照失效。 | 测试继续膨胀时把「锁冲突与重试」用例组拆到 `tests/inject_lock.rs`。 |
 | `crates/wb-shift-core/src/modules/diagnostics/redact.rs` | 540 | 脱敏纯函数 + 逐规则单测 | 占位符规则与「看前一个词」的两条上下文规则（`Bearer` 短令牌、含空格路径的后续片段）互相抢匹配，顺序本身就是契约，单测必须与实现同文件才能一眼对上顺序；测试约占 40%。 | 规则集稳定后把测试移到 `diagnostics/redact/tests.rs`（需要把文件改成目录模块）。 |
 | `crates/wb-shift-core/src/modules/config/tests.rs` | 1282 | 测试 | 配置模块测试整体随模块搬迁。 | 同上，保留。 |
@@ -397,7 +404,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-server/src/api/tests.rs` | 677 | 测试 | api 层边界测试集中在一个文件（SPA 回退 / Host 边界与 `WB_SHIFT_ALLOWED_HOSTS` 白名单 / Origin 口径选择 `origin_policy` / 请求体 DTO 契约 / 切换运行标记 / 清理接口的破坏性默认），共享 `router_request`、`post_json`、`router_status` 三个 helper，按域拆文件会把它们复制到每个子文件。 | 保留；边界层测试再显著膨胀时，先把三个 helper 抽到 `api/tests/support.rs` 再按域拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/plugin_liveness.rs` | 823 | 测试 | 插件 / IDE 的存活判定主题测试组（会话目录证据、空工作区分母、`Partial` 判不了时清理入口的 `pruneBlocked`、隐藏集合 ≡ 清理集合、客户端与档位隔离），共用 `tests/editor.rs` 的 `TempStore` 造数夹具；按主题分组而非按行数拆分。 | 继续膨胀时把 `pruneBlocked` 相关用例拆到 `tests/prune_blocked.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/view.rs` | 1565 | 视图装配 | 列表/详情/卡片载荷共用一份成员快照与判定矩阵；拆开会让「同一份摘要口径」跨文件传递，先保持单文件。列表的存活过滤按客户端分派（WorkBuddy 读库、插件/IDE 走 `liveness`），与清理共用同一份组级汇总。本轮为「组徽标能不能被测试」抽出 `detail_at`（显式注入关联存储根 + 成员路径解析器 `PayloadContext`）：判定、聚合与徽标合成必须仍与生产同一份实现，否则「纯函数测到了、真实载荷没接上」的缺口会重演。跨组批量同步需要的 `behindMemberCount` 也从同一份判定矩阵派生（issue #231：前端据此显示「同步 N 个待同步组」并汇总副本数），不再单独数一遍成员状态。 | 继续增长时把卡片载荷装配（`group_payload`）与共用口径（`member_snapshot`/`summary_text`）按职责再拆；`detail`/`detail_at` 的转发关系保持单文件。 |
-| `crates/wb-shift-core/src/modules/vscode_session_sync/tests/sync.rs` | 523 | 测试 | 插件侧同步/预览主题测试分组（含代表成员与存活过滤用例）。 | 保留；测试继续膨胀时按「复制登记」「预览」「同步执行」再拆。 |
+| `crates/wb-shift-core/src/modules/vscode_session_sync/tests/sync.rs` | 624 | 测试 | 插件侧同步/预览主题测试分组（含代表成员与存活过滤用例）。 | 保留；测试继续膨胀时按「复制登记」「预览」「同步执行」再拆。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/maintenance.rs` | 1131 | 测试 | 失效组清理与列表过滤的判定/备份/拒绝语义共用一套造数夹具（临时工具存储根、`sessions` 表、插件工作区索引）；补齐插件与 IDE 的清理、索引部分损坏（`Partial`）的拒绝与放行、无失效组时不重写主表、两客户端互不串用等用例后超过阈值，属测试分组而非生产逻辑。 | 继续膨胀时按「WorkBuddy（`sessions` 表）」与「插件 / IDE（工作区索引）」两个主题拆成 `maintenance.rs` + `plugin_prune.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/editor.rs` | 571 | 测试 | 管理页/客户端作用域/目标兼容性测试与共享夹具 `TempStore`（临时工具存储根、`sessions` 表、插件工作区索引造数）集中在一个文件；夹具被同模块多个 `include!` 的测试共用，按行数拆开只会把同一份造数逻辑复制多份。 | 夹具继续增长时抽到 `tests/support.rs`（与 `vscode_session_sync/tests/fixtures.rs` 同构）。 |
 | `scripts/smoke/assert-update-log.py` | 728 | 脚本（断言库） | `--smoke-self-update` 日志的断言入口：`phase` 词表必须与 `src-tauri/src/update_service/smoke.rs` 的 `PHASES` 逐字对照，所以词表、读取、分组、判定、CLI 刻意放同一个文件（拆开会出现第二份词表）；行数的六成是「为什么这样断言」的文档与 `--selftest` 内联的 3 份 JSONL 夹具（正常 / 缺阶段 / 含 error），`--selftest` 必须能在无网络、无 CI 环境的机器上一条命令跑完。 | 词表与断言口径稳定后，把 3 份夹具移到 `scripts/smoke/fixtures/update-log/` 下的 `.jsonl` 文件，正文可降到 500 行以内。 |
@@ -433,7 +440,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `crates/wb-shift-core/src/modules/automation_sync.rs` | 761 | 定时任务同步 | 只读统计、备份、复制、暂停与设置读写共用同一份 `automations` 列清单与判定函数，拆开会让「跳过的任务」与「复制的列」口径分叉；其中约 300 行为单测。 | 下一轮把 `tests` 段拆到 `automation_sync_tests.rs` 即可回落到 500 行内。 |
 | `crates/wb-shift-core/src/modules/refresh.rs` | 2382 | 认证刷新 | 失败分级、标记自愈、单飞与退避共用同一份账号库读写与 `accounts.json` 语义；拆开会让「写标记」与「清标记」读到不同版本。本轮 T01 加入 live 认证文件的 adopt / skip 判定（`decide_live_action`），它必须在 `credentials.lock` 内与抢锁、重读、写回同处一个临界区，与刷新主路径分开就会把「锁外读到的旧新鲜度」放回来。 | 下一轮把 `verify_*` 复核调度抽到 `refresh/verify.rs`；adopt 判定与刷新主路径保持同文件（同一把锁、同一个临界区）。 |
 | `crates/wb-shift-core/src/modules/config/configs/bundle.rs` | 597 | 设置包 | 导出/导入四份配置的白名单、整体拒绝语义、导入前备份与「键名 → 文件」映射共用一份 `SETTINGS_BUNDLE_KEYS`；拆开会让白名单与写入路径各持一份，出现「校验过的键」与「写下去的键」不一致。 | 配置项增加时先抽「键表 + 校验」，读写流程留在本文件；条目稳定后可降到 500 行内。 |
-| `crates/wb-shift-server/src/api/dto.rs` | 512 | 请求体 DTO | 宿主层所有 `#[serde(rename_all = "camelCase")]` 请求体集中在一处，字段名必须与 Tauri command 参数逐字一致（`check-api-contract.mjs` 逐条比对）；按域拆文件会让「一份 DTO 一个文件」，但契约校验要与命令表整表对照，拆开反而要维护映射。 | 域继续增多时按业务域拆 `dto/{settings,sessions,accounts}.rs`，`mod.rs` 只做重导出。 |
+| `crates/wb-shift-server/src/api/dto.rs` | 521 | 请求体 DTO | 宿主层所有 `#[serde(rename_all = "camelCase")]` 请求体集中在一处，字段名必须与 Tauri command 参数逐字一致（`check-api-contract.mjs` 逐条比对）；按域拆文件会让「一份 DTO 一个文件」，但契约校验要与命令表整表对照，拆开反而要维护映射。 | 域继续增多时按业务域拆 `dto/{settings,sessions,accounts}.rs`，`mod.rs` 只做重导出。 |
 | `crates/wb-shift-core/src/modules/session/sync/preview.rs` | 1054 | 同步预览 | 判定、指纹缓存、预览凭据绑定三者共享同一份内容身份（`ContentStamp`），拆开会让缓存键与判定前提分叉。 | 下一轮把 `PreviewDecision*` 缓存段抽到 `preview/cache.rs`。 |
 | `crates/wb-shift-core/src/modules/session_link/content.rs` | 1021 | 正文解析 | 严格校验、容错修复、指纹与摘要必须读同一份规范化后的记录序列，拆开会让「预览的摘要」与「执行的正文」不是同一份。本轮加入「比较口径」`comparable_line_digests`（把复制/同步写目标时的末条归一签名折算成确定性形式），它必须与存储口径（`line_digests`/`total_digest`）在读同一行的同一个循环里算出，两套口径分开维护正是不拆的理由。 | 下一轮把指纹/缓存段抽到 `content/fingerprint.rs`；比较口径随 `normalize_jsonl` 留在本文件。 |
 | `crates/wb-shift-core/src/modules/session_link/tests/content.rs` | 566 | 测试 | 正文主题测试分组（校验/修复/指纹/缓存）。 | 测试文件继续膨胀时按用例主题再拆。 |

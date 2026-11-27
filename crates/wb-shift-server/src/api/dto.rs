@@ -510,3 +510,12 @@ pub(crate) struct SaveTextFileRequest {
 pub(crate) struct ImportSettingsBundleRequest {
     pub(crate) bundle: Value,
 }
+
+/// `POST /api/session-writes/discard`。
+///
+/// 只传操作 id：档位由操作记录自身决定，宿主层不参与选择，避免「选错档位结束错记录」。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct SessionWriteDiscardRequest {
+    pub(crate) operation_id: String,
+}

@@ -9,6 +9,7 @@ import { AutoRotateCard } from "./auto-rotate-card";
 import { AutomationSyncCard } from "./automation-sync-card";
 import { CompanionCard } from "./companion-card";
 import { DiagnosticsCard } from "./diagnostics-card";
+import { PendingWritesCard } from "./pending-writes-card";
 import { ErrorLogCard } from "./error-log-card";
 import { NotificationHistoryCard } from "./notification-history-card";
 import { PermissionCheckCard } from "./permission-check-card";
@@ -64,6 +65,7 @@ export default function SettingsPage() {
       "settings-notifications": () => <NotificationHistoryCard />,
       "settings-error-log": () => <ErrorLogCard />,
       "settings-diagnostics": () => <DiagnosticsCard />,
+      "settings-pending-writes": () => <PendingWritesCard />,
       "settings-updates": () => <UpdateCard />,
       "settings-bundle": () => (
         <SettingsBundleCard onImported={() => setReloadKey((current) => current + 1)} />

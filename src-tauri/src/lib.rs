@@ -297,6 +297,8 @@ pub fn run() {
             commands::copy_sessions,
             commands::copy_sessions_cross,
             commands::session_links_preview,
+            commands::session_pending_writes,
+            commands::session_discard_write,
             commands::session_links_preview_cross,
             commands::session_sync_cross,
             commands::list_session_groups,

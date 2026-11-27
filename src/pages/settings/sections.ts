@@ -207,6 +207,17 @@ export const SETTINGS_SECTIONS: SettingsSectionSpec[] = [
     availability: "always",
   },
   {
+    // 中断的同步会挡住这条会话之后的同步；这里是唯一的「结束记录」入口。
+    // 与「诊断包」相邻：两者都属于「出问题之后怎么办」。
+    id: "settings-pending-writes",
+    title: "未完成的写入",
+    group: "desktop",
+    rows: ["查看与结束"],
+    keywords: ["未完成", "写入", "同步失败", "恢复", "中断", "卡住", "pending", "recovery"],
+    // 演示模式没有后端、也读不到真实操作记录：不渲染，免得只剩一条「读取失败」。
+    availability: "not-demo",
+  },
+  {
     id: "settings-updates",
     title: "自动更新",
     group: "desktop",

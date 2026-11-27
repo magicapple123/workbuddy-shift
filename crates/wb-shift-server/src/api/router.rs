@@ -107,6 +107,14 @@ pub fn router(state: SharedState) -> Router {
             "/api/session-links/preview-cross",
             post(api_session_links_preview_cross),
         )
+        .route(
+            "/api/session-writes/pending",
+            get(api_pending_session_writes),
+        )
+        .route(
+            "/api/session-writes/discard",
+            post(api_discard_session_write),
+        )
         .route("/api/session-sync/cross", post(api_session_sync_cross))
         .route("/api/session-groups/list", post(api_list_session_groups))
         .route("/api/session-groups/detail", post(api_get_session_group))

@@ -446,3 +446,27 @@ export interface SessionGroupActionReport {
   /** 插件侧：写入已完成但 VS Code 未能自动重新打开（无 `errors` 数组的入口用它兜底）。 */
   editorError?: string;
 }
+
+/** 一条未完成的会话写入（设置页「未完成的写入」）。 */
+export interface PendingSessionWrite {
+  operationId: string;
+  /** `sync`（同步）或 `copy`（复制）。 */
+  kind: string;
+  targetSessionId: string;
+  /** 目标会话标题；会话行已不存在时为 `null`。 */
+  title: string | null;
+  variant: WbVariant;
+  updatedAt: number;
+  lastError: string | null;
+  /** 是否可「结束这次写入」：复制的中断记录牵涉新建的会话行，不提供。 */
+  discardable: boolean;
+}
+
+/** 「结束这次写入」的结果。 */
+export interface DiscardedSessionWrite {
+  operationId: string;
+  /** 是否保留了备份（`true` 时维护入口会继续把这条备份列为待确认）。 */
+  backupKept: boolean;
+  /** 结束后的状态说明，可直接展示。 */
+  note: string;
+}
