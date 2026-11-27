@@ -175,6 +175,9 @@ const ROUTES: Record<string, Route> = {
   // 排障：脱敏诊断包全文（只读）。落盘导出是桌面专属（`export_diagnostics`），
   // 网页版拿到文本后自己复制 —— 服务端不往用户机器上写任意路径。
   get_diagnostics_report: { method: "GET", path: "/api/diagnostics" },
+  // R6-06：按需解密开关。只读写三个布尔位，不触发解密、不回传 token。
+  get_credential_config: { method: "GET", path: "/api/credential-config" },
+  save_credential_config: { method: "POST", path: "/api/credential-config" },
 };
 
 /**

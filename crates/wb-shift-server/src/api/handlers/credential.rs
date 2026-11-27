@@ -10,8 +10,25 @@ use axum::response::Response;
 use axum::Json;
 
 use crate::api::*;
-use serde_json::Value;
+use serde_json::json;
 use wb_shift_core::modules::config;
+
+impl CredentialSwitches {
+    /// 转成 core 认的 JSON 形状；**只**放三个白名单键，其余一律不透传。
+    fn to_value(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        if let Some(value) = self.decrypt_read_only {
+            map.insert("decryptReadOnly".to_string(), json!(value));
+        }
+        if let Some(value) = self.decrypt_write {
+            map.insert("decryptWrite".to_string(), json!(value));
+        }
+        if let Some(value) = self.first_prompt_shown {
+            map.insert("firstPromptShown".to_string(), json!(value));
+        }
+        serde_json::Value::Object(map)
+    }
+}
 
 /// `GET /api/credential-config` —— 只读 / 写开关 + 探测结论 + 出厂默认值。
 pub(crate) async fn api_credential_config() -> Response {
@@ -21,10 +38,11 @@ pub(crate) async fn api_credential_config() -> Response {
 /// `POST /api/credential-config` —— 只保存三个开关位，返回回读值。
 ///
 /// 桌面端 Tauri 按参数名注入 config；WebUI 的 `call()` 会包成 `{config}`。
-/// 平台探测结论不接受外部提交（core 侧白名单过滤），所以这里不需要额外校验。
-pub(crate) async fn api_save_credential_config(Json(body): Json<Value>) -> Response {
-    let submitted = submitted_config(&body);
-    match config::save_credential_switches(submitted) {
+/// 平台探测结论不接受外部提交（DTO 里就没有这个字段），所以这里不需要额外校验。
+pub(crate) async fn api_save_credential_config(
+    Json(body): Json<SaveCredentialConfigRequest>,
+) -> Response {
+    match config::save_credential_switches(&body.config.to_value()) {
         Ok(saved) => json_ok(saved),
         Err(error) => json_err(error.to_string(), StatusCode::BAD_REQUEST),
     }

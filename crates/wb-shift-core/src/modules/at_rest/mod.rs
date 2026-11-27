@@ -641,12 +641,11 @@ fn record_error(account: &Value, error: AtRestError) {
     }
 }
 
-/// 事件日志的薄封装（跨轨道契约，P1 轨提供 `credential_events::record_for_account`）。
+/// 事件日志的薄封装（跨轨道契约，`credential_events::record_for_account`）。
 ///
-/// 本分支上 `modules::credential_events` 还不存在，因此调用被注释掉：P1 合并后补一行
-/// 即可，其余逻辑不用动。
+/// 事件只写账号序号 / 档位 / action / reason 四个字段，**不含 token、昵称、路径**；
+/// 写入失败在 `credential_events` 内部只打日志，绝不影响解密主流程（因此这里没有
+/// `Result`，也不需要调用方处理错误）。
 fn record(account: &Value, action: &str, reason: &str) {
-    // TODO(r6-06): P1 合并后接入 credential_events
-    // crate::modules::credential_events::record_for_account(account, action, reason);
-    let _ = (account, action, reason);
+    crate::modules::credential_events::record_for_account(account, action, reason);
 }
