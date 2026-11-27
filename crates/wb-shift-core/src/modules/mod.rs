@@ -1,4 +1,5 @@
 pub mod account;
+pub mod at_rest;
 pub mod auth_file;
 pub mod automation_sync;
 pub mod checkin;

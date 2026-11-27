@@ -52,9 +52,12 @@ fn manifest_candidates(app_path: &Path) -> Vec<PathBuf> {
         .chain(
             // `.app` 形态已经拼过 Contents/Resources，这里再补一次不带 resources 的
             // 直落文件（个别打包器会把清单放在 Contents/Resources 根下）。
-            app_path
-                .is_dir()
-                .then(|| app_path.join("Contents").join("Resources").join("install-manifest.json")),
+            app_path.is_dir().then(|| {
+                app_path
+                    .join("Contents")
+                    .join("Resources")
+                    .join("install-manifest.json")
+            }),
         )
         .filter(|path| path.is_file())
         .collect()
