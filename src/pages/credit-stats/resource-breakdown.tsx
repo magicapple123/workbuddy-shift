@@ -35,8 +35,14 @@ function barTone(resource: CreditResource): string {
   return "bg-[var(--data-series-blue)]";
 }
 
-/** 列宽固定：名称自适应，其余五列定宽（资源包 / 获取 / 到期 / 已用 / 剩余 / 占比）。 */
-const GRID_COLUMNS = "grid-cols-[minmax(0,1fr)_52px_52px_64px_104px_64px]";
+/**
+ * 列宽固定：名称自适应，其余五列定宽（资源包 / 获取 / 到期 / 已用 / 剩余 / 占比）。
+ *
+ * `grid` 与 `grid-cols-*` 必须写在同一个常量里：Tailwind 的 `grid-cols-*` 只输出
+ * `grid-template-columns`，不负责 `display:grid`。少了 `grid`，六个 `span` 会按行内流
+ * 排布，进度条被拉成整行宽（0.5.0 的用户可见错乱）。
+ */
+const GRID_COLUMNS = "grid grid-cols-[minmax(0,1fr)_52px_52px_64px_104px_64px]";
 
 export function ResourceBreakdown({
   credit,
