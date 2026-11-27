@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSpreadsheet } from "lucide-react";
 import {
   CalendarDays,
@@ -26,6 +26,7 @@ import { StatsRangeControl } from "@/components/stats-range";
 import * as api from "@/lib/api";
 import { formatAmount, formatDateTime } from "@/lib/format";
 import { saveCsvFile, saveXlsxFile } from "@/lib/export-download";
+import { usePersistedPreferenceState } from "@/lib/persisted-preference";
 import {
   invalidateCreditStatisticsCache,
   loadCreditStatistics,
@@ -33,8 +34,8 @@ import {
 } from "@/lib/stats-cache";
 import {
   creditDataRange,
-  DEFAULT_STATS_RANGE,
   monthSliceNote,
+  STATS_RANGE_PREFERENCE,
   statsRangeDayCount,
   statsRangeLabel,
   statsRangeSupports90d,
@@ -105,18 +106,38 @@ export default function CreditStatsPage() {
     fetchAll,
     refreshCredits,
   } = useAccountsStore();
-  // 首帧直接渲染共享缓存（可能来自启动预热）：有缓存就不出整页 loading。
-  const [stats, setStats] = useState<CreditStatistics | null>(() => readCreditStatisticsCache());
-  const [loading, setLoading] = useState(() => readCreditStatisticsCache() === null);
+  /**
+   * 全局唯一的展示范围（今天 / 7 天 / 30 天 / 本月 / 90 天 / 全部）。
+   * 持久化到 localStorage，与 Token 统计页共用同一份。
+   */
+  const [range, setRange] = usePersistedPreferenceState(STATS_RANGE_PREFERENCE);
+  /** 实际取数窗口：由展示范围映射而来，不新增后端 `range` 取值。 */
+  const [dataRange, setDataRange] = useState<CreditRange>(() => {
+    const cached = readCreditStatisticsCache();
+    return creditDataRange(range, statsRangeSupports90d(cached?.windowProbe?.maxDays));
+  });
+  // 首帧仅在 30 天窗口时直接渲染共享缓存，避免恢复为 90 天 / 全部时拿 30 天数字冒充目标窗口。
+  const [stats, setStats] = useState<CreditStatistics | null>(() =>
+    dataRange === "30d" ? readCreditStatisticsCache() : null,
+  );
+  const [loading, setLoading] = useState(() =>
+    dataRange === "30d" ? readCreditStatisticsCache() === null : true,
+  );
   const [error, setError] = useState<string | null>(null);
   const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
   /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
   const [clientView, setClientView] = useState<CreditClientKey>("all");
-  /** 全局唯一的展示范围（今天 / 7 天 / 30 天 / 本月 / 90 天 / 全部）。 */
-  const [range, setRange] = useState<StatsRangeKey>(DEFAULT_STATS_RANGE);
-  /** 实际取数窗口：由展示范围映射而来，不新增后端 `range` 取值。 */
-  const [dataRange, setDataRange] = useState<CreditRange>("30d");
   const [rangeLoading, setRangeLoading] = useState(false);
+  const initialRangeRef = useRef<CreditRange | null>(dataRange === "30d" ? null : dataRange);
+  const syncedWindowKeyRef = useRef<string | null>(null);
+  const syncSeqRef = useRef(0);
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
 
   // 官方窗口是否支持 90 天；探测结果没回来（null）时按不支持处理，不给必然降级的按钮。
   const supports90d = statsRangeSupports90d(stats?.windowProbe?.maxDays);
@@ -182,6 +203,7 @@ export default function CreditStatsPage() {
    */
   async function selectRange(next: StatsRangeKey) {
     if (next === range || rangeLoading) return;
+    syncSeqRef.current += 1;
     const previousRange = range;
     const previousDataRange = dataRange;
     const nextDataRange = creditDataRange(next, supports90d);
@@ -241,6 +263,67 @@ export default function CreditStatsPage() {
       await load(true, { background: true });
     })();
   }, [load, dataRange]);
+
+  // 首次进入页面时若从 localStorage 恢复为非 30 天窗口（90d / all），主动读对应窗口数据。
+  useEffect(() => {
+    const target = initialRangeRef.current;
+    if (!target) return;
+    let cancelled = false;
+    void (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        await fetchAll();
+        const accountState = useAccountsStore.getState();
+        if (accountState.error) throw new Error(accountState.error);
+        const nextStats = await api.getCreditStatistics(false, target);
+        if (cancelled) return;
+        initialRangeRef.current = null;
+        setStats(nextStats);
+      } catch (cause) {
+        if (cancelled) return;
+        setError(api.asError(cause));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAll]);
+
+  // 跨标签页同步 range 或探测返回 supports90d=true 导致所需窗口变化时，补齐取数窗口。
+  useEffect(() => {
+    const expected = creditDataRange(range, supports90d);
+    if (expected === dataRange || rangeLoading || loading) return;
+    const syncKey = `${range}:${expected}`;
+    if (syncedWindowKeyRef.current === syncKey) return;
+    syncedWindowKeyRef.current = syncKey;
+    const seq = ++syncSeqRef.current;
+    setRangeLoading(true);
+    setDataRange(expected);
+    void (async () => {
+      try {
+        if (expected === "30d") {
+          await load(false);
+        } else {
+          const nextStats = await api.getCreditStatistics(false, expected);
+          if (!unmountedRef.current && syncSeqRef.current === seq) {
+            setStats(nextStats);
+            setError(null);
+          }
+        }
+      } catch (cause) {
+        if (!unmountedRef.current && syncSeqRef.current === seq) {
+          toast.error("同步展示范围失败", { description: api.asError(cause) });
+        }
+      } finally {
+        if (!unmountedRef.current && syncSeqRef.current === seq) {
+          setRangeLoading(false);
+        }
+      }
+    })();
+  }, [range, supports90d, dataRange, rangeLoading, loading, load]);
 
   const variantByAccountId = useMemo(() => {
     const map = new Map<string, WbVariant>();
