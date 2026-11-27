@@ -1,5 +1,6 @@
 import { CircleAlert, Loader2 } from "lucide-react";
 import { creditResourceName } from "@/lib/credit-package-names";
+import { type CreditBarTones, useCreditBarTones } from "@/lib/credit-bar-palette";
 import { formatAmount, formatDateTime, formatFullDateTime, pad2 } from "@/lib/format";
 import { statsRangeLabel, type StatsRangeKey } from "@/lib/stats-range";
 import { cn } from "@/lib/utils";
@@ -27,12 +28,15 @@ function shortExpiry(expireAt: number | null): string {
 /** 未使用（剩余 === 总量）时的中性色：灰 = 还没动过，不是「已用完」。 */
 const UNUSED_BAR = "bg-muted-foreground/35";
 
-/** 迷你条的配色：过期红 / 临期橙（已登记的例外）> 未使用灰 > 用过的主题蓝。 */
-function barTone(resource: CreditResource): string {
-  if (resource.expired) return "bg-red-600/60 dark:bg-red-400/60";
-  if (resource.expiringSoon) return "bg-orange-500/80";
+/**
+ * 迷你条的配色：过期红 / 临期橙（已登记的例外）> 未使用灰 > 正常可用色。
+ * 正常可用色跟随「设置 → 外观 → 积分条状态色」（默认主题蓝，可选绿橙红里的绿）。
+ */
+function barTone(resource: CreditResource, tones: CreditBarTones): string {
+  if (resource.expired) return tones.expired;
+  if (resource.expiringSoon) return tones.expiringSoon;
   if (resource.used <= 0) return UNUSED_BAR;
-  return "bg-[var(--data-series-blue)]";
+  return tones.normal;
 }
 
 /**
@@ -54,6 +58,8 @@ export function ResourceBreakdown({
   /** 页面统一的统计范围：按资源包的获取时间 `startAt` 过滤。 */
   range: StatsRangeKey;
 }) {
+  // hook 必须在任何提前 return 之前取：设置页改动后本表所有条形同步换色。
+  const tones = useCreditBarTones();
   if (loading) {
     return (
       <div className="flex items-center gap-2 px-4 py-8 text-sm text-muted-foreground sm:px-5">
@@ -186,7 +192,7 @@ export function ResourceBreakdown({
                 title={`${ratio.toFixed(0)}%`}
               >
                 <span
-                  className={cn("block h-full rounded-full", barTone(resource))}
+                  className={cn("block h-full rounded-full", barTone(resource, tones))}
                   style={{ width: `${ratio}%` }}
                 />
               </span>

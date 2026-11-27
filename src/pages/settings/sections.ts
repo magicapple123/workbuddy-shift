@@ -62,8 +62,8 @@ export const SETTINGS_SECTIONS: SettingsSectionSpec[] = [
     id: "settings-appearance",
     title: "外观",
     group: "general",
-    rows: ["主题", "显示关联会话菜单"],
-    keywords: ["外观", "主题", "深色", "浅色", "跟随系统", "导航", "theme"],
+    rows: ["主题", "积分条状态色", "显示关联会话菜单"],
+    keywords: ["外观", "主题", "深色", "浅色", "跟随系统", "导航", "theme", "积分", "进度条", "配色", "状态色", "颜色"],
     availability: "always",
   },
   {
