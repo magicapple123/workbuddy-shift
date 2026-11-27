@@ -59,7 +59,7 @@ pub use automation::{
 pub use credential::{
     decrypt_read_enabled, decrypt_write_enabled, default_credential_config, load_credential_config,
     load_credential_config_with_defaults, platform_probe, save_credential_config,
-    set_platform_probe, ProbeState,
+    save_credential_switches, set_platform_probe, ProbeState, CREDENTIAL_SWITCH_KEYS,
 };
 // 可注入 store 根的读写：`at_rest` 的平台探测写 `platformProbe` 时用，单测也用它隔离
 // `credential.json`。路径只在 `credential` 里定义一次。

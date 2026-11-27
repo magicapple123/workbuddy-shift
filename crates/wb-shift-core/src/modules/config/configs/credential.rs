@@ -140,6 +140,39 @@ pub(crate) fn resolve_credential_config(input: Option<&Value>) -> Value {
     cfg
 }
 
+/// 设置页允许提交的字段：**只有这三个布尔位**。
+///
+/// 平台探测结论（`platformProbe` / `platformProbeVersion`）由闸门自己写，
+/// 绝不接受外部提交 —— 否则前端（或任何能调命令的进程）提交一句
+/// `platformProbe:"ok"` 就能绕过平台闸门。
+pub const CREDENTIAL_SWITCH_KEYS: [&str; 3] =
+    ["decryptReadOnly", "decryptWrite", "firstPromptShown"];
+
+/// 把提交里的三个开关位合进现有配置（磁盘现状为底），返回归一后的配置。
+///
+/// **纯函数**：不读盘、不写盘，单测可以直接断言「提交 platformProbe 会被忽略」。
+pub(crate) fn apply_credential_switches(cfg: Value, patch: &Value) -> Value {
+    let mut merged = cfg;
+    if let Some(map) = patch.as_object() {
+        for key in CREDENTIAL_SWITCH_KEYS {
+            if let Some(value) = map.get(key).and_then(Value::as_bool) {
+                merged[key] = json!(value);
+            }
+        }
+    }
+    // 只读关闭 ⇒ 写一并失效：统一交给归一函数（唯一实现点）。
+    resolve_credential_config(Some(&merged))
+}
+
+/// 保存设置页提交的开关（只写白名单字段 + 原子替换），返回回读值（含 `defaults`）。
+///
+/// 桌面端与 WebUI 共用这一个实现：两个宿主都只做参数拆封，不各自拼配置。
+pub fn save_credential_switches(patch: &Value) -> std::io::Result<Value> {
+    let merged = apply_credential_switches(load_credential_config(), patch);
+    save_credential_config(&merged)?;
+    Ok(load_credential_config_with_defaults())
+}
+
 /// 保存凭据配置（只保留已知字段；写入走原子替换）。
 pub fn save_credential_config(cfg: &Value) -> std::io::Result<()> {
     save_credential_config_at(&credential_config_file(), cfg)
@@ -231,5 +264,57 @@ mod tests {
         assert_eq!(loaded["decryptReadOnly"], json!(true));
         assert_eq!(loaded["decryptWrite"], json!(true));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 平台探测结论**不接受**外部提交：提交里写 `platformProbe:"ok"` 一律被忽略。
+    #[test]
+    fn submitted_platform_probe_is_ignored() {
+        let disk = json!({
+            "decryptReadOnly": true,
+            "decryptWrite": false,
+            "firstPromptShown": false,
+            "platformProbe": "failed",
+            "platformProbeVersion": "5.11.3",
+        });
+        let merged = apply_credential_switches(
+            disk,
+            &json!({
+                "decryptReadOnly": true,
+                "decryptWrite": true,
+                "platformProbe": "ok",
+                "platformProbeVersion": "9.9.9",
+            }),
+        );
+        assert_eq!(merged["decryptWrite"], json!(true));
+        assert_eq!(
+            merged["platformProbe"],
+            json!("failed"),
+            "探测结论只能由闸门写"
+        );
+        assert_eq!(merged["platformProbeVersion"], json!("5.11.3"));
+    }
+
+    /// 只读关闭时，同一次提交里的写开关也必须被归一掉（不留矛盾状态）。
+    #[test]
+    fn submitted_read_only_off_forces_write_off() {
+        let disk = json!({"decryptReadOnly": true, "decryptWrite": true});
+        let merged = apply_credential_switches(
+            disk,
+            &json!({"decryptReadOnly": false, "decryptWrite": true}),
+        );
+        assert_eq!(merged["decryptReadOnly"], json!(false));
+        assert_eq!(merged["decryptWrite"], json!(false));
+    }
+
+    /// 非布尔值一律忽略（前端传字符串 / null 不会把开关改成奇怪状态）。
+    #[test]
+    fn submitted_non_boolean_values_are_ignored() {
+        let disk = json!({"decryptReadOnly": true, "decryptWrite": false});
+        let merged = apply_credential_switches(
+            disk,
+            &json!({"decryptReadOnly": "false", "decryptWrite": null}),
+        );
+        assert_eq!(merged["decryptReadOnly"], json!(true));
+        assert_eq!(merged["decryptWrite"], json!(false));
     }
 }
