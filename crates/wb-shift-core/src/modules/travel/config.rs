@@ -39,6 +39,12 @@ pub(super) async fn travel_request(
     body: Option<Value>,
     account: &Value,
 ) -> Value {
+    // R6-06：先尝试用本机 live 凭据解出临时副本（写开关打开时才生效）。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     // 加密信封凭据短路：不发空 Bearer，直接给出可读错误（issue #94）。
     if let Some(err) = account::envelope_token_error(account) {
         return json!({"code": -2, "message": err});
@@ -46,6 +52,16 @@ pub(super) async fn travel_request(
     let url = format!("{WORKBUDDY_API_ENDPOINT}{path}");
     let headers = build_travel_headers(account);
     let mut resp = http_request(&url, method, body.clone(), Some(&headers)).await;
+    if crate::modules::at_rest::is_temp(account) {
+        // 临时副本的令牌来自客户端：401 只重读 live 一次，**绝不**调刷新接口。
+        if is_unauthorized(&resp) {
+            if let Some(fresh) = crate::modules::at_rest::reread_after_unauthorized(account) {
+                let headers = build_travel_headers(&fresh);
+                resp = http_request(&url, method, body, Some(&headers)).await;
+            }
+        }
+        return resp;
+    }
     if is_unauthorized(&resp)
         && !account
             .get("refresh_token")
