@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { formatAmount, formatDate, formatDateTime } from "@/lib/format";
 import { getStackedSegmentVisualLayout } from "@/lib/stacked-bar-visuals";
+import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditOfficialUsage,
   CreditStatsDailyPoint,
@@ -12,7 +13,7 @@ import type {
 } from "@/lib/types";
 
 import { AccountFilterMenu } from "./account-filter-menu";
-import { RANGE_OPTIONS, RangeKey, chartPoints, formatChartDate, isOfficialUsageAvailable, officialAccountFor, rangeUsage } from "./data";
+import { chartPoints, formatChartDate, isOfficialUsageAvailable, officialAccountFor, rangeUsage } from "./data";
 
 export function StatMetric({
   icon: Icon,
@@ -142,14 +143,15 @@ function buildStackedChart(
 export function TrendChart({
   stats,
   officialUsage,
+  range,
 }: {
   stats: CreditStatistics;
   officialUsage?: CreditOfficialUsage;
+  /** 全局统计范围：本卡片不再单独持有范围状态。 */
+  range: StatsRangeKey;
 }) {
   /** null = 所有账号汇总；本卡片独立，不影响其他卡片 */
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
-  /** 本卡片独立的时间范围，不影响其他卡片 */
-  const [range, setRange] = useState<RangeKey>("30d");
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
   const officialAvailable = Boolean(official);
   const filterAccounts = official ? official.accounts : stats.accounts;
@@ -226,23 +228,6 @@ export function TrendChart({
                 onAccountFilterChange={setAccountFilter}
                 ariaLabel="按账号筛选趋势"
               />
-              <div className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1" aria-label="趋势范围">
-                {RANGE_OPTIONS.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    className={`cursor-pointer rounded-md px-2.5 py-1.5 text-xs transition-colors ${
-                      range === option.key
-                        ? "bg-background font-medium text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                    onClick={() => setRange(option.key)}
-                    aria-pressed={range === option.key}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
             </div>
           </div>
         </CardHeader>

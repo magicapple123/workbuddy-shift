@@ -16,6 +16,13 @@ export interface CreditExportContext {
   clientLabel?: string;
   /** 当前口径说明（四卡顶部的同一句话）。 */
   caliberNote?: string;
+  /**
+   * 页面顶部那个「统计范围」的标签（今天 / 近 7 天 / 本月 …）。
+   *
+   * 取数窗口与展示区间是两件事：窗口决定导出的行，展示区间决定用户在界面上看到的数字。
+   * 两者都写进说明，导出文件才不会在「界面上是 7 天、文件里是 30 天行」时误导用户。
+   */
+  windowLabel?: string;
 }
 
 function rangeLabelOf(range: CreditExportContext["range"]): string {
@@ -62,8 +69,8 @@ export function creditStatsSheets(
   const note =
     context.caliberNote ??
     `范围：${rangeLabelOf(context.range)}${
-      context.clientLabel ? ` · 客户端：${context.clientLabel}` : ""
-    }`;
+      context.windowLabel ? ` · 展示区间：${context.windowLabel}` : ""
+    }${context.clientLabel ? ` · 客户端：${context.clientLabel}` : ""}`;
   const detailLimit = official?.detailLimitPerAccount ?? 1000;
   const requests = official?.requests ?? [];
   const truncated = (official?.accounts ?? []).some((account) => account.detailTruncated);

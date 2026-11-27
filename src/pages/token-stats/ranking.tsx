@@ -74,15 +74,29 @@ export function Ranking({
   );
 }
 
-export function SessionRanking({ groups, denominator }: { groups: TokenStatsGroup[]; denominator: number }) {
+export function SessionRanking({
+  groups,
+  denominator,
+  heading = true,
+}: {
+  groups: TokenStatsGroup[];
+  denominator: number;
+  /** 折叠区里由 `AccordionTrigger` 承担标题，卡内不再重复渲染区块标题。 */
+  heading?: boolean;
+}) {
   const rows = groups.slice(0, RANKING_LIMIT);
 
   return (
-    <section className="min-w-0 space-y-2.5" aria-labelledby="token-sessions-title">
-      <SectionTitle id="token-sessions-title">消耗最高的会话</SectionTitle>
+    <section
+      className="min-w-0 space-y-2.5"
+      aria-labelledby={heading ? "token-sessions-title" : undefined}
+    >
+      {heading ? <SectionTitle id="token-sessions-title">消耗最高的会话</SectionTitle> : null}
       <Card className="min-w-0 gap-0 rounded-xl py-0 shadow-none">
         <CardHeader className="px-4 pt-3 pb-0 sm:px-5">
-          <CardDescription className="text-xs">按本地聚合 Token 从高到低排列。</CardDescription>
+          <CardDescription className="text-xs">
+            按本地聚合 Token 从高到低排列（会话维度只有全量聚合，不受统计范围影响）。
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 px-4 pt-3 pb-5 sm:px-5">
           {rows.map((row, index) => {

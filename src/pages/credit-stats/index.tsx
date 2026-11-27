@@ -11,11 +11,18 @@ import {
   TrendingDown,
 } from "lucide-react";
 
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { DemoAction } from "@/components/demo-action";
 import { ExportMenu } from "@/components/export-menu";
-import { Card, CardContent } from "@/components/ui/card";
+import { StatsRangeControl } from "@/components/stats-range";
 import * as api from "@/lib/api";
 import { formatAmount, formatDateTime } from "@/lib/format";
 import { saveCsvFile, saveXlsxFile } from "@/lib/export-download";
@@ -24,6 +31,15 @@ import {
   loadCreditStatistics,
   readCreditStatisticsCache,
 } from "@/lib/stats-cache";
+import {
+  creditDataRange,
+  DEFAULT_STATS_RANGE,
+  monthSliceNote,
+  statsRangeDayCount,
+  statsRangeLabel,
+  statsRangeSupports90d,
+  type StatsRangeKey,
+} from "@/lib/stats-range";
 import { toast } from "sonner";
 import type {
   CreditRange,
@@ -38,18 +54,29 @@ import { AccountUsageShare } from "./account-usage-share";
 import { ClientFilterMenu } from "./client-filter-menu";
 import {
   CLIENT_VIEW_LABELS,
+  VARIANT_VIEW_OPTIONS,
+  accountUsageRows,
   clientViewOptions,
   filterOfficialByClient,
+  formatPercent,
+  isOfficialUsageAvailable,
   ledgerClientViewOptions,
   ledgerToOfficialUsage,
+  rangeModels,
+  rangePeakUsage,
+  recomputeLocalStats,
+  recomputeOfficialUsage,
+  resolveAccountVariant,
+  statsVariantViewLabel,
+  topAccountShare,
   type CreditClientKey,
+  type StatsVariantView,
 } from "./data";
 import {
   creditSourceBadge,
   localCoverageText,
-  usageWindowValue,
+  statsRangeConsumption,
 } from "./coverage";
-import { StatsVariantView, VARIANT_VIEW_OPTIONS, isOfficialUsageAvailable, recomputeLocalStats, recomputeOfficialUsage, resolveAccountVariant, statsVariantViewLabel } from "./data";
 import { ModelBreakdown } from "./model-breakdown";
 import { useProgressiveRefresh } from "./progressive-refresh";
 import { buildCreditStatsCsv, creditStatsFileName } from "./export";
@@ -64,12 +91,10 @@ function formatMs(value: number | null): string {
 /** 进入统计页时距上次采集超过此时长（ms）则自动重新采集一次 */
 const STATISTICS_AUTO_REFRESH_MS = 30 * 60 * 1000;
 
-/** 统计范围：官方窗口 30/90 天，或本地账本的「全部」。 */
-const CREDIT_RANGE_OPTIONS: { key: CreditRange; label: string }[] = [
-  { key: "30d", label: "近 30 天" },
-  { key: "90d", label: "近 90 天" },
-  { key: "all", label: "全部" },
-];
+/** 文件名片段的紧凑范围标签（`近 30 天` → `近30天`，避免文件名里出现空格）。 */
+function rangeFileLabel(range: StatsRangeKey): string {
+  return statsRangeLabel(range).replace(/\s+/g, "");
+}
 
 
 export default function CreditStatsPage() {
@@ -87,9 +112,16 @@ export default function CreditStatsPage() {
   const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
   /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
   const [clientView, setClientView] = useState<CreditClientKey>("all");
-  /** 范围：30 天 / 90 天（官方窗口）/ 全部（本地账本）。 */
-  const [range, setRange] = useState<CreditRange>("30d");
+  /** 全局唯一的展示范围（今天 / 7 天 / 30 天 / 本月 / 90 天 / 全部）。 */
+  const [range, setRange] = useState<StatsRangeKey>(DEFAULT_STATS_RANGE);
+  /** 实际取数窗口：由展示范围映射而来，不新增后端 `range` 取值。 */
+  const [dataRange, setDataRange] = useState<CreditRange>("30d");
   const [rangeLoading, setRangeLoading] = useState(false);
+
+  // 官方窗口是否支持 90 天；探测结果没回来（null）时按不支持处理，不给必然降级的按钮。
+  const supports90d = statsRangeSupports90d(stats?.windowProbe?.maxDays);
+  // 已经选着 90 天时即使探测结论变了也保留该按钮，避免选中项突然消失。
+  const include90d = supports90d || range === "90d";
 
   // 渐进式刷新：本地数字 → 积分 / 官方用量并行；按钮显示「更新中 N/2 项」。
   const progressive = useProgressiveRefresh({
@@ -101,7 +133,7 @@ export default function CreditStatsPage() {
       setError(null);
     },
     refreshCredits,
-    range,
+    range: dataRange,
     loadAccountIds: async () => {
       await fetchAll();
       return useAccountsStore.getState().accounts.map((account) => account.id);
@@ -145,28 +177,56 @@ export default function CreditStatsPage() {
   );
 
   /**
-   * 切范围：30 天走共享缓存；90 天 / 全部单独取一次。
-   * 「全部」不联网（后端读账本），所以断网也能切。
+   * 切范围：展示范围立即变；只有取数窗口也跟着变时才重新取一次数。
+   * 今天 / 7 天 / 30 天共用 30 天窗口，所以它们之间切换是纯本地的（无请求、不闪烁）。
    */
-  async function selectRange(next: CreditRange) {
+  async function selectRange(next: StatsRangeKey) {
     if (next === range || rangeLoading) return;
+    const previousRange = range;
+    const previousDataRange = dataRange;
+    const nextDataRange = creditDataRange(next, supports90d);
     setRange(next);
+    if (nextDataRange === previousDataRange) return;
     setRangeLoading(true);
+    setDataRange(nextDataRange);
     try {
-      if (next === "30d") {
+      if (nextDataRange === "30d") {
         await load(false);
       } else {
-        setStats(await api.getCreditStatistics(false, next));
+        setStats(await api.getCreditStatistics(false, nextDataRange));
         setError(null);
       }
     } catch (cause) {
-      toast.error("切换统计范围失败", { description: api.asError(cause) });
+      // 失败就退回上一个范围：让「选中的范围」与「页面数字」始终对应，不留半截状态。
+      setRange(previousRange);
+      setDataRange(previousDataRange);
+      toast.error("切换展示范围失败", { description: api.asError(cause) });
+    } finally {
+      setRangeLoading(false);
+    }
+  }
+
+  /** 错误条上的「重试」：跟随当前取数窗口，不会把 90 天/账本悄悄换回 30 天。 */
+  async function reloadCurrentRange() {
+    if (dataRange === "30d") {
+      await load(false);
+      return;
+    }
+    setRangeLoading(true);
+    try {
+      setStats(await api.getCreditStatistics(false, dataRange));
+      setError(null);
+    } catch (cause) {
+      setError(api.asError(cause));
     } finally {
       setRangeLoading(false);
     }
   }
 
   useEffect(() => {
+    // 自动补采只覆盖 30 天窗口（`loadCreditStatistics` 的缓存口径）：其它窗口由用户主动刷新，
+    // 否则会用 30 天结果覆盖 90 天/账本的页面数字。
+    if (dataRange !== "30d") return;
     void (async () => {
       // 先渲染本地缓存（后端只读磁盘，不用等网络；预热命中时这里不发请求）
       await load(false);
@@ -180,7 +240,7 @@ export default function CreditStatsPage() {
       // 后台补采：不清空、不挡交互，采完再替换数字。
       await load(true, { background: true });
     })();
-  }, [load]);
+  }, [load, dataRange]);
 
   const variantByAccountId = useMemo(() => {
     const map = new Map<string, WbVariant>();
@@ -216,10 +276,10 @@ export default function CreditStatsPage() {
   // 客户端维度只能在明细上做（官方没有按客户端聚合）。
   const clientOptions = useMemo(
     () =>
-      range === "all"
+      dataRange === "all"
         ? ledgerClientViewOptions(stats?.ledger)
         : clientViewOptions(stats?.officialUsage?.requests),
-    [range, stats],
+    [dataRange, stats],
   );
   useEffect(() => {
     // 明细里没有该客户端（换账号、后端换了明细范围）→ 回到「全部」，不留一个空筛选项。
@@ -233,16 +293,66 @@ export default function CreditStatsPage() {
 
   // 选「全部」走账本；账本不可用/为空时降级回官方 30 天并在页面上说明。
   const ledgerOfficial = useMemo(
-    () => (range === "all" ? ledgerToOfficialUsage(stats?.ledger, clientView) : null),
-    [range, stats, clientView],
+    () => (dataRange === "all" ? ledgerToOfficialUsage(stats?.ledger, clientView) : null),
+    [dataRange, stats, clientView],
   );
-  const ledgerFallback = range === "all" && !ledgerOfficial;
+  const ledgerFallback = dataRange === "all" && !ledgerOfficial;
   /** 当前口径的官方数据：全部=账本 / 具体客户端=据明细汇总 / 否则=官方聚合。 */
   const officialUsage = ledgerFallback
     ? filteredOfficial
     : ledgerOfficial ?? clientDetail?.official ?? filteredOfficial;
+  const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
 
-  /** 导出：当前档位 + 当前客户端筛选，全量日期；官方明细标注每账号上限与是否截断。 */
+  /** 「全部」时的账号级累计（账本按账号只给 credit，没有逐日）。 */
+  const ledgerAccountTotals = useMemo(() => {
+    const entries = stats?.ledger?.accounts ?? [];
+    if (entries.length === 0) return undefined;
+    return new Map(entries.map((account) => [account.accountId, account.credit]));
+  }, [stats]);
+
+  /** 账号消耗构成的行：第一屏结论与折叠区条形图共用同一份。 */
+  const usageRows = useMemo(
+    () =>
+      filteredStats
+        ? accountUsageRows(
+            filteredStats,
+            officialUsage,
+            range,
+            variantByAccountId,
+            ledgerAccountTotals,
+          )
+        : [],
+    [filteredStats, officialUsage, range, variantByAccountId, ledgerAccountTotals],
+  );
+  const headline = useMemo(() => topAccountShare(usageRows), [usageRows]);
+
+  /** 按模型分类的范围聚合（折叠区标题与卡片内容共用）。 */
+  const rangeModelRows = useMemo(
+    () => (official ? rangeModels(official, range, null) : []),
+    [official, range],
+  );
+  const modelHeadline = useMemo(() => {
+    const total = rangeModelRows.reduce((sum, model) => sum + model.credit, 0);
+    const top = rangeModelRows[0];
+    return {
+      count: rangeModelRows.length,
+      label: top ? (top.model === "—" ? "未知模型" : top.model) : null,
+      share: top && total > 0 ? top.credit / total : null,
+    };
+  }, [rangeModelRows]);
+
+  /** 四卡：剩余（账号级）+ 本范围消耗 / 日均 / 单日峰值（同一份逐日数据）。 */
+  const coverage = filteredStats?.coverage;
+  const consumption = filteredStats
+    ? statsRangeConsumption(range, official, filteredStats, coverage)
+    : null;
+  const rangeSeries = official?.daily ?? filteredStats?.daily ?? [];
+  const rangeDays = statsRangeDayCount(range, rangeSeries.length);
+  const rangePeak = filteredStats ? rangePeakUsage(rangeSeries, range) : null;
+  const dailyAverage =
+    consumption?.value == null ? null : Math.round(consumption.value / rangeDays);
+
+  /** 导出：当前范围 + 档位 + 客户端筛选，文件名与提示都带范围标签。 */
   async function exportCsv() {
     if (!stats) {
       toast.error("还没有可导出的统计数据");
@@ -250,10 +360,13 @@ export default function CreditStatsPage() {
     }
     try {
       const content = buildCreditStatsCsv(stats, officialUsage ?? undefined);
-      const outcome = await saveCsvFile(creditStatsFileName(viewVariant), content);
+      const outcome = await saveCsvFile(
+        creditStatsFileName(`${viewVariant}-${rangeFileLabel(range)}`),
+        content,
+      );
       if (outcome === "saved") {
         toast.success("已导出积分统计 CSV", {
-          description: `${viewVariant} · ${(content.length / 1024).toFixed(0)} KB`,
+          description: `${viewVariant} · ${statsRangeLabel(range)} · ${(content.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -269,15 +382,19 @@ export default function CreditStatsPage() {
     }
     try {
       const bytes = buildCreditStatsXlsx(stats, officialUsage ?? undefined, {
-        range,
+        range: dataRange,
         ledger: stats.ledger,
         clientLabel: clientView === "all" ? undefined : CLIENT_VIEW_LABELS[clientView],
         caliberNote: ledgerCaliber ?? undefined,
+        windowLabel: statsRangeLabel(range),
       });
-      const outcome = await saveXlsxFile(creditStatsXlsxFileName(viewVariant), bytes);
+      const outcome = await saveXlsxFile(
+        creditStatsXlsxFileName(`${viewVariant}-${rangeFileLabel(range)}`),
+        bytes,
+      );
       if (outcome === "saved") {
         toast.success("已导出积分统计 Excel", {
-          description: `${viewVariant} · ${(bytes.length / 1024).toFixed(0)} KB · 7 个 sheet`,
+          description: `${viewVariant} · ${statsRangeLabel(range)} · ${(bytes.length / 1024).toFixed(0)} KB · 7 个 sheet`,
         });
       }
     } catch (cause) {
@@ -285,11 +402,9 @@ export default function CreditStatsPage() {
     }
   }
 
-  const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
-
   /** 顶部口径说明：账本优先，其次明细汇总，最后官方/本地。 */
   const ledgerCaliber =
-    range === "all"
+    dataRange === "all"
       ? ledgerOfficial
         ? `本地账本：${stats?.ledger?.startAt ?? "—"} ~ ${stats?.ledger?.endAt ?? "—"} · ${
             stats?.ledger?.rows ?? 0
@@ -300,17 +415,12 @@ export default function CreditStatsPage() {
     stats?.rangeFallback === true
       ? `官方接口只接受近 ${stats?.windowProbe?.maxDays ?? 30} 天窗口，已按近 30 天统计`
       : null;
+  // 「本月」在只支持 30 天窗口时退化成 30 天切片，必须如实标注。
+  const monthNote = monthSliceNote(range, supports90d);
   const variantEmpty =
     viewVariant !== "all" && variantAccountIds !== null && variantAccountIds.size === 0;
 
-  // 本地观察口径的覆盖面：官方不可用时用它解释「哪些窗口是完整的」。
-  // 档位过滤后的 `coverage` 沿用全局快照区间（后端只下发一份），因此是最保守的下界：
-  // 单档位账号的快照可能更晚，绝不会更早，不会把未覆盖说成已覆盖。
-  const coverage = filteredStats?.coverage;
-  const todayValue = filteredStats ? usageWindowValue("today", official, filteredStats, coverage) : null;
-  const weekValue = filteredStats ? usageWindowValue("7d", official, filteredStats, coverage) : null;
-  const monthValue = filteredStats ? usageWindowValue("month", official, filteredStats, coverage) : null;
-  const coverageHint = weekValue?.absenceReason ?? monthValue?.absenceReason ?? null;
+  const coverageHint = consumption?.absenceReason ?? null;
   const officialRangeText = official ? `${official.rangeStart} ~ ${official.rangeEnd}` : "";
   // 失败原因取**未过滤**的官方响应：档位过滤会按 accountId 收紧 `errors`，
   // 而归一化出来的「整页不可用」没有任何账号行，过滤后会把原因一起丢掉。
@@ -325,9 +435,21 @@ export default function CreditStatsPage() {
     (officialUsage?.requests.length ?? 0) > 0 &&
     (officialUsage?.accounts ?? []).some((account) => account.ok && account.requestCount > 0);
 
+  const rangeText = statsRangeLabel(range);
+  const accountUsageTitle = headline
+    ? `账号消耗构成 · 头部 ${headline.label} 占 ${formatPercent(headline.share)}（${formatAmount(headline.usage)} 积分）`
+    : "账号消耗构成 · 当前范围没有观察到积分消耗";
+  const modelTitle =
+    official && modelHeadline.count > 0
+      ? `按模型分类 · ${modelHeadline.count} 个模型 · 头部 ${modelHeadline.label ?? "—"} 占 ${formatPercent(modelHeadline.share)}`
+      : "按模型分类 · 官方暂无模型消耗明细";
+  const resourceTitle = `积分明细 · 剩余 ${formatAmount(filteredStats?.summary.currentRemaining ?? null)} 积分 · ${
+    filteredStats?.accounts.length ?? 0
+  } 个账号`;
+
   return (
     <div className="mx-auto w-full max-w-[1180px] min-w-0 px-4 py-6 sm:px-8 sm:py-9">
-      <header className="mb-10 flex min-w-0 flex-wrap items-start justify-between gap-4 sm:mb-12">
+      <header className="mb-6 flex min-w-0 flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-[28px] font-semibold tracking-tight">积分统计</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
@@ -350,7 +472,10 @@ export default function CreditStatsPage() {
                       rangeFallbackText ? ` · ${rangeFallbackText}` : ""
                     }`
                   : `本地观察口径：${localCoverageText(coverage)}`)}
-          </p>
+            </p>
+          ) : null}
+          {monthNote ? (
+            <p className="mt-0.5 max-w-2xl text-[11px] leading-5 text-muted-foreground">{monthNote}</p>
           ) : null}
 
           {progressive.running || progressive.timing.officialMs !== null ? (
@@ -363,45 +488,17 @@ export default function CreditStatsPage() {
           ) : null}
         </div>
         <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
-          <div
-            className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
-            role="tablist"
-            aria-label="统计范围"
-          >
-            {CREDIT_RANGE_OPTIONS.map((option) => {
-              // 服务端只接受 31 天时禁止选 90 天；尚未探测（maxDays=null）先允许，后端会降级。
-              const disabled =
-                rangeLoading ||
-                (option.key === "90d" &&
-                  stats?.windowProbe?.maxDays != null &&
-                  (stats.windowProbe.maxDays ?? 0) < 90);
-              const title =
-                option.key === "90d" && disabled
-                  ? (stats?.windowProbe?.reason ??
-                    "官方接口只接受近 31 天窗口，无法统计 90 天")
-                  : option.key === "all"
-                    ? "本地账本：从本工具首次抓取官方明细起累计"
-                    : undefined;
-              return (
-                <button
-                  key={option.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={range === option.key}
-                  disabled={disabled}
-                  title={title}
-                  className={`cursor-pointer rounded-md px-2.5 py-1.5 text-xs transition-colors ${
-                    range === option.key
-                      ? "bg-background font-medium text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
-                  onClick={() => void selectRange(option.key)}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
-          </div>
+          <StatsRangeControl
+            value={range}
+            include90d={include90d}
+            onChange={(next) => void selectRange(next)}
+            disabled={rangeLoading}
+            ariaLabel="统计范围"
+            hints={{
+              all: "本地账本：从本工具首次抓取官方明细起累计",
+              month: supports90d ? undefined : "官方窗口只支持 30 天，本月按近 30 天数据统计",
+            }}
+          />
           <div
             className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
             role="tablist"
@@ -432,19 +529,23 @@ export default function CreditStatsPage() {
           />
           <ExportMenu
             disabled={!stats}
-            title={stats ? "导出当前范围 + 档位 + 客户端筛选" : "没有可导出的数据"}
+            title={
+              stats
+                ? `导出当前范围（${rangeText}）+ 档位 + 客户端筛选`
+                : "没有可导出的数据"
+            }
             items={[
               {
                 key: "csv",
                 label: "CSV",
-                description: "6 段明细，UTF-8 BOM",
+                description: "6 段明细 · UTF-8 BOM · Excel 可直接打开",
                 icon: <Download className="size-3.5" />,
                 onSelect: () => void exportCsv(),
               },
               {
                 key: "xlsx",
                 label: "Excel（xlsx）",
-                description: "7 个 sheet，数值可求和",
+                description: "7 个 sheet · 数值可求和 · 末行写口径说明",
                 icon: <FileSpreadsheet className="size-3.5" />,
                 onSelect: () => void exportXlsx(),
               },
@@ -471,7 +572,7 @@ export default function CreditStatsPage() {
           <AlertTitle>统计加载失败</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center gap-3">
             <span>{error}</span>
-            <Button size="sm" variant="outline" onClick={() => void load()}>
+            <Button size="sm" variant="outline" onClick={() => void reloadCurrentRange()}>
               重试
             </Button>
           </AlertDescription>
@@ -484,12 +585,12 @@ export default function CreditStatsPage() {
           正在采集账号积分并加载统计…
         </div>
       ) : stats && filteredStats ? (
-        <div className="min-w-0 space-y-12">
+        <div className="min-w-0 space-y-4">
           {viewVariant === "all" && accounts.length === 0 && (
             <Alert>
               <CircleAlert />
               <AlertTitle>暂无当前账号</AlertTitle>
-              <AlertDescription>可以先去账号管理导入或登录账号；历史事件仍会保留在下方最近事件中。</AlertDescription>
+              <AlertDescription>可以先去账号管理导入或登录账号；历史事件仍会保留。</AlertDescription>
             </Alert>
           )}
 
@@ -542,7 +643,7 @@ export default function CreditStatsPage() {
               <Card className="min-w-0 gap-0 overflow-hidden rounded-2xl bg-card/70 py-0 shadow-none" aria-label="积分总览">
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/60 px-4 py-2 text-[11px] leading-5 text-muted-foreground sm:px-5">
                   <span className="min-w-0">
-                    {range === "all" && ledgerOfficial
+                    {dataRange === "all" && ledgerOfficial
                       ? `本地账本 · ${stats?.ledger?.rows ?? 0} 条 · ${
                           ledgerFallback ? "降级" : "累计"
                         }（剩余积分为账号级）`
@@ -568,24 +669,41 @@ export default function CreditStatsPage() {
                   />
                   <StatMetric
                     icon={TrendingDown}
-                    label="今日消耗"
-                    value={todayValue?.text ?? "—"}
-                    divided
-                  />
-                  <StatMetric
-                    icon={CalendarDays}
-                    label="近 7 天消耗"
-                    value={weekValue?.text ?? "—"}
+                    label={`${rangeText}消耗`}
+                    value={consumption?.text ?? "—"}
                     divided
                   />
                   <StatMetric
                     icon={CalendarRange}
-                    label="本月消耗"
-                    value={monthValue?.text ?? "—"}
+                    label="日均消耗"
+                    value={dailyAverage === null ? "—" : formatAmount(dailyAverage)}
+                    divided
+                  />
+                  <StatMetric
+                    icon={CalendarDays}
+                    label="单日峰值"
+                    value={rangePeak === null ? "—" : formatAmount(rangePeak)}
                     divided
                   />
                 </CardContent>
               </Card>
+
+              {/* 结论先行：一行说清「谁最吃积分」，与下方折叠区同一份数字 */}
+              <p className="min-w-0 px-1 text-sm leading-6 text-muted-foreground">
+                {headline ? (
+                  <>
+                    {rangeText}消耗最多的是{" "}
+                    <span className="font-medium text-foreground">{headline.label}</span>，占{" "}
+                    <span className="font-medium tabular-nums text-foreground">
+                      {formatPercent(headline.share)}
+                    </span>
+                    （{formatAmount(headline.usage)} / {formatAmount(headline.total)} 积分，
+                    共 {headline.counted} 个账号有消耗）
+                  </>
+                ) : (
+                  <>{rangeText}内没有观察到积分消耗。</>
+                )}
+              </p>
 
               {!official && !filteredStats.coverageStartAt && filteredStats.events.some((event) => event.kind === "checkin") && (
                 <Alert>
@@ -595,34 +713,63 @@ export default function CreditStatsPage() {
                 </Alert>
               )}
 
-              <AccountUsageShare
-                stats={filteredStats}
-                officialUsage={officialUsage}
-                variantByAccountId={variantByAccountId}
-                ledger={Boolean(ledgerOfficial)}
-              />
-
               <TrendChart
                 stats={filteredStats}
                 officialUsage={officialUsage}
+                range={range}
               />
 
-              {official && (
-                <ModelBreakdown
-                  officialUsage={official}
-                />
-              )}
+              {/* 次要从属折叠：第一个（账号消耗构成）默认展开，其余收起 */}
+              <Accordion type="multiple" defaultValue={["account-usage"]} className="min-w-0">
+                <AccordionItem value="account-usage" className="min-w-0 border-t border-border/60">
+                  <AccordionTrigger className="px-1 py-2.5 text-[13px] font-medium leading-5 text-foreground">
+                    <span className="min-w-0 truncate text-left" title={accountUsageTitle}>
+                      {accountUsageTitle}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="pb-3 pt-1">
+                    <AccountUsageShare
+                      stats={filteredStats}
+                      officialUsage={officialUsage}
+                      variantByAccountId={variantByAccountId}
+                      ledger={Boolean(ledgerOfficial)}
+                      range={range}
+                      allTimeByAccountId={ledgerAccountTotals}
+                      heading={false}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
 
-              {/* 与下方「积分明细」重复，先隐藏。
-              <AccountTable stats={stats} officialUsage={officialUsage} selectedId={selectedId} onSelect={setSelectedId} />
-              */}
+                {official && (
+                  <AccordionItem value="models" className="min-w-0 border-t border-border/60">
+                    <AccordionTrigger className="px-1 py-2.5 text-[13px] font-medium leading-5 text-foreground">
+                      <span className="min-w-0 truncate text-left" title={modelTitle}>
+                        {modelTitle}
+                      </span>
+                    </AccordionTrigger>
+                    <AccordionContent className="pb-3 pt-1">
+                      <ModelBreakdown officialUsage={official} range={range} heading={false} />
+                    </AccordionContent>
+                  </AccordionItem>
+                )}
 
-              <SelectedAccountDetails
-                stats={filteredStats}
-                officialUsage={officialUsage}
-                creditMap={creditMap}
-                creditLoadingMap={creditLoadingMap}
-              />
+                <AccordionItem value="resources" className="min-w-0 border-t border-border/60">
+                  <AccordionTrigger className="px-1 py-2.5 text-[13px] font-medium leading-5 text-foreground">
+                    <span className="min-w-0 truncate text-left" title={resourceTitle}>
+                      {resourceTitle}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className="pb-3 pt-1">
+                    <SelectedAccountDetails
+                      stats={filteredStats}
+                      officialUsage={officialUsage}
+                      creditMap={creditMap}
+                      creditLoadingMap={creditLoadingMap}
+                      heading={false}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </>
           )}
         </div>

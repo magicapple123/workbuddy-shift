@@ -65,12 +65,20 @@ export function ExportMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
         {items.map((item) => (
-          <DropdownMenuItem key={item.key} onSelect={() => run(item)} className="gap-2">
-            {item.icon}
+          <DropdownMenuItem
+            key={item.key}
+            onSelect={() => run(item)}
+            className="items-start gap-2"
+            title={item.description ? `${item.label}：${item.description}` : item.label}
+          >
+            {/* 图标顶对齐首行：说明折成两行时图标不跟着居中漂移 */}
+            <span className="mt-0.5 flex shrink-0 items-center">{item.icon}</span>
             <span className="min-w-0 flex-1">
               <span className="block truncate">{item.label}</span>
               {item.description ? (
-                <span className="block truncate text-[11px] text-muted-foreground">
+                // 说明允许换行（`w-64` 放不下「6 段明细 · UTF-8 BOM · Excel 可直接打开」）：
+                // 不靠加宽菜单，靠折行 + 完整文案的 `title` 兜底，避免截断成「6 段明细 · UTF-8…」。
+                <span className="mt-0.5 block whitespace-normal break-words text-[11px] leading-4 text-muted-foreground">
                   {item.description}
                 </span>
               ) : null}

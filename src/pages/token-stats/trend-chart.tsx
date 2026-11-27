@@ -10,12 +10,13 @@ import { ChartContainer, ChartTooltip, type ChartConfig } from "@/components/ui/
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { formatDateTime } from "@/lib/format";
 import { getStackedSegmentVisualLayout } from "@/lib/stacked-bar-visuals";
+import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   TokenStatsGroup,
   TokenStatsSource,
 } from "@/lib/types";
 
-import { RANGE_OPTIONS, RangeKey, exact, fillRangePoints, formatChartDate, formatTokenCompact, formatTokenExact, percentage, rangeLabel, rangePoints, rangeTotals, tokenTotal } from "./data";
+import { exact, fillRangePoints, formatChartDate, formatTokenCompact, formatTokenExact, percentage, rangeLabel, rangePoints, rangeTotals, tokenTotal } from "./data";
 import { SectionTitle } from "./metric";
 
 const chartConfig = {
@@ -227,8 +228,14 @@ function TrendTooltipContent({
   );
 }
 
-export function TrendChart({ source }: { source: TokenStatsSource }) {
-  const [range, setRange] = useState<RangeKey>("30d");
+/**
+ * Token 与调用趋势。
+ *
+ * **范围受控**：`range` 由页面顶部唯一的「统计范围」控件传入（见 `@/lib/stats-range`）。
+ * 本卡只保留「按模型筛选」这一个正交筛选——改造前这里另有一套「今天/7天/30天/本月」
+ * 按钮，与总览卡的同名按钮默认值不同，切完两处数字对不上。
+ */
+export function TrendChart({ source, range }: { source: TokenStatsSource; range: StatsRangeKey }) {
   const [modelFilter, setModelFilter] = useState("all");
   const modelOptions = useMemo(
     () => (source.dailyByModel ? source.models.map((model) => model.key).filter(Boolean) : []),
@@ -290,23 +297,6 @@ export function TrendChart({ source }: { source: TokenStatsSource }) {
                   ))}
                 </DropdownMenuContent>
               </DropdownMenu>
-              <div className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1" aria-label="趋势范围">
-              {RANGE_OPTIONS.map((option) => (
-                <button
-                  key={option.key}
-                  type="button"
-                  className={`cursor-pointer rounded-md px-2.5 py-1.5 text-xs transition-colors ${
-                    range === option.key
-                      ? "bg-background font-medium text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                  onClick={() => setRange(option.key)}
-                  aria-pressed={range === option.key}
-                >
-                  {option.label}
-                </button>
-              ))}
-              </div>
             </div>
           </div>
         </CardHeader>
