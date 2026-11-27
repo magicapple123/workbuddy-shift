@@ -650,7 +650,13 @@ fn read_only_off_disables_everything_without_spawning() {
 /// 只读开、写关：只读可用，写操作不参与（并且不触发取密钥）。
 #[test]
 fn write_switch_off_keeps_read_path_but_blocks_write() {
-    let credential = json!({"decryptReadOnly": true, "decryptWrite": false});
+    // `platformProbe: "ok"`：本用例只验开关矩阵，不该被平台探测（非 Windows 上
+    // Unknown → NeedsProbe）带偏；探测本身由 probe_* 用例覆盖。
+    let credential = json!({
+        "decryptReadOnly": true,
+        "decryptWrite": false,
+        "platformProbe": "ok"
+    });
     assert_eq!(
         gate_with(&credential, AccessMode::ReadOnly, Some("5.11.3")),
         Gate::Open
