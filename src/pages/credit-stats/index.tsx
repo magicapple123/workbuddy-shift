@@ -130,7 +130,8 @@ export default function CreditStatsPage() {
   const [rangeLoading, setRangeLoading] = useState(false);
   const initialRangeRef = useRef<CreditRange | null>(dataRange === "30d" ? null : dataRange);
   const syncedWindowKeyRef = useRef<string | null>(null);
-  const syncSeqRef = useRef(0);
+  /** 单次窗口取数的序号：后发的请求作废先发的，避免慢响应把新窗口的数据改回去。 */
+  const loadSeqRef = useRef(0);
   const unmountedRef = useRef(false);
   useEffect(() => {
     unmountedRef.current = false;
@@ -198,50 +199,67 @@ export default function CreditStatsPage() {
   );
 
   /**
+   * 统一取数入口：用户点选、首屏恢复、跨标签同步三条路径共用，避免各写一份
+   * 「置 loading → 切窗口 → 30 天走缓存 / 其它窗口走接口」。
+   *
+   * 失败直接抛给调用方：点选要回滚选择，自动同步只能交给错误条（见各自的 catch）。
+   */
+  const loadWindow = useCallback(
+    async (nextDataRange: CreditRange) => {
+      const seq = ++loadSeqRef.current;
+      setRangeLoading(true);
+      setDataRange(nextDataRange);
+      try {
+        if (nextDataRange === "30d") {
+          await load(false);
+          return;
+        }
+        await fetchAll();
+        const accountState = useAccountsStore.getState();
+        if (accountState.error) throw new Error(accountState.error);
+        const nextStats = await api.getCreditStatistics(false, nextDataRange);
+        // 期间又切了范围（seq 变化）或已卸载：本次结果作废，别覆盖新窗口的数字。
+        if (loadSeqRef.current !== seq || unmountedRef.current) return;
+        setStats(nextStats);
+        setError(null);
+      } finally {
+        if (loadSeqRef.current === seq && !unmountedRef.current) {
+          setRangeLoading(false);
+          setLoading(false);
+        }
+      }
+    },
+    [fetchAll, load],
+  );
+
+  /**
    * 切范围：展示范围立即变；只有取数窗口也跟着变时才重新取一次数。
    * 今天 / 7 天 / 30 天共用 30 天窗口，所以它们之间切换是纯本地的（无请求、不闪烁）。
    */
   async function selectRange(next: StatsRangeKey) {
     if (next === range || rangeLoading) return;
-    syncSeqRef.current += 1;
     const previousRange = range;
     const previousDataRange = dataRange;
     const nextDataRange = creditDataRange(next, supports90d);
     setRange(next);
     if (nextDataRange === previousDataRange) return;
-    setRangeLoading(true);
-    setDataRange(nextDataRange);
     try {
-      if (nextDataRange === "30d") {
-        await load(false);
-      } else {
-        setStats(await api.getCreditStatistics(false, nextDataRange));
-        setError(null);
-      }
+      await loadWindow(nextDataRange);
     } catch (cause) {
-      // 失败就退回上一个范围：让「选中的范围」与「页面数字」始终对应，不留半截状态。
+      // 失败就退回上一个范围与窗口：让「选中的范围」与「页面数字」始终对应，不留半截状态。
       setRange(previousRange);
       setDataRange(previousDataRange);
-      toast.error("切换展示范围失败", { description: api.asError(cause) });
-    } finally {
       setRangeLoading(false);
+      toast.error("切换展示范围失败", { description: api.asError(cause) });
     }
   }
 
   /** 错误条上的「重试」：跟随当前取数窗口，不会把 90 天/账本悄悄换回 30 天。 */
   async function reloadCurrentRange() {
-    if (dataRange === "30d") {
-      await load(false);
-      return;
-    }
-    setRangeLoading(true);
     try {
-      setStats(await api.getCreditStatistics(false, dataRange));
-      setError(null);
+      await loadWindow(dataRange);
     } catch (cause) {
       setError(api.asError(cause));
-    } finally {
-      setRangeLoading(false);
     }
   }
 
@@ -268,29 +286,16 @@ export default function CreditStatsPage() {
   useEffect(() => {
     const target = initialRangeRef.current;
     if (!target) return;
-    let cancelled = false;
+    // 先置空再取数：StrictMode 的二次挂载 / effect 重跑都不会重复请求。
+    initialRangeRef.current = null;
     void (async () => {
-      setLoading(true);
-      setError(null);
       try {
-        await fetchAll();
-        const accountState = useAccountsStore.getState();
-        if (accountState.error) throw new Error(accountState.error);
-        const nextStats = await api.getCreditStatistics(false, target);
-        if (cancelled) return;
-        initialRangeRef.current = null;
-        setStats(nextStats);
+        await loadWindow(target);
       } catch (cause) {
-        if (cancelled) return;
-        setError(api.asError(cause));
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!unmountedRef.current) setError(api.asError(cause));
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [fetchAll]);
+  }, [loadWindow]);
 
   // 跨标签页同步 range 或探测返回 supports90d=true 导致所需窗口变化时，补齐取数窗口。
   useEffect(() => {
@@ -299,31 +304,20 @@ export default function CreditStatsPage() {
     const syncKey = `${range}:${expected}`;
     if (syncedWindowKeyRef.current === syncKey) return;
     syncedWindowKeyRef.current = syncKey;
-    const seq = ++syncSeqRef.current;
-    setRangeLoading(true);
-    setDataRange(expected);
     void (async () => {
       try {
-        if (expected === "30d") {
-          await load(false);
-        } else {
-          const nextStats = await api.getCreditStatistics(false, expected);
-          if (!unmountedRef.current && syncSeqRef.current === seq) {
-            setStats(nextStats);
-            setError(null);
-          }
-        }
+        await loadWindow(expected);
       } catch (cause) {
-        if (!unmountedRef.current && syncSeqRef.current === seq) {
-          toast.error("同步展示范围失败", { description: api.asError(cause) });
-        }
-      } finally {
-        if (!unmountedRef.current && syncSeqRef.current === seq) {
-          setRangeLoading(false);
-        }
+        if (unmountedRef.current) return;
+        // 这里不回滚 dataRange：range 是被另一处（另一个标签页 / 窗口探测）改掉的，
+        // 回滚会留下「按钮高亮 90 天、数字还是 30 天、再点同一个按钮又被 next === range 挡住」
+        // 的死状态。改为交给页面错误条 + 「重试」（reloadCurrentRange 跟随当前 dataRange）。
+        setError(api.asError(cause));
+        // 清掉去重键，后续切范围或探测更新时允许重试同一个窗口。
+        syncedWindowKeyRef.current = null;
       }
     })();
-  }, [range, supports90d, dataRange, rangeLoading, loading, load]);
+  }, [range, supports90d, dataRange, rangeLoading, loading, loadWindow]);
 
   const variantByAccountId = useMemo(() => {
     const map = new Map<string, WbVariant>();
