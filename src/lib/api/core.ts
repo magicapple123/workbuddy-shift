@@ -164,6 +164,11 @@ const ROUTES: Record<string, Route> = {
   sync_settings: { method: "POST", path: "/api/settings-sync/apply" },
   list_settings_sync_backups: { method: "GET", path: "/api/settings-sync/backups" },
   restore_settings_sync_backup: { method: "POST", path: "/api/settings-sync/restore" },
+  // 设置页「关于 / 设置包」：数据目录只读；导出与导入是同一份 core 白名单校验的包装
+  // （导入任一键非法即整体拒绝、零写入，见 core 的 config/configs/bundle.rs）。
+  get_data_dir: { method: "GET", path: "/api/data-dir" },
+  export_settings_bundle: { method: "GET", path: "/api/settings/export" },
+  import_settings_bundle: { method: "POST", path: "/api/settings/import" },
 };
 
 /**

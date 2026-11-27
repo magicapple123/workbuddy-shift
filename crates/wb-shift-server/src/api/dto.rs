@@ -495,3 +495,18 @@ pub(crate) struct SaveTextFileRequest {
     pub(crate) path: String,
     pub(crate) content: String,
 }
+
+/// `POST /api/settings/import`：设置包（四份自动化配置的打包结果）。
+///
+/// 字段就是整份 JSON 对象，**不在这里拆成四个具名结构**：白名单校验（含未知键、
+/// 半截对象、类型不符一律拒绝）只在 `wb_shift_core::modules::config::import_settings_bundle`
+/// 里实现一份，桌面端走的是同一个函数。宿主层再写一套校验会产生两种错误文案，
+/// 也会让「整体拒绝、零写入」的语义出现两条实现。
+///
+/// `default` 保留「缺字段 = 空值」：缺 `bundle` 时 core 会以「设置包必须是 JSON 对象」
+/// 拒绝并整体不写盘，比在边界 422 更适合本场景（用户手改过的文件也是这条路径报错）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct ImportSettingsBundleRequest {
+    pub(crate) bundle: Value,
+}

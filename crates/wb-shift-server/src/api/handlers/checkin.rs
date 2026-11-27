@@ -64,8 +64,9 @@ pub(crate) async fn api_checkin_all(body: Option<Json<Value>>) -> Response {
     json_ok(checkin::run_checkin_all(variant, respect_window).await)
 }
 
+/// 回包额外带 `defaults`（出厂默认值，纯增量字段）：设置页「恢复默认」按它落盘。
 pub(crate) async fn api_checkin_config() -> Response {
-    json_ok(config::load_checkin_config())
+    json_ok(config::load_checkin_config_with_defaults())
 }
 
 pub(crate) async fn api_save_checkin_config(Json(body): Json<Value>) -> Response {
@@ -106,7 +107,7 @@ pub(crate) async fn api_travel_status(RawQuery(query): RawQuery) -> Response {
 }
 
 pub(crate) async fn api_travel_config() -> Response {
-    json_ok(config::load_travel_config())
+    json_ok(config::load_travel_config_with_defaults())
 }
 
 pub(crate) async fn api_save_travel_config(Json(body): Json<Value>) -> Response {
@@ -123,5 +124,33 @@ pub(crate) async fn api_save_travel_config(Json(body): Json<Value>) -> Response 
             json_ok(saved)
         }
         Err(e) => json_err(e.to_string(), StatusCode::BAD_REQUEST),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 设置页：数据目录 / 设置包导出导入
+// ---------------------------------------------------------------------------
+
+/// GET /api/data-dir —— 工具数据目录（设置页「关于」显示路径）。
+///
+/// 只回路径字符串：这是用户自己的数据目录，不含凭据，也不做任何写操作。
+pub(crate) async fn api_data_dir() -> Response {
+    json_ok(json!({ "path": config::store_dir().to_string_lossy() }))
+}
+
+/// GET /api/settings/export —— 导出设置包（checkin / travel / rotate / rateLimit 四份）。
+///
+/// 不导出更新（GitHub）配置：那份可能带代理口令，明文落盘会泄漏（见 core 的 `bundle.rs`）。
+pub(crate) async fn api_export_settings_bundle() -> Response {
+    json_ok(config::export_settings_bundle())
+}
+
+/// POST /api/settings/import —— 白名单校验后导入设置包；写入前备份，任一键非法整体拒绝。
+pub(crate) async fn api_import_settings_bundle(
+    Json(body): Json<ImportSettingsBundleRequest>,
+) -> Response {
+    match config::import_settings_bundle(&body.bundle) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }

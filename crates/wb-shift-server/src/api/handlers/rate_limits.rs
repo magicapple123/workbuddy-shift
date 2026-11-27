@@ -65,8 +65,9 @@ pub(crate) async fn api_uninstall_rate_limit_hook() -> Response {
     }
 }
 
+/// 回包额外带 `defaults`（出厂默认值，纯增量字段）：设置页「恢复默认」按它落盘。
 pub(crate) async fn api_rate_limit_config() -> Response {
-    json_ok(config::load_rate_limit_config())
+    json_ok(config::load_rate_limit_config_with_defaults())
 }
 
 /// POST /api/rate-limits/config —— 保存限额监听配置。

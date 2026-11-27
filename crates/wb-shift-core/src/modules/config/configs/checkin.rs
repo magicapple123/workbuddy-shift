@@ -108,6 +108,14 @@ pub fn load_checkin_config() -> Value {
     load_checkin_config_at(&checkin_config_file(), &checkin_logs_file())
 }
 
+/// 设置页回包：配置 + 出厂默认值（`defaults`，纯增量字段）。
+///
+/// 「已落盘还是全新安装」的判定仍由 [`load_checkin_config`] 决定；`defaults` 只描述
+/// 「恢复默认会写到什么」，因此永远取新安装口径的 [`default_checkin_config`]。
+pub fn load_checkin_config_with_defaults() -> Value {
+    with_defaults(load_checkin_config(), default_checkin_config())
+}
+
 pub(crate) fn load_checkin_config_at(config_path: &Path, logs_path: &Path) -> Value {
     let input = std::fs::read_to_string(config_path)
         .ok()

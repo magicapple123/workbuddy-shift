@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { DemoAction } from "@/components/demo-action";
 import { ROTATE_NUMBER_FIELDS, RotateNumberKey, formatTime } from "./helpers";
 import { AccordionSettingsRow, INSET_PANEL, NumberSettingRow, PANEL_ROW, SettingsGroup } from "./rows";
+import { RestoreDefaultsRow, stripDefaults } from "./restore-defaults";
 import { useConfigAutosave } from "./use-config-autosave";
 
 /** 自动轮换配置（CodeBuddy CLI）+ 手动检查 + 日志。 */
@@ -95,6 +96,18 @@ export function AutoRotateCard() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * 「恢复默认」：参数取自后端回包里的 `defaults`（前端不硬编码），
+   * 走同一条落盘链，因此回显、失败回滚与手改参数一致。
+   */
+  function restoreDefaults() {
+    const defaults = cfg?.defaults;
+    if (!defaults) return;
+    const patch = stripDefaults(defaults);
+    autosave.updateDraft(patch);
+    autosave.enqueueSave(patch, { title: "已恢复默认参数" });
   }
 
   function actionLabel(action: string): { text: string; tone: "success" | "warning" | "error" } {
@@ -205,6 +218,11 @@ export function AutoRotateCard() {
                 <p className="pt-1 text-[13px] leading-5 text-muted-foreground">
                   切换时机：目标账号剩余到期时间少于「紧迫阈值」且比当前账号早超过「差异阈值」，且目标剩余积分不低于「最小剩余积分」。检测到有 CodeBuddy CLI 会话在运行时，本次轮换会跳过并在当日最多提示 5 次；重启 CLI 后新账号才会生效。
                 </p>
+                <RestoreDefaultsRow
+                  description="把检查间隔、切换冷却与各阈值恢复为出厂默认。"
+                  disabled={autosave.saving || !cfg.defaults}
+                  onRestore={restoreDefaults}
+                />
               </div>
             </AccordionSettingsRow>
           </>

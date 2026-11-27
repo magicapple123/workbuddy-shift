@@ -1,5 +1,6 @@
 use super::paths::auto_rotate_config_file;
 use super::paths::auto_rotate_logs_file;
+use super::paths::backup_dir;
 use super::paths::checkin_config_file;
 use super::paths::checkin_logs_file;
 use super::paths::rate_limit_config_file;
@@ -29,24 +30,40 @@ pub fn with_travel_cache_lock<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// 给配置对象附上出厂默认值（`defaults`，见 [`checkin::load_checkin_config_with_defaults`]）。
+///
+/// 纯增量字段：不删也不改任何现有字段，旧前端读到的其它键一个字节都不变。设置页的
+/// 「恢复默认」直接用这份值，前端因此不需要硬编码任何默认值。
+pub(crate) fn with_defaults(mut cfg: Value, defaults: Value) -> Value {
+    if let Value::Object(map) = &mut cfg {
+        map.insert("defaults".to_string(), defaults);
+    }
+    cfg
+}
+
 mod automation;
+mod bundle;
 mod checkin;
 mod travel;
 
 pub use automation::{
     add_rotate_log, auto_rotate_notify_file, default_auto_rotate_config, default_rate_limit_config,
-    load_auto_rotate_config, load_rate_limit_config, load_rate_limit_config_at, load_rotate_logs,
-    save_auto_rotate_config, save_rate_limit_config_at, save_rotate_logs,
+    load_auto_rotate_config, load_auto_rotate_config_at, load_auto_rotate_config_with_defaults,
+    load_rate_limit_config, load_rate_limit_config_at, load_rate_limit_config_with_defaults,
+    load_rotate_logs, save_auto_rotate_config, save_rate_limit_config_at, save_rotate_logs,
     set_rate_limit_hook_opt_out_at, try_consume_rotate_notify, ROTATE_LOG_MAX_RECORDS,
     ROTATE_NOTIFY_DAILY_LIMIT,
 };
+pub use bundle::{
+    export_settings_bundle, import_settings_bundle, SETTINGS_BUNDLE_KEYS, SETTINGS_BUNDLE_VERSION,
+};
 pub use checkin::{
     add_checkin_log, compact_checkin_logs, default_checkin_config, load_checkin_config,
-    load_checkin_logs, parse_clock, save_checkin_config,
+    load_checkin_config_with_defaults, load_checkin_logs, parse_clock, save_checkin_config,
 };
 pub use travel::{
-    default_travel_config, load_travel_cache, load_travel_config, save_travel_cache,
-    save_travel_config,
+    default_travel_config, load_travel_cache, load_travel_config, load_travel_config_with_defaults,
+    save_travel_cache, save_travel_config,
 };
 
 #[allow(unused_imports)]

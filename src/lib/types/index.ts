@@ -13,4 +13,5 @@ export * from "./session";
 export * from "./stats";
 export * from "./storage";
 export * from "./settings-sync";
+export * from "./settings-bundle";
 export * from "./clients";

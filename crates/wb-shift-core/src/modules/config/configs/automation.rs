@@ -42,6 +42,11 @@ pub fn load_rate_limit_config() -> Value {
     load_rate_limit_config_at(&rate_limit_config_file())
 }
 
+/// 设置页回包：配置 + 出厂默认值（`defaults`，纯增量字段）。
+pub fn load_rate_limit_config_with_defaults() -> Value {
+    with_defaults(load_rate_limit_config(), default_rate_limit_config())
+}
+
 /// 保存限额监听配置到指定路径（只保留已知字段）。
 pub fn save_rate_limit_config_at(path: &Path, cfg: &Value) -> std::io::Result<()> {
     let mut merged = default_rate_limit_config();
@@ -86,18 +91,26 @@ pub fn default_auto_rotate_config() -> Value {
 
 /// 读取自动轮换配置（缺失/损坏时合并默认值）。
 pub fn load_auto_rotate_config() -> Value {
+    load_auto_rotate_config_at(&auto_rotate_config_file())
+}
+
+/// 读取指定路径的自动轮换配置：单测与设置包导入导出用的注入入口
+/// （其它 `load_*_at` 同理，避免测试触碰真实 `~/.workbuddy-shift`）。
+pub fn load_auto_rotate_config_at(path: &Path) -> Value {
     let mut cfg = default_auto_rotate_config();
-    let f = auto_rotate_config_file();
-    if f.exists() {
-        if let Ok(text) = std::fs::read_to_string(&f) {
-            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
-                for (k, v) in map {
-                    cfg[k] = v;
-                }
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+            for (k, v) in map {
+                cfg[k] = v;
             }
         }
     }
     cfg
+}
+
+/// 设置页回包：配置 + 出厂默认值（`defaults`，纯增量字段）。
+pub fn load_auto_rotate_config_with_defaults() -> Value {
+    with_defaults(load_auto_rotate_config(), default_auto_rotate_config())
 }
 
 /// 保存自动轮换配置（只保留已知字段）。

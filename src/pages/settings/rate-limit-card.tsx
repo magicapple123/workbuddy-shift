@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import type {
@@ -10,6 +11,7 @@ import type {
   RateLimitHookStatus,
 } from "@/lib/types";
 
+import { RestoreDefaultsRow, stripDefaults } from "./restore-defaults";
 import { SettingsFieldRow, SettingsGroup } from "./rows";
 
 /**
@@ -149,6 +151,28 @@ export function RateLimitCard() {
     }
   }
 
+  /**
+   * 「恢复默认」：参数取自后端回包里的 `defaults`，前端不硬编码任何默认值。
+   *
+   * `hookOptOut` 例外——它是「用户主动点过卸载 hook」的意图记录，跟着默认值恢复成
+   * `false` 等于把 hook 又自动装回去，正是用户明确拒绝过的行为；这里保留原值。
+   */
+  async function restoreDefaults() {
+    if (!config?.defaults || busy) return;
+    const defaults = stripDefaults(config.defaults);
+    setBusy(true);
+    try {
+      setConfig(await api.saveRateLimitConfig({ ...defaults, hookOptOut: config.hookOptOut }));
+      toast.success("已恢复默认参数", {
+        description: "限额监听开关、IDE 日志扫描与跨客户端提示已回到出厂默认；hook 接入状态保持不变",
+      });
+    } catch (e) {
+      toast.error("恢复默认失败", { description: api.asError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const probe = status?.vscodeExt;
   const existingTargets = status?.targets.filter((target) => target.exists) ?? [];
   const installedCount = existingTargets.filter((target) => target.installed).length;
@@ -243,6 +267,14 @@ export function RateLimitCard() {
           )}
         </SettingsFieldRow>
 
+        <div className="px-4 py-1 sm:px-5">
+          <RestoreDefaultsRow
+            description="把限额监听开关、IDE 日志扫描与跨客户端提示恢复为出厂默认；已接入/已卸载的 hook 状态保持不动。"
+            disabled={busy || !config?.defaults}
+            onRestore={() => void restoreDefaults()}
+          />
+        </div>
+
         {/*
           VS Code 插件的限额是**能力缺口**，不是偶发不触发（第三轮第 20 条，issue #188）：
           它既不在扫描来源里，日志里也没有可解析的限流文案（本机实测 0 命中），
@@ -261,29 +293,48 @@ export function RateLimitCard() {
             。
           </p>
           {probe ? (
-            <div className="mt-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-5">
-              <p className="font-medium text-foreground">日志探针（只采样，不判定限流）</p>
-              <p className="mt-1 text-muted-foreground">
-                已监听 {probe.files} 个文件 · 累计命中 {probe.hits} 条强信号 · 本次新读{" "}
-                {probe.scannedFiles} 个文件
-                {probe.lastScanAt ? ` · 最近扫描 ${new Date(probe.lastScanAt).toLocaleString("zh-CN")}` : ""}
-              </p>
-              <p className="mt-1 text-muted-foreground">{probe.reason}</p>
-              {probe.samples.length > 0 ? (
-                <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground/80">
-                  {probe.samples.map((sample, index) => (
-                    <li key={`${index}-${sample.slice(0, 12)}`} className="truncate" title={sample}>
-                      {sample}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-              {probe.samplesPath ? (
-                <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground/70">
-                  样本：{probe.samplesPath}
-                </p>
-              ) : null}
-            </div>
+            /*
+              探针收进折叠区（T05 第 5 项）：它是排障数据（监听文件数、命中样本路径），
+              对普通用户是噪声，默认收起；需要取证时再展开，避免每次都占掉半屏。
+            */
+            <Collapsible className="mt-2">
+              <CollapsibleTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 rounded-md px-2 text-[11px] text-muted-foreground [&[data-state=open]>svg]:rotate-180"
+                >
+                  <ChevronDown className="size-3.5 transition-transform" />
+                  诊断信息（日志探针）
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="mt-1 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-5">
+                  <p className="font-medium text-foreground">日志探针（只采样，不判定限流）</p>
+                  <p className="mt-1 text-muted-foreground">
+                    已监听 {probe.files} 个文件 · 累计命中 {probe.hits} 条强信号 · 本次新读{" "}
+                    {probe.scannedFiles} 个文件
+                    {probe.lastScanAt ? ` · 最近扫描 ${new Date(probe.lastScanAt).toLocaleString("zh-CN")}` : ""}
+                  </p>
+                  <p className="mt-1 text-muted-foreground">{probe.reason}</p>
+                  {probe.samples.length > 0 ? (
+                    <ul className="mt-1 space-y-0.5 font-mono text-[10px] text-muted-foreground/80">
+                      {probe.samples.map((sample, index) => (
+                        <li key={`${index}-${sample.slice(0, 12)}`} className="truncate" title={sample}>
+                          {sample}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {probe.samplesPath ? (
+                    <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground/70">
+                      样本：{probe.samplesPath}
+                    </p>
+                  ) : null}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           ) : null}
         </div>
       </CardContent>
