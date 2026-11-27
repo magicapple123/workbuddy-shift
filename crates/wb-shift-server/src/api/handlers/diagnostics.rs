@@ -47,11 +47,19 @@ fn probe_specs() -> Vec<diagnostics::ProbeSpec> {
     ]
 }
 
+/// 两档位的 WorkBuddy 事实。两档位各起一个线程：`is_workbuddy_running` 是进程枚举，
+/// 串行跑两遍会把「首次预览」从 1s 拖到 2s+。
 fn workbuddy_facts() -> Vec<diagnostics::WorkBuddyFacts> {
-    ["cn", "ai"]
-        .iter()
-        .filter_map(|variant| diagnostics::workbuddy_facts(variant))
-        .collect()
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = ["cn", "ai"]
+            .into_iter()
+            .map(|variant| scope.spawn(move || diagnostics::workbuddy_facts(variant)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
 }
 
 fn probes(
@@ -79,9 +87,20 @@ fn probes(
         );
     }
     drop(cache);
-    let clients = diagnostics::probe_clients(probe_specs(), diagnostics::PROBE_TIMEOUT_MS);
-    let hook = diagnostics::hook_state_from_status(&rate_limit_hook::hook_status());
-    let workbuddy = workbuddy_facts();
+    // 三组贵探测彼此独立（客户端 5 个 / hook 3 处配置 / WorkBuddy 2 档位），
+    // 并发跑：总耗时 = 最慢的一组，而不是三者相加。
+    let (clients, hook, workbuddy) = std::thread::scope(|scope| {
+        let clients = scope
+            .spawn(|| diagnostics::probe_clients(probe_specs(), diagnostics::PROBE_TIMEOUT_MS));
+        let hook =
+            scope.spawn(|| diagnostics::hook_state_from_status(&rate_limit_hook::hook_status()));
+        let workbuddy = scope.spawn(workbuddy_facts);
+        (
+            clients.join().unwrap_or_default(),
+            hook.join().unwrap_or_default(),
+            workbuddy.join().unwrap_or_default(),
+        )
+    });
     let mut cache = guard
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
