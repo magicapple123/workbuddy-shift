@@ -217,7 +217,10 @@ impl CredentialFreshness {
 /// 只有同一个账号才比较新鲜度：官方文件里通常是**源账号**，拿它的时间戳去卡目标账号的
 /// 快照会把「切到一个很久没刷新的账号」误判成「磁盘更新」。任一侧取不到身份时按「不是
 /// 同一个」处理，宁可不拦也不误伤。
-pub(super) fn same_account(acc: &Value, root: &Value) -> bool {
+///
+/// 可见性是 `pub(crate)`（T01）：令牌刷新侧（`refresh::decide_live_action`）必须用**同一
+/// 口径**判断「这是不是当前登录账号」，两处各写一份迟早会分裂。
+pub(crate) fn same_account(acc: &Value, root: &Value) -> bool {
     let target = get_str(acc, "uid").or_else(|| get_str(acc, "id"));
     let current = root
         .get("account")
