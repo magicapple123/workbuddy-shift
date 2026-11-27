@@ -17,11 +17,14 @@ export function SelectedAccountDetails({
   officialUsage,
   creditMap,
   creditLoadingMap,
+  heading = true,
 }: {
   stats: CreditStatistics;
   officialUsage?: CreditOfficialUsage;
   creditMap: Record<string, CreditExpiry>;
   creditLoadingMap: Record<string, boolean>;
+  /** 折叠标题已承担 `h2` 角色时不再重复渲染标题。 */
+  heading?: boolean;
 }) {
   const [detailTab, setDetailTab] = useState<"credits" | "requests">("credits");
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
@@ -55,10 +58,15 @@ export function SelectedAccountDetails({
   // 分页仍由该组件在 accountId 变化时回到第 1 页。
   return (
     <div className="flex min-w-0 flex-col gap-12">
-      <section className="min-w-0 space-y-2.5" aria-labelledby="credit-detail-title">
-        <div className="px-1">
-          <h2 id="credit-detail-title" className="text-[13px] font-medium leading-5">积分明细</h2>
-        </div>
+      <section
+        className="min-w-0 space-y-2.5"
+        aria-labelledby={heading ? "credit-detail-title" : undefined}
+      >
+        {heading ? (
+          <div className="px-1">
+            <h2 id="credit-detail-title" className="text-[13px] font-medium leading-5">积分明细</h2>
+          </div>
+        ) : null}
         <Card className="min-w-0 gap-0 overflow-hidden rounded-xl py-0 shadow-none">
           <CardHeader className="gap-0 border-b px-4 pt-3 pb-3 sm:px-5">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">

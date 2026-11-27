@@ -5,11 +5,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
 import { ExportMenu } from "@/components/export-menu";
+import { StatsRangeControl } from "@/components/stats-range";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { formatDate, formatDateTime } from "@/lib/format";
+import {
+  DEFAULT_STATS_RANGE,
+  statsDateSpanDays,
+  type StatsRangeKey,
+} from "@/lib/stats-range";
 import {
   isTokenStatisticsCacheFresh,
   loadTokenStatistics,
@@ -70,6 +76,8 @@ export default function TokenStatsPage() {
   /** 0 = 首次进入（缓存新鲜时不发请求）；>0 = 用户点了刷新/重试，强制重新扫描。 */
   const [reload, setReload] = useState(0);
   const [detailOpen, setDetailOpen] = useState(false);
+  /** 全局唯一的展示范围：四指标、结论、趋势图、用量分布都按它切片。 */
+  const [range, setRange] = useState<StatsRangeKey>(DEFAULT_STATS_RANGE);
 
   useEffect(() => {
     const force = reload > 0;
@@ -146,6 +154,26 @@ export default function TokenStatsPage() {
     ? "CLI 日志不记录账号，只能按「未归属」统计；IDE 来源按数据目录 uid 归因。"
     : null;
 
+  /**
+   * 本地日志的实际跨度（首末日期之差，含首尾）。
+   *
+   * 「近 90 天」只在跨度够 90 天时渲染：本地日志不足 90 天时这个选项必然显示一个
+   * 与「全部」相同的数字，属于假选项。已经在选中 90 天（例如换数据源）时保留按钮，
+   * 避免选中项凭空消失。
+   */
+  const rangeSpanDays = useMemo(() => {
+    const daily = filteredSource?.daily ?? [];
+    if (daily.length === 0) return 0;
+    let first = daily[0].key;
+    let last = daily[0].key;
+    for (const point of daily) {
+      if (point.key < first) first = point.key;
+      if (point.key > last) last = point.key;
+    }
+    return statsDateSpanDays(first, last);
+  }, [filteredSource]);
+  const include90d = rangeSpanDays >= 90 || range === "90d";
+
   /** 导出当前来源 + 当前账号：范围是全量日期，图表时间范围不参与。 */
   async function exportCsv() {
     if (!filteredSource) {
@@ -160,7 +188,7 @@ export default function TokenStatsPage() {
       );
       if (outcome === "saved") {
         toast.success("已导出 Token 统计 CSV", {
-          description: `${filteredSource.source} · ${scopeLabel} · ${(content.length / 1024).toFixed(0)} KB`,
+          description: `${filteredSource.source} · ${scopeLabel} · 全量日期 · ${(content.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -184,7 +212,7 @@ export default function TokenStatsPage() {
       );
       if (outcome === "saved") {
         toast.success("已导出 Token 统计 Excel", {
-          description: `${filteredSource.source} · ${scopeLabel} · ${(bytes.length / 1024).toFixed(0)} KB`,
+          description: `${filteredSource.source} · ${scopeLabel} · 全量日期 · ${(bytes.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -217,6 +245,12 @@ export default function TokenStatsPage() {
           )}
         </div>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
+          <StatsRangeControl
+            value={range}
+            include90d={include90d}
+            onChange={setRange}
+            ariaLabel="统计范围"
+          />
           {active === "codebuddy-cli" && (
             <Button
               className="shrink-0"
@@ -230,19 +264,23 @@ export default function TokenStatsPage() {
           )}
           <ExportMenu
             disabled={!filteredSource}
-            title={filteredSource ? "导出当前数据源 + 当前账号" : "没有可导出的数据"}
+            title={
+              filteredSource
+                ? "导出当前数据源 + 当前账号（全量日期，不受展示范围限制）"
+                : "没有可导出的数据"
+            }
             items={[
               {
                 key: "csv",
                 label: "CSV",
-                description: "分段明细，UTF-8 BOM，Excel 可直接打开",
+                description: "7 段明细 · UTF-8 BOM · Excel 可直接打开",
                 icon: <Download className="size-3.5" />,
                 onSelect: () => void exportCsv(),
               },
               {
                 key: "xlsx",
                 label: "Excel（xlsx）",
-                description: "多个 sheet，数字可求和",
+                description: "7 个 sheet · 数值可求和",
                 icon: <FileSpreadsheet className="size-3.5" />,
                 onSelect: () => void exportXlsx(),
               },
@@ -360,7 +398,7 @@ export default function TokenStatsPage() {
       {loading && !stats ? (
         <TokenStatsLoadingSkeleton />
       ) : filteredSource ? (
-        <Dashboard source={filteredSource} scopeLabel={scopeLabel} />
+        <Dashboard source={filteredSource} scopeLabel={scopeLabel} range={range} />
       ) : (
         !error && (
           <div className="rounded-xl border border-dashed px-4 py-16 text-center text-sm text-muted-foreground">

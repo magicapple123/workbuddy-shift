@@ -8,11 +8,14 @@
  */
 
 import { formatAmount, formatDate } from "@/lib/format";
+import { statsDateInRange, statsRangeDayCount, type StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditLocalCoverage,
   CreditOfficialUsage,
   CreditStatistics,
 } from "@/lib/types";
+
+import { rangeUsage } from "./data";
 
 /** 概览卡上的三个消耗窗口。 */
 export type UsageWindowKey = "today" | "7d" | "month";
@@ -97,5 +100,72 @@ export function usageWindowValue(
   return {
     text: formatAmount(isWeek ? stats.summary.usage7Days : stats.summary.usageThisMonth),
     absenceReason: null,
+  };
+}
+
+/** 当前统计范围的消耗值：数字 + 文案 + 「—」的原因。 */
+export interface RangeConsumption {
+  /** 可参与后续计算（日均等）的数值；显示为「—」时为 null。 */
+  value: number | null;
+  text: string;
+  absenceReason: string | null;
+}
+
+/**
+ * 四卡里的「当前范围消耗」。
+ *
+ * 官方可用时直接按范围求和（与趋势图底部「当前口径合计」同一个 `rangeUsage`）；
+ * 官方不可用时沿用 issue #225 的判定：今日快照差值可信，近 7 天/本月要求本地覆盖
+ * 完整才给数字，30 天/90 天/全部按本地快照求和并由调用方标注覆盖范围。
+ */
+export function statsRangeConsumption(
+  range: StatsRangeKey,
+  official: CreditOfficialUsage | undefined,
+  stats: CreditStatistics,
+  coverage: CreditLocalCoverage | undefined,
+): RangeConsumption {
+  if (official) {
+    const value = rangeUsage(official.summary, official.daily, range);
+    return { value, text: formatAmount(value), absenceReason: null };
+  }
+
+  if (range === "today") {
+    const value = stats.summary.usageToday;
+    return { value, text: formatAmount(value), absenceReason: null };
+  }
+
+  if (range === "7d" || range === "month") {
+    const window = usageWindowValue(
+      range === "7d" ? "7d" : "month",
+      official,
+      stats,
+      coverage,
+    );
+    const complete = !window.absenceReason;
+    return {
+      value: complete
+        ? range === "7d"
+          ? stats.summary.usage7Days
+          : stats.summary.usageThisMonth
+        : null,
+      text: window.text,
+      absenceReason: window.absenceReason,
+    };
+  }
+
+  // 30 天 / 90 天 / 全部：本地快照求和就是趋势图的口径，数字同源。
+  const points = (stats.daily ?? []).filter((point) => statsDateInRange(point.date, range));
+  const value = points.reduce((sum, point) => sum + point.usage, 0);
+  // 覆盖不足时把话说清楚（数字仍然显示，但只是下限）；覆盖完整就不加噪音。
+  const uncovered =
+    points.length === 0 || (coverage?.days ?? 0) < statsRangeDayCount(range, points.length);
+  return {
+    value,
+    text: formatAmount(value),
+    absenceReason: uncovered
+      ? coverage
+        ? `本地快照仅覆盖 ${coverage.days} 天，更早的日期没有本地记录（数字为下限）`
+        : "本地暂无快照，数字为下限"
+      : null,
   };
 }

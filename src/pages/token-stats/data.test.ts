@@ -129,8 +129,8 @@ describe("token-stats overviewTotals", () => {
     parseErrors: 0,
   } as TokenStatsSource;
 
-  it("total 直接采用后端汇总", () => {
-    expect(overviewTotals(source, "total")).toBe(source.summary);
+  it("all 直接采用后端汇总（与积分页「全部 = 本地账本」语义对齐）", () => {
+    expect(overviewTotals(source, "all")).toBe(source.summary);
   });
 
   it("按区间汇总时使用对应日期窗口", () => {

@@ -14,6 +14,13 @@ export interface CheckinConfig {
   end_hour?: number;
   keepalive_days: number;
   lazy_refresh_hours: number;
+  /**
+   * 出厂默认值（纯增量字段，来自 `get_*_config` 的回包）。
+   *
+   * 设置页的「恢复默认」直接用这份值回填，前端**不硬编码**任何默认值：
+   * 默认值一旦只在前端写一份，改后端默认时两边就会静默漂移。
+   */
+  defaults?: Omit<CheckinConfig, "defaults">;
 }
 
 export interface CheckinLog {
@@ -35,6 +42,8 @@ export interface CheckinResult {
 
 export interface TravelConfig {
   enabled: boolean;
+  /** 出厂默认值（纯增量字段）：设置页「恢复默认」按它回填，前端不硬编码。 */
+  defaults?: Omit<TravelConfig, "defaults">;
 }
 
 export type TravelStatusLabel = "untraveled" | "no-buddy" | "traveling" | "finished";
@@ -151,6 +160,8 @@ export interface RateLimitConfig {
    * 关闭后账号卡不再出现「其它客户端限流至 …」。
    */
   crossClientInfer?: boolean;
+  /** 出厂默认值（纯增量字段）：设置页「恢复默认」按它回填，前端不硬编码。 */
+  defaults?: Omit<RateLimitConfig, "defaults">;
 }
 
 export interface AutoRotateConfig {
@@ -162,6 +173,8 @@ export interface AutoRotateConfig {
   /** 配置键兼容保留：轮换已改用「会话存活门控」，该值不再参与决策，设置页也不再展示。 */
   active_guard_minutes: number;
   min_remaining_credits: number;
+  /** 出厂默认值（纯增量字段）：设置页「恢复默认」按它回填，前端不硬编码。 */
+  defaults?: Omit<AutoRotateConfig, "defaults">;
 }
 
 export interface RotateLog {

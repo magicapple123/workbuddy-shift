@@ -17,7 +17,21 @@ const HEATMAP_LEVEL_CLASS = [
   "bg-primary",
 ] as const;
 
-export function Heatmap({ groups }: { groups: TokenStatsGroup[] }) {
+/**
+ * 最近一年的按天热力图。
+ *
+ * 网格固定 53 周（周日对齐、回退 52 周）：这是一个「一年视图」，**不跟统计范围**
+ * 切片——范围收窄到 7 天时热力图仍要能看到全年节奏，否则这张图就没有存在意义。
+ * 卡头已注明这一点，避免用户以为它和四卡是同一个口径。
+ */
+export function Heatmap({
+  groups,
+  heading = true,
+}: {
+  groups: TokenStatsGroup[];
+  /** 折叠区里由 `AccordionTrigger` 承担标题，卡内不再重复渲染区块标题。 */
+  heading?: boolean;
+}) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const valueByDate = new Map(groups.map((group) => [group.key, tokenTotal(group)]));
   const recordByDate = new Map(groups.map((group) => [group.key, group.records]));
@@ -69,12 +83,17 @@ export function Heatmap({ groups }: { groups: TokenStatsGroup[] }) {
   }, [groups]);
 
   return (
-    <section className="min-w-0 space-y-2.5" aria-labelledby="token-heatmap-title">
-      <SectionTitle id="token-heatmap-title">Token 活动</SectionTitle>
+    <section
+      className="min-w-0 space-y-2.5"
+      aria-labelledby={heading ? "token-heatmap-title" : undefined}
+    >
+      {heading ? <SectionTitle id="token-heatmap-title">Token 活动</SectionTitle> : null}
       <Card className="min-w-0 gap-0 rounded-xl py-0 shadow-none">
         <CardHeader className="px-4 pt-4 pb-0 sm:px-5">
           <div className="flex items-center justify-between gap-3">
-            <CardDescription className="text-xs">最近一年按天显示 Token 活跃度。</CardDescription>
+            <CardDescription className="text-xs">
+              最近一年按天显示 Token 活跃度（固定 53 周，不受统计范围影响）。
+            </CardDescription>
             <span className="shrink-0 text-xs font-medium text-foreground">每日</span>
           </div>
         </CardHeader>

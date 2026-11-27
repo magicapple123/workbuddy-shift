@@ -1,7 +1,7 @@
 
 
-
 import { dateDaysAgo, dateKey } from "@/lib/format";
+import { statsDateInRange, type StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditLedgerClientGroup,
   CreditLedgerSnapshot,
@@ -17,7 +17,11 @@ import type {
 } from "@/lib/types";
 import { DEFAULT_VARIANT, normalizeVariant, variantLabel } from "@/lib/variant";
 
-export type RangeKey = "30d" | "today" | "7d" | "month";
+/**
+ * 逐日切片与汇总口径统一用 `StatsRangeKey`（见 `@/lib/stats-range`）：
+ * 范围选项只在那一处定义，本文件只负责「按范围过滤 / 求和」。
+ */
+export type RangeKey = StatsRangeKey;
 
 export type StatsVariantView = "all" | "cn" | "ai";
 
@@ -235,22 +239,9 @@ export const VARIANT_VIEW_OPTIONS: { key: StatsVariantView; label: string }[] = 
   { key: "ai", label: statsVariantViewLabel("ai") },
 ];
 
-export const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
-  { key: "30d", label: "近 30 天" },
-  { key: "today", label: "今天" },
-  { key: "7d", label: "近 7 天" },
-  { key: "month", label: "本月" },
-];
-
-export const USAGE_SHARE_RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
-  { key: "today", label: "今天" },
-  { key: "7d", label: "近 7 天" },
-  { key: "30d", label: "近 30 天" },
-  { key: "month", label: "本月" },
-];
-
 /** 账号消耗构成的分组顺序，与顶部档位切换一致；固定顺序避免组序随消耗高低跳动。 */
 export const VARIANT_GROUP_ORDER: WbVariant[] = ["cn", "ai"];
+
 
 /**
  * 读取指定范围的消耗值；官方账号不可用（字段为 null）时返回 null，调用方不计入占比分母。
@@ -452,17 +443,18 @@ export function officialAccountFor(
   return officialUsage?.accounts.find((account) => account.accountId === accountId);
 }
 
+/** 按范围切出逐日点（与「按日」明细、趋势图、四卡共用同一套日期判定）。 */
 export function chartPoints(daily: CreditStatsDailyPoint[], range: RangeKey) {
-  const today = dateKey(new Date());
-  const firstDate = range === "today" ? today : range === "7d" ? dateDaysAgo(6) : dateDaysAgo(29);
-  return daily.filter((point) => {
-    if (range === "month") {
-      return point.date.startsWith(`${today.slice(0, 7)}-`);
-    }
-    return point.date >= firstDate && point.date <= today;
-  });
+  return daily.filter((point) => statsDateInRange(point.date, range));
 }
 
+/**
+ * 指定范围的消耗合计。
+ *
+ * 今天 / 近 7 天 / 本月直接取后端（或账本）给的窗口汇总；30 天 / 90 天 / 全部由逐日
+ * 数据求和——官方也不提供这三个窗口的汇总量，求和是唯一同源的口径（趋势图底部的
+ * 「当前口径合计」用的就是这个函数，两处数字必然一致）。
+ */
 export function rangeUsage(
   summary: CreditStatistics["summary"] | CreditOfficialUsage["summary"],
   daily: CreditStatsDailyPoint[],
@@ -476,10 +468,133 @@ export function rangeUsage(
     case "month":
       return summary.usageThisMonth;
     case "30d":
-      return daily
-        .filter((point) => point.date >= dateDaysAgo(29) && point.date <= dateKey(new Date()))
-        .reduce((sum, point) => sum + point.usage, 0);
+    case "90d":
+    case "all":
+      return chartPoints(daily, range).reduce((sum, point) => sum + point.usage, 0);
   }
+}
+
+/** 范围内的单日峰值（无数据返回 null，避免把「没有数据」显示成 0）。 */
+export function rangePeakUsage(daily: CreditStatsDailyPoint[], range: RangeKey): number | null {
+  const points = chartPoints(daily, range);
+  if (points.length === 0) return null;
+  return points.reduce((max, point) => Math.max(max, point.usage), 0);
+}
+
+/** 占比文案：`<0.1%` 保留一位小数，0 与非法值返回 `—`。 */
+export function formatPercent(ratio: number | null | undefined): string {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return "—";
+  const percent = ratio * 100;
+  if (percent <= 0) return "0.0%";
+  return percent < 0.05 ? "<0.1%" : `${percent.toFixed(1)}%`;
+}
+
+/** 账号消耗构成的一行：官方不可用的账号 `usage` 为 null（不计入分母）。 */
+export interface AccountUsageRow {
+  accountId: string;
+  accountName: string;
+  usage: number | null;
+  variant: WbVariant;
+}
+
+/**
+ * 账号消耗构成的唯一数据源。
+ *
+ * 折叠区（第一屏结论与「账号消耗构成」）都从这里取行，保证「头部账号占 X%」与下方
+ * 条形图的百分比是同一份数字；改造前这两处各算一遍，切范围后容易互相矛盾。
+ */
+export function accountUsageRows(
+  stats: CreditStatistics,
+  officialUsage: CreditOfficialUsage | undefined,
+  range: RangeKey,
+  variantByAccountId: Map<string, WbVariant>,
+  /** 「全部」时的账号级累计（来自账本 `accounts[].credit`；账本的按账号逐日为空）。 */
+  allTimeByAccountId?: Map<string, number>,
+): AccountUsageRow[] {
+  const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
+  // 构造期先不带 `variant`：账号档位只存在于账号库（`variantByAccountId`），官方响应
+  // 与本地统计都没有这个字段。统一在下面的 `.map` 里补，取不到时回落到 `DEFAULT_VARIANT`
+  // （与「档位筛选 = 全部」时一致），避免两条分支各写一次 fallback。
+  const rows: Array<Omit<AccountUsageRow, "variant">> = official
+    ? official.accounts.map((account) => ({
+        accountId: account.accountId,
+        accountName: account.accountName,
+        usage: account.ok ? usageShareValue(account, account.daily, range) : null,
+      }))
+    : stats.accounts.map((account) => ({
+        accountId: account.accountId,
+        accountName: account.accountName,
+        usage:
+          range === "all" && allTimeByAccountId?.has(account.accountId)
+            ? (allTimeByAccountId.get(account.accountId) ?? 0)
+            : usageShareValue(account, account.daily, range),
+      }));
+
+  return rows
+    .map((row) => ({ ...row, variant: variantByAccountId.get(row.accountId) ?? DEFAULT_VARIANT }))
+    .sort(
+      (a, b) => (b.usage ?? -1) - (a.usage ?? -1) || accountLabel(a).localeCompare(accountLabel(b)),
+    );
+}
+
+/** 头部账号占比结论（第一屏那一行文字与折叠区标题共用）。 */
+export interface TopAccountShare {
+  label: string;
+  usage: number;
+  share: number;
+  total: number;
+  /** 有可测消耗值的账号数（官方失败账号不计入）。 */
+  counted: number;
+}
+
+export function topAccountShare(rows: AccountUsageRow[]): TopAccountShare | null {
+  const measurable = rows.filter(
+    (row): row is AccountUsageRow & { usage: number } => row.usage !== null,
+  );
+  const total = measurable.reduce((sum, row) => sum + row.usage, 0);
+  if (measurable.length === 0 || total <= 0) return null;
+  const top = measurable.reduce((best, row) => (row.usage > best.usage ? row : best));
+  return {
+    label: accountLabel(top),
+    usage: top.usage,
+    share: top.usage / total,
+    total,
+    counted: measurable.length,
+  };
+}
+
+/**
+ * 指定范围 + 指定账号（null = 汇总）的模型消耗。
+ *
+ * 从官方逐日模型聚合求和：全量、不受明细条数上限影响。折叠区标题与「按模型分类」
+ * 共用它，避免标题里的百分比与卡片内的条形各算一遍。
+ */
+export function rangeModels(
+  officialUsage: CreditOfficialUsage,
+  range: RangeKey,
+  accountId: string | null,
+): CreditOfficialUsageModel[] {
+  const account = accountId
+    ? officialUsage.accounts.find((item) => item.accountId === accountId)
+    : undefined;
+  const basePoints = chartPoints(account ? (account.daily ?? []) : officialUsage.daily, range);
+  const totals = new Map<string, { requestCount: number; credit: number }>();
+  for (const point of basePoints) {
+    for (const item of point.models ?? []) {
+      const entry = totals.get(item.model) ?? { requestCount: 0, credit: 0 };
+      entry.requestCount += item.requestCount;
+      entry.credit += item.credit;
+      totals.set(item.model, entry);
+    }
+  }
+  return [...totals.entries()]
+    .map(([model, value]) => ({ model, requestCount: value.requestCount, credit: value.credit }))
+    .sort(
+      (left, right) =>
+        right.credit - left.credit ||
+        right.requestCount - left.requestCount ||
+        left.model.localeCompare(right.model),
+    );
 }
 
 /** 请求用量明细的排序维度：请求时间（默认倒序）与消耗 */

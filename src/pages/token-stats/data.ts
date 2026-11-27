@@ -1,5 +1,10 @@
 import { readPreference, writePreference } from "@/lib/persisted-preference";
 import { dateDaysAgo, dateKey, pad2 } from "@/lib/format";
+import {
+  statsDateInRange,
+  statsRangeLabel,
+  type StatsRangeKey,
+} from "@/lib/stats-range";
 import type {
   TokenStatsGroup,
   TokenStatsSource,
@@ -8,9 +13,11 @@ import type {
 
 export type SourceKey = TokenStatsSource["source"];
 
-export type RangeKey = "30d" | "today" | "7d" | "month";
-
-export type OverviewRangeKey = "today" | "7d" | "30d" | "total";
+/**
+ * 逐日切片口径统一用 `StatsRangeKey`（见 `@/lib/stats-range`）：
+ * 范围选项只在那一处定义，本文件只负责「按范围过滤 / 补齐日期轴 / 求和」。
+ */
+export type RangeKey = StatsRangeKey;
 
 export type DistributionKey = "projects" | "models";
 
@@ -46,20 +53,6 @@ export function readPreferredTokenSource(): SourceKey {
 export function persistPreferredTokenSource(source: SourceKey): void {
   writePreference(TOKEN_SOURCE_PREFERENCE, source);
 }
-
-export const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
-  { key: "30d", label: "近 30 天" },
-  { key: "today", label: "今天" },
-  { key: "7d", label: "近 7 天" },
-  { key: "month", label: "本月" },
-];
-
-export const OVERVIEW_RANGE_OPTIONS: { key: OverviewRangeKey; label: string }[] = [
-  { key: "today", label: "今日" },
-  { key: "7d", label: "近 7 天" },
-  { key: "30d", label: "近 30 天" },
-  { key: "total", label: "总计" },
-];
 
 const compactTokenFormatter = new Intl.NumberFormat("en-US", {
   notation: "compact",
@@ -118,29 +111,27 @@ export function formatHeatmapDate(date: Date): string {
 }
 
 export function rangeLabel(range: RangeKey): string {
-  return RANGE_OPTIONS.find((option) => option.key === range)?.label ?? "近 30 天";
+  return statsRangeLabel(range);
 }
 
 export function rangePoints(daily: TokenStatsGroup[], range: RangeKey): TokenStatsGroup[] {
-  const today = dateKey(new Date());
-  const firstDate =
-    range === "today" ? today : range === "7d" ? dateDaysAgo(6) : dateDaysAgo(29);
-
   return daily
-    .filter((point) => {
-      if (range === "month") {
-        return point.key.startsWith(`${today.slice(0, 7)}-`);
-      }
-      return point.key >= firstDate && point.key <= today;
-    })
+    .filter((point) => statsDateInRange(point.key, range))
     .sort((left, right) => left.key.localeCompare(right.key));
 }
 
-function rangeBounds(range: RangeKey): { start: string; end: string } {
+/**
+ * 范围的首尾日期；`all` 返回 null（日期轴就是数据本身的跨度，不需要补齐）。
+ *
+ * `month` 从本月 1 日到今天，`90d` 从 89 天前开始——与 `statsDateInRange` 完全一致。
+ */
+function rangeBounds(range: RangeKey): { start: string; end: string } | null {
+  if (range === "all") return null;
   const today = dateKey(new Date());
   if (range === "today") return { start: today, end: today };
   if (range === "7d") return { start: dateDaysAgo(6), end: today };
   if (range === "30d") return { start: dateDaysAgo(29), end: today };
+  if (range === "90d") return { start: dateDaysAgo(89), end: today };
   const monthStart = new Date();
   monthStart.setHours(12, 0, 0, 0);
   monthStart.setDate(1);
@@ -149,7 +140,10 @@ function rangeBounds(range: RangeKey): { start: string; end: string } {
 
 export function fillRangePoints(points: TokenStatsGroup[], range: RangeKey): TokenStatsGroup[] {
   if (points.length === 0) return [];
-  const { start, end } = rangeBounds(range);
+  const bounds = rangeBounds(range);
+  // 「全部」不补零：账本/日志的跨度由数据自己决定，补到某个猜测的起点反而会造假。
+  if (!bounds) return [...points].sort((left, right) => left.key.localeCompare(right.key));
+  const { start, end } = bounds;
   const byDate = new Map(points.map((point) => [point.key, point]));
   const cursor = new Date(`${start}T12:00:00`);
   const endDate = new Date(`${end}T12:00:00`);
@@ -205,7 +199,62 @@ export function rangeTotals(points: TokenStatsGroup[]): TokenStatsTotals {
   };
 }
 
-export function overviewTotals(source: TokenStatsSource, range: OverviewRangeKey): TokenStatsTotals {
-  if (range === "total") return source.summary;
+export function overviewTotals(source: TokenStatsSource, range: RangeKey): TokenStatsTotals {
+  // 「全部」直接用后端汇总（本地日志全量），与积分页「全部 = 本地账本」语义对齐：
+  // 两页的最后一个范围项都表示「不受窗口限制的全量累计」。
+  if (range === "all") return source.summary;
   return rangeTotals(rangePoints(source.daily, range));
+}
+
+/**
+ * 指定范围内各模型的用量。
+ *
+ * 逐模型日序列（`dailyByModel`）是模型维度唯一能按范围切的数据；旧后端不下发时退回
+ * `models`（全量聚合），此时范围只影响第一屏四卡与趋势，模型占比仍是全量口径。
+ */
+export function modelTotalsInRange(source: TokenStatsSource, range: RangeKey): TokenStatsGroup[] {
+  const byModel = source.dailyByModel;
+  if (range === "all" || !byModel) return source.models;
+  return Object.entries(byModel)
+    .map(([model, points]) => ({ ...rangeTotals(rangePoints(points, range)), key: model }))
+    .filter((group) => tokenTotal(group) > 0)
+    .sort((left, right) => tokenTotal(right) - tokenTotal(left));
+}
+
+/** 头部占比结论：第一屏那一行文字与折叠区标题共用。 */
+export interface TopGroupShare {
+  key: string;
+  amount: number;
+  share: number;
+  total: number;
+  count: number;
+}
+
+export function topGroupShare(groups: TokenStatsGroup[]): TopGroupShare | null {
+  const rows = groups
+    .map((group) => ({ key: group.key, amount: tokenTotal(group) }))
+    .filter((row) => row.amount > 0)
+    .sort((left, right) => right.amount - left.amount);
+  const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  const top = rows[0];
+  if (!top || total <= 0) return null;
+  return { key: top.key, amount: top.amount, share: top.amount / total, total, count: rows.length };
+}
+
+/**
+ * 热力图 53 周窗口内的活跃天数。
+ *
+ * 与 `heatmap.tsx` 的网格起点保持同一算法（周日对齐、回退 52 周），标题里的「N 个
+ * 活跃日」才不会和图表 `aria-label` 里的数字打架。
+ */
+export function heatmapActiveDays(groups: TokenStatsGroup[], today = new Date()): number {
+  const anchor = new Date(today);
+  anchor.setHours(12, 0, 0, 0);
+  const start = new Date(anchor);
+  start.setDate(start.getDate() - start.getDay() - 52 * 7);
+  const startKey = dateKey(start);
+  const todayKey = dateKey(anchor);
+  return groups.filter(
+    (group) => group.key >= startKey && group.key <= todayKey && tokenTotal(group) > 0,
+  ).length;
 }
