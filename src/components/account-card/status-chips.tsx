@@ -39,6 +39,17 @@ import { selectCompactStatusChips, STATUS_PRIORITY, type StatusChipDescriptor } 
 export { chipClass };
 
 /**
+ * 「删除该账号后重新 OAuth 扫码」——账号真的失效时**唯一**的恢复路径（R6-05 / R6-02 共用）。
+ *
+ * 不能再写「从本机导入」：UI 早已没有这个入口（`importLocal` 只剩定义、无调用方），
+ * 而且信封账号即使重新导入本机登录态，拿到的仍然是信封，救不回来。
+ */
+const OAUTH_RELOGIN_RECOVERY = "删除该账号后重新 OAuth 扫码";
+
+/** 「需重新登录 / Token 已过期」chip 的 hover 说明（R6-05）。 */
+export const RELOGIN_RECOVERY_HINT = `若客户端仍可正常使用，请${OAUTH_RELOGIN_RECOVERY}`;
+
+/**
  * 卡片头部的状态 chip 区：标记 / 企业版 / 签到 / 旅行 / 最近切换 / 限额 / 失效 /
  * 建议优先 / 多端在用。
  *
@@ -180,8 +191,8 @@ export function AccountStatusChips({
   }
 
   // 8）需重新登录 / Token 已过期（阻断使用）。
-  // T01：「需重新登录」多是本工具与官方客户端抢刷同一份 refresh token 的结果，客户端往往
-  // 仍能正常使用，真实恢复路径是「从本机导入」（把客户端手上的新凭据读回账号库）。
+  // R6-05：恢复路径改成「删除该账号后重新 OAuth 扫码」——旧文案指向的「从本机导入」
+  // 在 UI 里早已不存在，信封账号导入后仍是信封，救不回来。
   // 提示只挂在 `title` 上：肉眼看到的仍是同一个 chip，视觉结构不变。
   const reloginLabel = account.needsRelogin
     ? "需重新登录"
@@ -189,12 +200,15 @@ export function AccountStatusChips({
       ? "Token 已过期"
       : null;
   if (reloginLabel) {
-    const hint = "若客户端仍可正常使用，请用『从本机导入』恢复";
     chips.push({
       key: "relogin",
       priority: STATUS_PRIORITY.relogin,
       detail: reloginLabel,
-      node: <Badge variant="warning" className={chipClass} title={hint}>{reloginLabel}</Badge>,
+      node: (
+        <Badge variant="warning" className={chipClass} title={RELOGIN_RECOVERY_HINT}>
+          {reloginLabel}
+        </Badge>
+      ),
     });
   }
 
