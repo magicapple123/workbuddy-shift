@@ -198,6 +198,26 @@ export default function CreditStatsPage() {
   );
 
   /**
+   * 单一取数入口（切范围 / 重试 / 首屏恢复 / 跨标签同步共用）：`30d` 走 `load(false)`，
+   * `loading` / `stats` / `error` 由它自己写且失败不抛；其它窗口直接请求对应窗口，成功写 `stats`
+   * 并清 `error`、失败原样抛出，由调用方决定回滚范围还是展示错误条。
+   * `isStale` 为 true 时丢弃迟到的结果，避免旧响应覆盖新窗口。
+   */
+  const loadWindow = useCallback(
+    async (target: CreditRange, isStale?: () => boolean): Promise<void> => {
+      if (target === "30d") {
+        await load(false);
+        return;
+      }
+      const nextStats = await api.getCreditStatistics(false, target);
+      if (isStale?.()) return;
+      setStats(nextStats);
+      setError(null);
+    },
+    [load],
+  );
+
+  /**
    * 切范围：展示范围立即变；只有取数窗口也跟着变时才重新取一次数。
    * 今天 / 7 天 / 30 天共用 30 天窗口，所以它们之间切换是纯本地的（无请求、不闪烁）。
    */
@@ -212,12 +232,7 @@ export default function CreditStatsPage() {
     setRangeLoading(true);
     setDataRange(nextDataRange);
     try {
-      if (nextDataRange === "30d") {
-        await load(false);
-      } else {
-        setStats(await api.getCreditStatistics(false, nextDataRange));
-        setError(null);
-      }
+      await loadWindow(nextDataRange);
     } catch (cause) {
       // 失败就退回上一个范围：让「选中的范围」与「页面数字」始终对应，不留半截状态。
       setRange(previousRange);
@@ -230,14 +245,10 @@ export default function CreditStatsPage() {
 
   /** 错误条上的「重试」：跟随当前取数窗口，不会把 90 天/账本悄悄换回 30 天。 */
   async function reloadCurrentRange() {
-    if (dataRange === "30d") {
-      await load(false);
-      return;
-    }
+    syncSeqRef.current += 1;
     setRangeLoading(true);
     try {
-      setStats(await api.getCreditStatistics(false, dataRange));
-      setError(null);
+      await loadWindow(dataRange);
     } catch (cause) {
       setError(api.asError(cause));
     } finally {
@@ -276,10 +287,9 @@ export default function CreditStatsPage() {
         await fetchAll();
         const accountState = useAccountsStore.getState();
         if (accountState.error) throw new Error(accountState.error);
-        const nextStats = await api.getCreditStatistics(false, target);
+        await loadWindow(target, () => cancelled);
         if (cancelled) return;
         initialRangeRef.current = null;
-        setStats(nextStats);
       } catch (cause) {
         if (cancelled) return;
         setError(api.asError(cause));
@@ -290,7 +300,7 @@ export default function CreditStatsPage() {
     return () => {
       cancelled = true;
     };
-  }, [fetchAll]);
+  }, [fetchAll, loadWindow]);
 
   // 跨标签页同步 range 或探测返回 supports90d=true 导致所需窗口变化时，补齐取数窗口。
   useEffect(() => {
@@ -302,28 +312,22 @@ export default function CreditStatsPage() {
     const seq = ++syncSeqRef.current;
     setRangeLoading(true);
     setDataRange(expected);
+    const isStale = () => unmountedRef.current || syncSeqRef.current !== seq;
     void (async () => {
       try {
-        if (expected === "30d") {
-          await load(false);
-        } else {
-          const nextStats = await api.getCreditStatistics(false, expected);
-          if (!unmountedRef.current && syncSeqRef.current === seq) {
-            setStats(nextStats);
-            setError(null);
-          }
-        }
+        await loadWindow(expected, isStale);
       } catch (cause) {
-        if (!unmountedRef.current && syncSeqRef.current === seq) {
-          toast.error("同步展示范围失败", { description: api.asError(cause) });
-        }
+        if (isStale()) return;
+        // 与手动切换不同：不回滚 `dataRange`。展示范围由另一个标签页决定，回滚后按钮高亮与
+        // 页面数字会一直错位且没有重试入口；这里保留目标窗口并落下错误条，「重试」按当前窗口
+        // （= expected）重取。失败后 `expected === dataRange`，本 effect 不会再自动取数。
+        setError(api.asError(cause));
+        toast.error("同步展示范围失败", { description: api.asError(cause) });
       } finally {
-        if (!unmountedRef.current && syncSeqRef.current === seq) {
-          setRangeLoading(false);
-        }
+        if (!isStale()) setRangeLoading(false);
       }
     })();
-  }, [range, supports90d, dataRange, rangeLoading, loading, load]);
+  }, [range, supports90d, dataRange, rangeLoading, loading, loadWindow]);
 
   const variantByAccountId = useMemo(() => {
     const map = new Map<string, WbVariant>();
