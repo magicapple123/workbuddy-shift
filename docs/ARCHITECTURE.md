@@ -149,9 +149,9 @@ Workspace 成员与共享依赖版本见根 [`Cargo.toml`](../Cargo.toml)。
 | --- | --- |
 | `src/main.tsx`、`src/App.tsx` | 挂载、全局错误处理、侧栏布局与 5 条懒加载路由；footer/更新中心在 `components/app-shell/` |
 | `src/pages/` | 页面；页面目录内按区块拆文件：`sessions/hooks/{use-session-groups,use-session-detail,use-session-actions}.ts`、`accounts/hooks/use-accounts-page.ts`、`accounts/components/`、`settings/hooks/use-config-autosave.ts` 等 |
-| `src/components/` | 跨页面组件；`ui/` 是 shadcn 基础件；`account-card/` 账号卡片区块；`client-switch-account-*` 两个客户端共享切号弹窗；`app-shell/` 是侧栏 footer 与更新中心 |
+| `src/components/` | 跨页面组件；`ui/` 是 shadcn 基础件；`account-card/` 账号卡片区块；`client-switch-account-*` 两个客户端共享切号弹窗；`app-shell/` 是侧栏 footer 与更新中心；`message-preview.tsx` 是会话详情预览的渲染层（表格/代码/列表/段落，只认 token 不写死颜色） |
 | `src/hooks/` | `use-*` 轮询/可见性/更新状态/悬浮窗开关；`use-visible-interval` 是可见性轮询的唯一实现 |
-| `src/lib/` | 纯逻辑与契约：`api/`（双通道）、`types/`（按域拆分）、`screenshot-demo/`（按域 fixtures + 分发）、`persisted-preference.ts`（localStorage 偏好唯一实现）、主题/格式化等 |
+| `src/lib/` | 纯逻辑与契约：`api/`（双通道）、`types/`（按域拆分）、`screenshot-demo/`（按域 fixtures + 分发）、`persisted-preference.ts`（localStorage 偏好唯一实现）、`credit-bar-palette.ts`（积分条三态配色的唯一来源，默认主题蓝）、`message-preview.ts`（会话详情预览的 Markdown 分块解析）、主题/格式化等 |
 | `src/stores/` | zustand 状态；目前只有 `accounts.ts`（账号库、状态快照、轮询去重） |
 
 ### API 双通道
@@ -415,7 +415,7 @@ WorkBuddy 的会话复制需要「正文 + `workbuddy.db` sessions 表」同时�
 | `scripts/smoke/dispose.py` | 818 | 脚本（处置闸门） | 整条链里**唯一**会改变仓库外部状态的一步，所以四道闸门（单 run ≤3 / 每类每版本 ≤1 / `attempt>=2` 不重跑 / 白名单动作）与「怎么拼 gh 命令」写在同一处：把它们分开就等于让「闸门」与「执行」之间出现可绕过的一层。约 1/4 是自测（优先级、上限、attempt 闸门、dry_run 零调用、rejected、命令形态）。 | 若将来引入新的处置动作（例如 `dispatch-build`），先把白名单 + `build_command` + 闸门抽成 `dispose/policy.py`，CLI 与报告渲染留在原文件。 |
 | `crates/wb-shift-core/src/modules/jetbrains/detect.rs` | 791 | 客户端识别 | WorkBuddy / CodeBuddy IDE / CLI / VS Code / JetBrains 五类客户端的安装路径、进程、插件目录与版本探测共用一组平台分支（同一路径要判多个客户端）；拆开会把同一份平台判断复制成多份。第三轮新增 JetBrains 诊断入口、第五轮（R5-19）加入双配置根与 16 产品识别后超过阈值；产品表已抽到 `jetbrains/products.rs`，本文件只剩安装根解析、配置目录映射与进程枚举。 | 下一轮改识别逻辑时按客户端抽 `jetbrains/detect/{workbuddy,codebuddy,jetbrains}.rs`，共用平台分支留在 `mod.rs`。 |
 | `crates/wb-shift-core/src/modules/jetbrains/tests/switch.rs` | 809 | 测试 | 切换流程用例（账号数据、IDE 状态、失败回滚、诊断输出）共用一套造数夹具，属测试分组而非生产逻辑。R5-19 的产品表 / 双配置根用例另放 `tests/products.rs`，本文件不再膨胀。 | 继续膨胀时按「正常切换」「失败回滚」「诊断」三组拆文件。 |
-| `crates/wb-shift-core/src/modules/session_groups/graph.rs` | 1396 | 批次编排 | 统一批次（复制/同步/登记/回滚）刚越过阈值；计划与实际执行共享同一份批次状态，拆开要跨文件传递可变状态。本轮把组级 N 路识别（`common_base_branches`）的摘要换成与 `decide_sync` 同一套比较口径（`comparable_line_digests`），它必须与两两判定同处一组判据里，否则「组徽标 diverge、两两 behind」会自相矛盾。 | 新增客户端类型时先把批次计划抽到 `session_groups/graph/plan.rs`，执行留在原文件；N 路识别与聚合判定保持同文件（同一份比较口径）。 |
+| `crates/wb-shift-core/src/modules/session_groups/graph.rs` | 1400 | 批次编排 | 统一批次（复制/同步/登记/回滚）刚越过阈值；计划与实际执行共享同一份批次状态，拆开要跨文件传递可变状态。本轮把组级 N 路识别（`common_base_branches`）的摘要换成与 `decide_sync` 同一套比较口径（`comparable_line_digests`），它必须与两两判定同处一组判据里，否则「组徽标 diverge、两两 behind」会自相矛盾。 | 新增客户端类型时先把批次计划抽到 `session_groups/graph/plan.rs`，执行留在原文件；N 路识别与聚合判定保持同文件（同一份比较口径）。 |
 | `crates/wb-shift-core/src/modules/session_groups/tests/graph.rs` | 505 | 测试 | 摘要口径（注入块剥离、包装标签拆解、工具载荷过滤、按项目分组的时间/摘要装配）的回归用例集中在同一份造数夹具上，`TempStore` 与 `view.rs` 的沙箱同源；按行数再拆只会把「同一份正文造数」复制成两份。 | 继续膨胀时把「excerpt 文本清理」的纯函数用例拆到 `tests/excerpt.rs`。 |
 | `crates/wb-shift-core/src/modules/session_groups/members.rs` | 569 | 成员操作 | 成员增删与组一致性校验共用同一份成员快照（`member_snapshot`），拆开会让校验与写入读到不同版本。 | 下次改成员语义时把「校验」与「落盘」按职责拆开。 |
 | `crates/wb-shift-core/src/modules/session_groups/sync.rs` | 591 | 配对 | 配对算法与失败回滚共用同一事务状态；第三轮加入 JetBrains 一致性守卫后超过阈值。 | 下一轮把「配对判定」抽成纯函数文件，回滚保持原位。 |
