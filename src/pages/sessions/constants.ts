@@ -1,5 +1,10 @@
 
 
+import {
+  readPreference,
+  writePreference,
+  type PersistedPreferenceOptions,
+} from "@/lib/persisted-preference";
 import type {
   SessionGroupClient,
   SessionGroupSummary,
@@ -27,6 +32,28 @@ export const CLIENTS: { id: SessionGroupClient; title: string; description: stri
   { id: "codebuddyIde", title: "CodeBuddy IDE", description: "国内版 / 国际版独立分组" },
   { id: "jetbrains", title: "JetBrains 插件", description: "IDEA / PyCharm 共用" },
 ];
+
+/**
+ * 记住上次选的客户端：切到 CodeBuddy IDE 后离开页面再回来，不该跳回 WorkBuddy。
+ *
+ * 存的是**用户意图**，与「支持工具」开关互不影响：某个工具被关掉时页面会临时回退到
+ * 第一个仍启用的客户端，但不在存储里改写——重新打开该工具后仍回到原来那个标签。
+ */
+const CLIENT_PREFERENCE: PersistedPreferenceOptions<SessionGroupClient> = {
+  key: "workbuddy-shift.sessions.client",
+  fallback: "workbuddy",
+  parse: (raw) => (CLIENTS.some((item) => item.id === raw) ? (raw as SessionGroupClient) : null),
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:sessions-client-changed",
+};
+
+export function readSessionClientPreference(): SessionGroupClient {
+  return readPreference(CLIENT_PREFERENCE);
+}
+
+export function persistSessionClient(client: SessionGroupClient): void {
+  writePreference(CLIENT_PREFERENCE, client);
+}
 
 type GroupListSnapshot = {
   groups: SessionGroupSummary[];
