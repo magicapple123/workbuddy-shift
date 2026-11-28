@@ -39,10 +39,10 @@ const MAX_LANDING_CORRECTIONS = 2;
  * 标题被推到 133px（差 37px），而滚动早已停稳、300ms 的校正窗口也已经结束。
  * 高亮仍是对的（钉住/判定没坏），但落点偏低，属于同一根因的尾巴。
  */
-const LAYOUT_WATCH_MS = 6000;
+const LAYOUT_WATCH_MS = 10000;
 /** 看守期间最多补几次：防止持续抖动时无限拉锯。 */
-const MAX_WATCH_ADJUSTMENTS = 6;
-/** 看守轮询间隔：内容长高不一定触发 scroll，轮询最稳（6s 内约 40 次测量，代价可忽略）。 */
+const MAX_WATCH_ADJUSTMENTS = 8;
+/** 看守轮询间隔：内容长高不一定触发 scroll，轮询最稳（10s 内约 66 次测量，代价可忽略）。 */
 const LAYOUT_POLL_MS = 150;
 
 /** 触发「用户要自己滚」的按键：滚动类按键，普通输入不算。深链解钉与取消落点校正共用。 */
@@ -87,11 +87,11 @@ export interface LandingCorrectionOptions {
  * - 另设 1200ms 总兜底；点击后 400ms 内一次 scroll 都没有（本来就停在目标上）也直接检查；
  * - 量出的差值超过容差 → 在 rAF 里 `scrollTop += delta` **非平滑**校正一次；
  * - 校正后观察 300ms：若布局又变、把标题推离落点，允许再校正一次（总次数 ≤ 2）；
- * - 落点确认后再挂 **6s 看守**：内容在跳转之后才长高（实测 2.5s，延迟接口可到 5s）时，把标题对回落点线；
+ * - 落点确认后再挂 **10s 看守**：内容在跳转之后才长高（实测 2.5s，延迟接口可到 5s）时，把标题对回落点线；
  *   看守只修落点，不碰 active，也不重新钉住；
  * - wheel / touchmove / 滚动翻页键 / 外部滚动 / 新跳转 → 立刻取消校正与看守，用户的滚动永远赢。
  *
- * 返回取消函数（新跳转、卸载时调用）：既停校正，也停 6s 看守。
+ * 返回取消函数（新跳转、卸载时调用）：既停校正，也停 10s 看守。
  */
 export function armLandingCorrection({
   scroller,
@@ -113,7 +113,7 @@ export function armLandingCorrection({
   let capTimer = 0;
   let corrections = 0;
   let finished = false;
-  /** 落点看守的停止函数（落点确认后启动，覆盖 6s 内的延迟布局）。 */
+  /** 落点看守的停止函数（落点确认后启动，覆盖 10s 内的延迟布局）。 */
   let stopWatch: (() => void) | null = null;
 
   const later = (run: () => void, ms: number) => {
@@ -162,7 +162,7 @@ export function armLandingCorrection({
   /**
    * 收尾并解除钉住，回到正常跟随。
    *
-   * `watchLate` 为 true 时再挂一个 6s 的**落点看守**：只修落点，不碰 active、不重新钉住，
+   * `watchLate` 为 true 时再挂一个 10s 的**落点看守**：只修落点，不碰 active、不重新钉住，
    * 用户一滚就撤。深链与用户主动打断（wheel/touch/滚动键）不走看守。
    */
   function finish(watchLate = false) {
@@ -275,7 +275,7 @@ export function armLandingCorrection({
     }
     const delta = measure();
     if (delta === 0 || corrections >= MAX_LANDING_CORRECTIONS) {
-      // 落点已经对了，但数据可能还在长高：交给 6s 看守继续盯。
+      // 落点已经对了，但数据可能还在长高：交给 10s 看守继续盯。
       finish(true);
       return;
     }
@@ -321,7 +321,7 @@ export function armLandingCorrection({
       correct();
     });
     observer.observe(contentBox);
-    // 300ms 内的尺寸补偿结束不等于「布局稳定」：转交 6s 看守继续盯延迟加载。
+    // 300ms 内的尺寸补偿结束不等于「布局稳定」：转交 10s 看守继续盯延迟加载。
     watchTimer = later(() => finish(true), LANDING_RELAYOUT_MS);
   }
 
