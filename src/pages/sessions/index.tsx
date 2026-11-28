@@ -27,7 +27,7 @@ import type { SessionGroupClient, WbVariant } from "@/lib/types";
 import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 import { AddLinkedSessionDialog } from "./add-linked-session-dialog";
-import { CLIENTS, PAGE_SIZE } from "./constants";
+import { CLIENTS, PAGE_SIZE, persistSessionClient, readSessionClientPreference } from "./constants";
 import { ScanProgressHint } from "@/components/scan-progress-hint";
 
 import { ClientMark, GroupSkeleton, ProjectSection, SessionGroupCard } from "./group-list";
@@ -46,7 +46,7 @@ function timeOfDay(timestamp: number): string {
 
 export default function SessionsPage() {
   const { accounts, fetchAll } = useAccountsStore();
-  const [client, setClient] = useState<SessionGroupClient>("workbuddy");
+  const [client, setClient] = useState<SessionGroupClient>(readSessionClientPreference);
   const [variantScope, setVariantScope] = useState<WbVariant>("cn");
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -131,6 +131,7 @@ export default function SessionsPage() {
 
   function changeClient(value: string) {
     const next = value as SessionGroupClient;
+    persistSessionClient(next);
     setClient(next);
     setDetailOpen(false);
     setSelectedGroupId(null);
