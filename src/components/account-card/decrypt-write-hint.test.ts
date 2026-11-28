@@ -1,9 +1,10 @@
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { CredentialConfig } from "@/lib/types";
+import type { AccountMeta, CredentialConfig } from "@/lib/types";
 
+import { AccountCard } from "../account-card";
 import {
   DECRYPT_WRITE_HINT_DESCRIPTION,
   DECRYPT_WRITE_HINT_TITLE,
@@ -97,5 +98,53 @@ describe("渲染：文案、语义与两个原生按钮", () => {
     const html = render({ compact: true });
     expect(html).toContain("一键开启");
     expect(html).toContain("不再提示");
+  });
+});
+
+describe("卡片插槽：提示渲染在该卡片内部", () => {
+  const ACCOUNT: AccountMeta = {
+    id: "acc-1",
+    uid: "u-1",
+    email: "user@example.com",
+    nickname: "测试账号",
+    enterpriseName: null,
+    expiresAt: null,
+    refreshExpiresAt: null,
+    refreshedAt: null,
+    createdAt: null,
+    needsRelogin: false,
+    needsReloginReason: null,
+  };
+
+  function renderCard(hint?: ReactNode): string {
+    return renderToStaticMarkup(
+      createElement(AccountCard, {
+        account: ACCOUNT,
+        onDelete: () => {},
+        featuresDisabled: false,
+        decryptWriteHint: hint,
+      }),
+    );
+  }
+
+  it("传槽时出现在 <article> 内部（不是网格级横幅）", () => {
+    const html = renderCard(
+      createElement(DecryptWriteHint, {
+        accountName: "测试账号",
+        onEnable: () => {},
+        onDismiss: () => {},
+      }),
+    );
+    const articleStart = html.indexOf("<article");
+    const articleEnd = html.indexOf("</article>");
+    const hintAt = html.indexOf(DECRYPT_WRITE_HINT_TITLE);
+
+    expect(articleStart).toBeGreaterThanOrEqual(0);
+    expect(hintAt).toBeGreaterThan(articleStart);
+    expect(hintAt).toBeLessThan(articleEnd);
+  });
+
+  it("不传槽时整张卡不出现提示（其余账号行为不变）", () => {
+    expect(renderCard()).not.toContain(DECRYPT_WRITE_HINT_TITLE);
   });
 });

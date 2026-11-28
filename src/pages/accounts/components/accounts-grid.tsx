@@ -94,28 +94,15 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
    *
    * 只取**展示顺序里的第一张**信封账号，避免 N 张卡各弹一个相同的提示；
    * 配置未加载 / 已提示过 / 写解密已开启时 `find` 直接落空，不渲染任何东西。
-   *
-   * 提示放在网格上方而不是卡片内部：`AccountCard` 不在本轮可改范围，
-   * 且它是「某个账号的一次性说明」而非全页横幅——账号名写进正文，用户能对上是哪张卡。
+   * 提示通过 `AccountCard` 的 `decryptWriteHint` 槽渲染在**该卡片内部**（头部之后、积分区
+   * 之前），不占网格行、不做全页横幅。
    */
   const decryptHintAccount = orderedAccounts.find((account) =>
     shouldShowDecryptWriteHint(account, credentialConfig.config),
   );
 
   return (
-    <>
-      {decryptHintAccount && (
-        <div className="mb-3">
-          <DecryptWriteHint
-            accountName={displayName(decryptHintAccount)}
-            compact={compact}
-            busy={credentialConfig.saving}
-            onEnable={credentialConfig.enableWriteDecrypt}
-            onDismiss={credentialConfig.dismissFirstPrompt}
-          />
-        </div>
-      )}
-      <div className={cn("grid min-w-0 gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
+    <div className={cn("grid min-w-0 gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
       {/* 不要给这个网格加 items-start：它会覆盖 Grid 默认的 stretch，让同排卡片因内容长度不同而
           高低参差。卡片内部 article 是 flex-col、内容区是 flex-1，会自动吸收差额、footer 自动贴底对齐。 */}
       {orderedAccounts.map((account) => (
@@ -162,9 +149,19 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
           onSwitchJetbrains={page.setJetbrainsSwitchTarget}
           enabledTools={enabledTools}
           featuresDisabled={false}
+          decryptWriteHint={
+            decryptHintAccount?.id === account.id ? (
+              <DecryptWriteHint
+                accountName={displayName(account)}
+                compact={compact}
+                busy={credentialConfig.saving}
+                onEnable={credentialConfig.enableWriteDecrypt}
+                onDismiss={credentialConfig.dismissFirstPrompt}
+              />
+            ) : undefined
+          }
         />
       ))}
-      </div>
-    </>
+    </div>
   );
 }
