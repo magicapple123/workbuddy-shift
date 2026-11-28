@@ -503,8 +503,14 @@ fn assemble_report(input: &ReportInput, sources: &ReportSources, omit_log: bool)
         body.push("  无记录".to_string());
     } else {
         for event in &facts.credential_events {
+            // 节流窗口内的重复被合并成一行 `count`；`×N` 只在真的压过时才出现。
+            let repeat = if event.count >= 2 {
+                format!(" ×{}", event.count)
+            } else {
+                String::new()
+            };
             body.push(format!(
-                "  #{} {} {}/{}",
+                "  #{} {} {}/{}{repeat}",
                 event.account,
                 format_timestamp_with_offset(event.ts, offset),
                 event.action,
