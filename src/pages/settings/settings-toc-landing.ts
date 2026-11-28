@@ -32,6 +32,18 @@ const LANDING_FIRST_CHECK_MS = 400;
 const LANDING_RELAYOUT_MS = 300;
 /** 落点校正次数上限：一次校正 + 一次布局补偿。 */
 const MAX_LANDING_CORRECTIONS = 2;
+/**
+ * 落点确认后继续看守的时长：覆盖「数据加载完成得比滚动晚」的二次长高。
+ *
+ * QA 实测：加载后 0.56s 点「凭据」，1.09s 落点正好 96px；2.59s 时上方卡片长高，
+ * 标题被推到 133px（差 37px），而滚动早已停稳、300ms 的校正窗口也已经结束。
+ * 高亮仍是对的（钉住/判定没坏），但落点偏低，属于同一根因的尾巴。
+ */
+const LAYOUT_WATCH_MS = 3000;
+/** 看守期间最多补几次：防止持续抖动时无限拉锯。 */
+const MAX_WATCH_ADJUSTMENTS = 4;
+/** 看守轮询间隔：内容长高不一定触发 scroll，轮询最稳（3s 内约 20 次测量，代价可忽略）。 */
+const LAYOUT_POLL_MS = 150;
 
 /** 触发「用户要自己滚」的按键：滚动类按键，普通输入不算。深链解钉与取消落点校正共用。 */
 export const SCROLL_KEYS = new Set([
@@ -75,9 +87,11 @@ export interface LandingCorrectionOptions {
  * - 另设 1200ms 总兜底；点击后 400ms 内一次 scroll 都没有（本来就停在目标上）也直接检查；
  * - 量出的差值超过容差 → 在 rAF 里 `scrollTop += delta` **非平滑**校正一次；
  * - 校正后观察 300ms：若布局又变、把标题推离落点，允许再校正一次（总次数 ≤ 2）；
- * - wheel / touchmove / 滚动翻页键 / 新跳转 → 立刻取消并解除钉住，用户的滚动永远赢。
+ * - 落点确认后再挂 **3s 看守**：内容在跳转之后才长高（实测 2.5s）时，把标题对回落点线；
+ *   看守只修落点，不碰 active，也不重新钉住；
+ * - wheel / touchmove / 滚动翻页键 / 外部滚动 / 新跳转 → 立刻取消校正与看守，用户的滚动永远赢。
  *
- * 返回取消函数（新跳转、卸载时调用；已收尾后调用是空操作）。
+ * 返回取消函数（新跳转、卸载时调用）：既停校正，也停 3s 看守。
  */
 export function armLandingCorrection({
   scroller,
@@ -99,6 +113,8 @@ export function armLandingCorrection({
   let capTimer = 0;
   let corrections = 0;
   let finished = false;
+  /** 落点看守的停止函数（落点确认后启动，覆盖 3s 内的延迟布局）。 */
+  let stopWatch: (() => void) | null = null;
 
   const later = (run: () => void, ms: number) => {
     const handle = window.setTimeout(() => {
@@ -124,6 +140,9 @@ export function armLandingCorrection({
 
   /** 拆掉监听器与定时器。不动钉住状态（可能是被新跳转接管）。 */
   function stop() {
+    // 看守独立于校正生命周期：即便校正早已收尾，新跳转/卸载也要能停掉它。
+    stopWatch?.();
+    stopWatch = null;
     if (finished) return false;
     finished = true;
     scroller.removeEventListener("scroll", onScroll);
@@ -140,10 +159,84 @@ export function armLandingCorrection({
     return true;
   }
 
-  /** 收尾并解除钉住，回到正常跟随。 */
-  function finish() {
+  /**
+   * 收尾并解除钉住，回到正常跟随。
+   *
+   * `watchLate` 为 true 时再挂一个 3s 的**落点看守**：只修落点，不碰 active、不重新钉住，
+   * 用户一滚就撤。深链与用户主动打断（wheel/touch/滚动键）不走看守。
+   */
+  function finish(watchLate = false) {
     if (!stop()) return;
     if (stillMine()) pinnedRef.current = null;
+    if (watchLate) startLayoutWatch();
+  }
+
+  /**
+   * 落点确认后的短期布局看守：内容在跳转之后才长高时，把标题重新对回落点线。
+   *
+   * 为什么不用 ResizeObserver 观察 `contentBox`：它只是第一节的容器，后面卡片的
+   * 高度变化不会改变它自己的盒子尺寸（实测 2.5s 那次长高就没触发）。这里改用轮询
+   * 直接量目标标题，任何位置的长高都能看见。
+   *
+   * 安全阀：外部 scroll（用户拖滚动条 / 焦点跳转）让 `scrollTop` 偏离基准 >1px 就停；
+   * wheel / touchmove / 滚动键立刻停；最多补 {@link MAX_WATCH_ADJUSTMENTS} 次。
+   */
+  function startLayoutWatch() {
+    if (typeof window === "undefined") return;
+    let stopped = false;
+    let baseline = scroller.scrollTop;
+    let adjustments = 0;
+    const until = Date.now() + LAYOUT_WATCH_MS;
+    let timer = 0;
+
+    const cleanup = () => {
+      if (stopped) return;
+      stopped = true;
+      window.clearTimeout(timer);
+      scroller.removeEventListener("scroll", onExternalScroll);
+      window.removeEventListener("wheel", cleanup);
+      window.removeEventListener("touchmove", cleanup);
+      window.removeEventListener("keydown", onKeyDownWatch);
+      if (stopWatch === cleanup) stopWatch = null;
+    };
+    const onExternalScroll = () => {
+      if (Math.abs(scroller.scrollTop - baseline) > 1) cleanup();
+    };
+    const onKeyDownWatch = (event: Event) => {
+      if (SCROLL_KEYS.has((event as KeyboardEvent).key)) cleanup();
+    };
+    const tick = () => {
+      if (stopped) return;
+      // 目标被搜索/条件渲染摘掉：别再量一个已经不在文档里的节点。
+      if (!target.isConnected) {
+        cleanup();
+        return;
+      }
+      // 用户已经滚走：不要把他拉回来。
+      if (Math.abs(scroller.scrollTop - baseline) > 1) {
+        cleanup();
+        return;
+      }
+      if (Date.now() >= until || adjustments >= MAX_WATCH_ADJUSTMENTS) {
+        cleanup();
+        return;
+      }
+      const delta = measure();
+      if (delta !== 0) {
+        adjustments += 1;
+        scroller.scrollTop += delta;
+        // 自己滚出来的 scroll 事件不能被当成「用户滚动」：先更新基准。
+        baseline = scroller.scrollTop;
+      }
+      timer = window.setTimeout(tick, LAYOUT_POLL_MS);
+    };
+
+    scroller.addEventListener("scroll", onExternalScroll, { passive: true });
+    window.addEventListener("wheel", cleanup, { passive: true });
+    window.addEventListener("touchmove", cleanup, { passive: true });
+    window.addEventListener("keydown", onKeyDownWatch, { passive: true });
+    timer = window.setTimeout(tick, LAYOUT_POLL_MS);
+    stopWatch = cleanup;
   }
 
   /** 用户真的动手滚了：待执行的校正作废，钉住也解除。 */
@@ -187,13 +280,14 @@ export function armLandingCorrection({
     }
     const delta = measure();
     if (delta === 0 || corrections >= MAX_LANDING_CORRECTIONS) {
-      finish();
+      // 落点已经对了，但数据可能还在长高：交给 3s 看守继续盯。
+      finish(true);
       return;
     }
     // 目标就在页面最顶上（如「外观」）：标题本来就够不到落点线（滚不动负距离），
     // 往下补 100+px 会把页头滚出视野，那不是校正而是新的错误落点。
     if (delta > 0 && scroller.scrollTop <= 1) {
-      finish();
+      finish(false);
       return;
     }
     corrections += 1;
@@ -220,7 +314,7 @@ export function armLandingCorrection({
   /** 校正只做一次；但 300ms 内布局又长高把标题推走时，允许再补一次。 */
   function watchRelayout() {
     if (corrections >= MAX_LANDING_CORRECTIONS || !contentBox || typeof ResizeObserver === "undefined") {
-      finish();
+      finish(true);
       return;
     }
     observer = new ResizeObserver(() => {
@@ -232,7 +326,8 @@ export function armLandingCorrection({
       correct();
     });
     observer.observe(contentBox);
-    watchTimer = later(finish, LANDING_RELAYOUT_MS);
+    // 300ms 内的尺寸补偿结束不等于「布局稳定」：转交 3s 看守继续盯延迟加载。
+    watchTimer = later(() => finish(true), LANDING_RELAYOUT_MS);
   }
 
   scroller.addEventListener("scroll", onScroll, { passive: true });
