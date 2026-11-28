@@ -14,7 +14,7 @@ import type {
 import { RestoreDefaultsRow, stripDefaults } from "./restore-defaults";
 import { SettingsFieldRow, SettingsGroup } from "./rows";
 
-/** 限额监听：总开关 + hook 接入状态（CLI / WorkBuddy 实时上报，IDE 仍走日志扫描）。 */
+/** 限额监听：总开关 + hook 接入状态（CLI / WorkBuddy 实时上报，桌面 IDE 与 VS Code 插件走日志扫描）。 */
 export function RateLimitCard() {
   const [config, setConfig] = useState<RateLimitConfig | null>(null);
   const [status, setStatus] = useState<RateLimitHookStatus | null>(null);
@@ -170,8 +170,8 @@ export function RateLimitCard() {
   // IDE 的限额只有日志一条来源：扫描开关关闭时文案不能再说「仍按日志扫描」。
   const ideNote =
     config?.scanIdeLogs === false
-      ? "CodeBuddy 桌面 IDE 的日志扫描已关闭"
-      : "CodeBuddy 桌面 IDE 无事件，仍按日志扫描";
+      ? "CodeBuddy 桌面 IDE 与 VS Code 插件的日志扫描已关闭"
+      : "CodeBuddy 桌面 IDE 与 VS Code 插件无事件，仍按日志扫描";
   const hookDescription = status
     ? existingTargets.length === 0
       ? `未检测到 CodeBuddy CLI / WorkBuddy 客户端：没有可接入的配置（${ideNote}）`
