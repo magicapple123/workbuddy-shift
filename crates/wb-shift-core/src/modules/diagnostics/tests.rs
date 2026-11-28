@@ -555,3 +555,50 @@ fn credential_health_line_lists_states_without_identity() {
     }
     std::fs::remove_dir_all(&dir).expect("清理临时目录");
 }
+
+/// 推断来源用中文后缀标注：无 `credentialSource` 但含 `auth` + `account` → `local（推断）`；
+/// 显式 `credentialSource: "local"` 不带后缀（有据可查的就不该说成推断）。
+#[test]
+fn inferred_source_is_marked_with_chinese_suffix() {
+    let now = 1_700_000_000_000i64;
+    let accounts = vec![
+        json!({
+            "access_token": "TOKEN-A",
+            "auth": {"accessToken": "live-a"},
+            "account": {"id": "account-a"},
+        }),
+        json!({
+            "access_token": "TOKEN-B",
+            "credentialSource": "local",
+        }),
+    ];
+    let (dir, log) = temp_log("source-inferred");
+    std::fs::write(&log, "").expect("空日志");
+    let report_facts = ReportFacts {
+        accounts: facts::account_facts(&accounts, now),
+        ..Default::default()
+    };
+    let report = build_report(&input(), &base_sources(log, report_facts));
+    let line_of = |index: &str| {
+        report
+            .lines()
+            .find(|line| line.trim_start().starts_with(index))
+            .unwrap_or_else(|| panic!("缺少 {index} 行：\n{report}"))
+            .to_string()
+    };
+    let inferred = line_of("#1 ");
+    assert!(
+        inferred.contains("来源=local（推断）"),
+        "推断来源应带中文后缀：{inferred}"
+    );
+    let explicit = line_of("#2 ");
+    assert!(
+        explicit.contains("来源=local "),
+        "显式来源应原样输出：{explicit}"
+    );
+    assert!(
+        !explicit.contains("（推断）"),
+        "显式来源不得被标成推断：{explicit}"
+    );
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}

@@ -133,7 +133,7 @@ pub struct AccountFact {
     pub variant: String,
     /// 来源：`oauth` / `local` / `import` / `unknown`。
     pub source: String,
-    /// 该来源是否是推断值（历史账号）——是则报告里加 `?`。
+    /// 该来源是否是推断值（历史账号）——是则报告里加 `（推断）`。
     pub source_inferred: bool,
     /// access token 形态。
     pub token_kind: TokenKind,
